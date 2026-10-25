@@ -56,6 +56,7 @@ impl SoftConstraintsSet {
                         continue;
                     }
                     let inv_inertia = rb.mprops.effective_world_inv_inertia;
+                    let lumped_im = rb.mprops.effective_inv_mass;
                     let (com, _, _) = sb.gather_cluster_velocity(
                         ci,
                         &inv_inertia,
@@ -73,6 +74,10 @@ impl SoftConstraintsSet {
                         slot,
                         com,
                         ref_vel,
+                        lumped_im,
+                        lumped_ii: inv_inertia,
+                        joints_only: !external && !has_user_collider,
+                        fem: None,
                     });
                 }
             }
@@ -90,10 +95,9 @@ impl SoftConstraintsSet {
             // SAFETY: worker-0 exclusive stage.
             let sb = unsafe { &*awake.ptr };
             let slots = &self.slots[awake.slot_start..awake.slot_start + awake.num_particles];
-            let inv_inertia = bodies.get_pose(record.slot).ii;
             let (com, linvel, angvel) = sb.gather_cluster_velocity(
                 record.cluster as usize,
-                &inv_inertia,
+                &record.lumped_ii,
                 |v| bodies.get_pose(slots[v as usize]).translation,
                 |v| bodies.get_vel(slots[v as usize]).linear,
             );
@@ -112,14 +116,50 @@ impl SoftConstraintsSet {
 
     /// The scatter stage of one pass (worker 0, serial): distributes each active cluster's
     /// proxy-slot velocity change since the gather onto its free particles as the rigid field
-    /// `Δv + Δω × r`; `Σ mᵢΔvᵢ` is the impulse the joints applied to the slot.
+    /// `Δv + Δω × r`; `Σ mᵢΔvᵢ` is the impulse the joints applied to the slot. On a FEM body the
+    /// change is turned back into that impulse and spread through the body's augmented mass
+    /// (see [`FemClusterSide`]), and the slot then takes the cluster's resulting velocity.
     pub fn scatter_clusters(&mut self, group: usize, bodies: &mut SolverBodies) {
         let range = self.groups[group].clusters.clone();
+        let pool = &self.fem_responses;
         for record in &mut self.clusters[range] {
             let slot_vels = bodies.get_vel(record.slot);
             let dlin = slot_vels.linear - record.ref_vel.linear;
             let dang = slot_vels.angular - record.ref_vel.angular;
             if dlin == Vector::ZERO && dang == crate::math::AngVector::default() {
+                continue;
+            }
+            if let Some(fem) = record.fem {
+                let impulse = fem_cluster_impulse(&fem, dlin, dang);
+                let n = fem.num_particles as usize;
+                let first = fem.first_slot as usize;
+                for (k, &magnitude) in impulse.iter().enumerate() {
+                    if magnitude == 0.0 {
+                        continue;
+                    }
+                    let start = fem.start as usize + k * n;
+                    for (i, u) in pool[start..start + n].iter().enumerate() {
+                        bodies.vels[first + i].linear += *u * magnitude;
+                    }
+                }
+                // The slot takes the velocity the impulse gave the cluster through the body,
+                // which its mass model only bounds: the next joint pass, and the proxy's pose
+                // integrated from the slot, follow the particles.
+                let awake = &self.awake[record.awake as usize];
+                // SAFETY: worker-0 exclusive stage.
+                let sb = unsafe { &*awake.ptr };
+                let slots = &self.slots[awake.slot_start..awake.slot_start + awake.num_particles];
+                let (_, linvel, angvel) = sb.gather_cluster_velocity(
+                    record.cluster as usize,
+                    &record.lumped_ii,
+                    |v| bodies.get_pose(slots[v as usize]).translation,
+                    |v| bodies.get_vel(slots[v as usize]).linear,
+                );
+                let vels = &mut bodies.vels[record.slot as usize];
+                vels.linear = linvel;
+                vels.angular = angvel;
+                record.ref_vel.linear = linvel;
+                record.ref_vel.angular = angvel;
                 continue;
             }
             let awake = &self.awake[record.awake as usize];
@@ -218,6 +258,31 @@ impl SoftConstraintsSet {
             self.groups[gi].attachments = start..self.attachments.len();
         }
     }
+}
+
+/// The impulse `[P; L]` (linear axes first) a FEM cluster's proxy slot took to change its velocity
+/// by `dlin`, `dang` (see [`FemClusterSide`]).
+pub(crate) fn fem_cluster_impulse(
+    fem: &FemClusterSide,
+    dlin: Vector,
+    dang: crate::math::AngVector,
+) -> [Real; crate::math::SPATIAL_DIM] {
+    use crate::utils::AngularInertiaOps;
+    let p = dlin * fem.inv_im;
+    let l = fem.inv_ii.transform_vector(dang);
+    let mut out = [0.0; crate::math::SPATIAL_DIM];
+    for k in 0..DIM {
+        out[k] = p[k];
+    }
+    #[cfg(feature = "dim2")]
+    {
+        out[DIM] = l;
+    }
+    #[cfg(feature = "dim3")]
+    for k in 0..3 {
+        out[DIM + k] = l[k];
+    }
+    out
 }
 
 #[allow(dead_code)]

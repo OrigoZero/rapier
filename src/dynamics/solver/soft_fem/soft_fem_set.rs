@@ -6,12 +6,12 @@ use crate::alloc_prelude::*;
 use crate::dynamics::solver::soft_constraint::SoftConstraintsSet;
 use crate::dynamics::solver::soft_constraint::soft_attachment::FemAttachment;
 use crate::dynamics::solver::soft_constraint::soft_constraints_set::{
-    FemOverlapSide, FemVolumeSide,
+    FemClusterSide, FemOverlapSide, FemVolumeSide,
 };
 use crate::dynamics::solver::soft_constraint::soft_contact::{CONTACT_ANCHORS, FemContactSide};
 use crate::dynamics::solver::solver_body::SolverBodies;
 use crate::dynamics::{SoftBody, SoftBodyHandle, SoftBodySet, SoftFemParameters};
-use crate::math::{DIM, Matrix, Real, Vector};
+use crate::math::{AngularInertia, DIM, Matrix, Real, SPATIAL_DIM, Vector};
 use core::ops::Range;
 use parry::utils::hashmap::HashMap;
 
@@ -45,6 +45,8 @@ enum FemConstraintRef {
         constraint: u32,
         side: u32,
     },
+    /// `clusters[index]`: a joint end on a region of the body, or on its whole frame.
+    Cluster(u32),
 }
 
 // SAFETY: the pointers are only dereferenced during the solve, where the stage discipline gives
@@ -199,6 +201,7 @@ impl SoftFemSet {
             overlap_warm_impulses,
             overlap_fem_sides,
             fem_responses,
+            clusters,
             ..
         } = soft;
         let mut pool_len = 0u32;
@@ -298,6 +301,24 @@ impl SoftFemSet {
             }
         }
 
+        // Active clusters (the proxies a joint, an impulse or a force acts on): one response per
+        // spatial axis of the cluster's rigid fit.
+        for (index, record) in clusters.iter_mut().enumerate() {
+            record.fem = None;
+            let Some(fi) = self.fem_of(record.awake) else {
+                continue;
+            };
+            let entry = &self.active[fi];
+            record.fem = Some(FemClusterSide {
+                first_slot: entry.first_slot,
+                num_particles: entry.num_particles,
+                start: reserve(SPATIAL_DIM * entry.num_particles as usize),
+                inv_im: Vector::ZERO,
+                inv_ii: AngularInertia::default(),
+            });
+            self.refs[fi].push(FemConstraintRef::Cluster(index as u32));
+        }
+
         // Volume-piece constraints: the range is reserved here, the response updated with the
         // gradients at each substep's prepare (`SoftConstraintsSet::prepare_awake_body`).
         for constraint in volume_constraints.iter_mut() {
@@ -369,10 +390,18 @@ impl SoftFemSet {
     }
 
     /// The response stage's work for `active[index]`: factorizes the body's step matrix and fills
-    /// the responses and gains of every constraint side planned by [`Self::plan_responses`].
+    /// the responses and gains of every constraint side planned by [`Self::plan_responses`], and
+    /// gives the proxy slot of each of the body's clusters that only joints act on the mass the
+    /// cluster has through the body (see [`FemClusterSide`]).
     /// # Safety
-    /// One worker per index per stage; the body writes only its own system, ranges and side gains.
-    pub unsafe fn compute_responses(&self, index: usize, soft: *mut SoftConstraintsSet) {
+    /// One worker per index per stage; the body writes only its own system, ranges, side gains
+    /// and its own clusters' proxy slots in `bodies`.
+    pub unsafe fn compute_responses(
+        &self,
+        index: usize,
+        soft: *mut SoftConstraintsSet,
+        bodies: *mut SolverBodies,
+    ) {
         let entry = &self.active[index];
         let system = unsafe { &mut *entry.system };
         let params = &entry.params;
@@ -434,7 +463,7 @@ impl SoftFemSet {
                         system.load_particle(r.solver_id - first);
                     }
                 }
-                FemConstraintRef::Overlap { .. } => {}
+                FemConstraintRef::Overlap { .. } | FemConstraintRef::Cluster(_) => {}
             }
         }
         system.compute_columns(params);
@@ -554,6 +583,93 @@ impl SoftFemSet {
                         system.response_into(entries, range(sd.warm, n), params);
                     }
                 }
+                FemConstraintRef::Cluster(cluster_index) => {
+                    let record = &mut soft.clusters[cluster_index as usize];
+                    let Some(fem) = record.fem else {
+                        continue;
+                    };
+                    // SAFETY: read-only access to the body's particles and clusters.
+                    let sb = unsafe { &*entry.body };
+                    let Some(cluster) = sb.clusters.get(record.cluster as usize) else {
+                        continue;
+                    };
+                    // The cluster's free particles: their masses and lever arms about their
+                    // centroid, as the gather fits the cluster's rigid motion.
+                    let free: Vec<(u32, Real, Vector)> = cluster
+                        .particles
+                        .iter()
+                        .filter(|&&p| sb.particles[p as usize].inv_mass > 0.0)
+                        .map(|&p| {
+                            let particle = &sb.particles[p as usize];
+                            (p, particle.mass, particle.position)
+                        })
+                        .collect();
+                    let mass: Real = free.iter().map(|f| f.1).sum();
+                    if mass <= 0.0 {
+                        record.fem = None;
+                        continue;
+                    }
+                    let com = free.iter().map(|f| f.2 * f.1).sum::<Vector>() / mass;
+                    let lumped_ii = record.lumped_ii;
+                    // `Jᵀ eₖ` at particle `p`: the impulse on it of a unit impulse along spatial axis `k`.
+                    let jacobian = |k: usize, m: Real, x: Vector| -> Vector {
+                        if k < DIM {
+                            let mut e = Vector::ZERO;
+                            e[k] = m / mass;
+                            e
+                        } else {
+                            cluster_angular_jacobian(&lumped_ii, k - DIM, m, x - com)
+                        }
+                    };
+                    for k in 0..SPATIAL_DIM {
+                        let entries = free.iter().map(move |&(p, m, x)| (p, jacobian(k, m, x)));
+                        system.response_into(entries, range(fem.start + (k * n) as u32, n), params);
+                    }
+                    // `W = J A⁻¹ Jᵀ`: the cluster's velocity change per unit impulse on it.
+                    let mut w = [[0.0; SPATIAL_DIM]; SPATIAL_DIM];
+                    for l in 0..SPATIAL_DIM {
+                        let response = range(fem.start + (l * n) as u32, n);
+                        for k in 0..SPATIAL_DIM {
+                            w[k][l] = free
+                                .iter()
+                                .map(|&(p, m, x)| jacobian(k, m, x).dot(response[p as usize]))
+                                .sum();
+                        }
+                    }
+                    let side = record.fem.as_mut().unwrap();
+                    // The slot is given a mass model `D` the joints can hold (an inverse mass per
+                    // axis and an inverse inertia) that bounds `W` from above, `W ≼ D`: an impulse
+                    // the joints solve through `D` then changes the cluster's velocity by at most
+                    // what they asked for, so the iteration between the joint solve and the
+                    // gather of the true response converges, where the diagonal of `W` alone
+                    // overshoots by the coupling it leaves out and diverges on a compliant body.
+                    // `W ≼ 2 diag(W_lin, W_ang)` for any symmetric positive semi-definite `W`, and
+                    // the linear block is bounded by its largest row sum.
+                    let linear_bound = (0..DIM)
+                        .map(|k| (0..DIM).map(|l| w[k][l].abs()).sum::<Real>())
+                        .fold(0.0, Real::max);
+                    let im = Vector::splat(2.0 * linear_bound);
+                    let usable = linear_bound.is_finite() && linear_bound > 0.0;
+                    if record.joints_only && usable {
+                        let ii = cluster_angular_block(&w) * 2.0;
+                        side.inv_im = Vector::ONE / im;
+                        side.inv_ii = crate::dynamics::soft_body::pseudo_inverse_inertia(ii, 0.0);
+                        // SAFETY: the proxy slot is this cluster's alone (see the method's contract).
+                        let bodies = unsafe { &mut *bodies };
+                        let pose = &mut bodies.poses[record.slot as usize];
+                        pose.im = im;
+                        pose.ii = ii;
+                    } else {
+                        // The slot keeps the cluster's lumped mass, which the contacts on its own
+                        // colliders and its external impulses were solved with.
+                        let lumped_im = record.lumped_im;
+                        side.inv_im = Vector::from_array(core::array::from_fn(|k| {
+                            if lumped_im[k] > 0.0 { 1.0 / lumped_im[k] } else { 0.0 }
+                        }));
+                        side.inv_ii =
+                            crate::dynamics::soft_body::pseudo_inverse_inertia(lumped_ii, 0.0);
+                    }
+                }
             }
         }
     }
@@ -592,6 +708,43 @@ impl SoftFemSet {
     pub fn num_active(&self) -> usize {
         self.active.len()
     }
+}
+
+/// `Jᵀ eₖ` of a cluster's angular axis `k` at a particle of mass `m` and lever arm `r` about the
+/// cluster's centroid: `m (I⁻¹ eₖ) × r`, the impulse a unit angular impulse on the cluster puts on
+/// it (the transpose of `ω = I⁻¹ Σ mᵢ rᵢ × vᵢ`).
+#[cfg(feature = "dim3")]
+fn cluster_angular_jacobian(inv_inertia: &AngularInertia, k: usize, m: Real, r: Vector) -> Vector {
+    use crate::utils::AngularInertiaOps;
+    let mut e = Vector::ZERO;
+    e[k] = 1.0;
+    inv_inertia.transform_vector(e).cross(r) * m
+}
+
+/// See the 3D overload: `m (I⁻¹) perp(r)`, the 2D angular axis being the scalar one.
+#[cfg(feature = "dim2")]
+fn cluster_angular_jacobian(inv_inertia: &AngularInertia, _k: usize, m: Real, r: Vector) -> Vector {
+    Vector::new(-r.y, r.x) * (*inv_inertia * m)
+}
+
+/// The angular block of a cluster's `W = J A⁻¹ Jᵀ`, symmetrized.
+#[cfg(feature = "dim3")]
+fn cluster_angular_block(w: &[[Real; SPATIAL_DIM]; SPATIAL_DIM]) -> AngularInertia {
+    let sym = |a: usize, b: usize| 0.5 * (w[DIM + a][DIM + b] + w[DIM + b][DIM + a]);
+    parry::utils::SdpMatrix3 {
+        m11: sym(0, 0),
+        m12: sym(0, 1),
+        m13: sym(0, 2),
+        m22: sym(1, 1),
+        m23: sym(1, 2),
+        m33: sym(2, 2),
+    }
+}
+
+/// See the 3D overload.
+#[cfg(feature = "dim2")]
+fn cluster_angular_block(w: &[[Real; SPATIAL_DIM]; SPATIAL_DIM]) -> AngularInertia {
+    w[DIM][DIM]
 }
 
 /// The responses of a particle's `DIM` axes (`A⁻¹ e_p ⊗ axis`), into `out` (`DIM` vectors per

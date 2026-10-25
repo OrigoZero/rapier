@@ -148,6 +148,32 @@ pub(crate) struct SoftClusterRecord {
     /// The proxy-slot velocity already accounted in the particles: the scatter distributes
     /// `slot velocity - ref_vel`, the gather re-derives it.
     pub ref_vel: SolverVel<Real>,
+    /// The proxy's mass properties from the cluster's free particles (world axes, frozen for the
+    /// step): the inverse mass and inverse inertia the proxy slot starts the step with. The
+    /// gather derives the cluster's angular velocity through this inverse inertia.
+    pub lumped_im: Vector,
+    pub lumped_ii: AngularInertia,
+    /// Whether only joints act on the proxy this step (no rigid contact on a collider of its
+    /// own, no external impulse or force): every impulse on its slot is then solved after the
+    /// FEM responses give the slot the cluster's augmented mass.
+    pub joints_only: bool,
+    /// The cluster's FEM side when its body is on the FEM solver (see [`FemClusterSide`]).
+    pub fem: Option<FemClusterSide>,
+}
+
+/// A cluster of a FEM soft body: an impulse on its proxy (linear `P`, angular `L`) reaches the
+/// body through its augmented mass, `Δv = A⁻¹ Jᵀ [P; L]`, `J` being the cluster's rigid fit
+/// (`v = Σ mᵢvᵢ / M`, `ω = I⁻¹ Σ mᵢ rᵢ × vᵢ`). The responses `A⁻¹ Jᵀ eₖ`, one per spatial axis
+/// (linear axes first), live in `SoftConstraintsSet::fem_responses` from `start`, one vector per
+/// particle. `inv_im` and `inv_ii` turn a change of the proxy slot's velocity back into the impulse
+/// that made it: the inverse of the mass the slot was given.
+#[derive(Copy, Clone, Debug)]
+pub(crate) struct FemClusterSide {
+    pub first_slot: u32,
+    pub num_particles: u32,
+    pub start: u32,
+    pub inv_im: Vector,
+    pub inv_ii: AngularInertia,
 }
 
 /// The soft-body constraints of one step.
