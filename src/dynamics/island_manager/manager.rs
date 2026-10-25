@@ -363,8 +363,8 @@ impl IslandManager {
         dt: Real,
         length_unit: Real,
     ) {
-        // A soft-frame proxy's velocities are its cluster's average, so the sleep rule reads the
-        // soft body's fastest particle instead.
+        // A soft-frame proxy's velocities are its cluster's average, so the sleep rule reads how
+        // far the soft body's particles moved over the last step instead (see `sleep_speed`).
         // TODO: have the soft-body code write a frame-velocity estimate into the rigid body?
         let sq_linvel = if rb.body_type == RigidBodyType::SoftFrame {
             let speed = soft_bodies

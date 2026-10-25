@@ -267,9 +267,25 @@ pub(super) fn sync_soft_body(
         max_speed = max_speed.max(p.velocity.length());
     }
     // The soft body's own sleep rule runs on its proxies at the start of the next step
-    // (`RigidBodyActivation::update_energy`), on the fastest particle.
+    // (`RigidBodyActivation::update_energy`), on the farthest any particle moved over this step:
+    // the drift rule a dynamic rigid body sleeps by. A particle of a body at rest can hold a
+    // velocity the solver's last pass leaves it with while its position stands still from step
+    // to step, so the velocities alone can keep a body at rest awake for good.
+    let mut max_travel: Real = 0.0;
+    let measured = sb.sleep_reference.len() == sb.particles.len();
+    if measured {
+        for (p, start) in sb.particles.iter().zip(&sb.sleep_reference) {
+            max_travel = max_travel.max((p.position - *start).length());
+        }
+    }
+    sb.sleep_reference.clear();
+    sb.sleep_reference.extend(sb.particles.iter().map(|p| p.position));
     if !plastic_flowing {
-        sb.sleep_speed = max_speed;
+        sb.sleep_speed = if measured {
+            max_travel * crate::utils::inv(dt)
+        } else {
+            max_speed
+        };
     }
     outcome.margin = Some(max_speed * dt);
 
