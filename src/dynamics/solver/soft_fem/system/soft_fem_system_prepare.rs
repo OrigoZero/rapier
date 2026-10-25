@@ -50,14 +50,15 @@ impl SoftFemSystem {
         self.response.resize(n, Vector::ZERO);
         self.clear_columns();
 
-        let (mu, lambda) = sb.material.lame_parameters();
-        let zeta = sb.material.elastic_damping_ratio;
         let elastic = matches!(
             sb.cell_model,
             SoftBodyCellModel::Corotational | SoftBodyCellModel::NeoHookean
         );
         self.cells.clear();
         for c in &sb.cells {
+            let material = sb.element_material(c.material);
+            let (mu, lambda) = material.lame_parameters();
+            let zeta = material.elastic_damping_ratio;
             // A degenerate cell, one with no material, or the `Volume` cell model (a volume
             // element instead, see `prepare_volume_cells`): no elastic element.
             let volume = if elastic && mu > 0.0 {
@@ -100,11 +101,11 @@ impl SoftFemSystem {
         if sb.cell_model != SoftBodyCellModel::Volume {
             return;
         }
-        let softness = sb.material.volume_softness;
         for (ci, c) in sb.cells.iter().enumerate() {
             if c.rest_volume == 0.0 {
                 continue;
             }
+            let softness = sb.element_material(c.material).volume_softness;
             let rest: [Vector; MAX_CONSTRAINT_PARTICLES] =
                 core::array::from_fn(|k| sb.particles[c.vertices[k] as usize].rest_position);
             let grad = SoftBody::cell_volume_gradients(rest);
@@ -158,13 +159,21 @@ impl SoftFemSystem {
     fn prepare_springs(&mut self, sb: &SoftBody) {
         self.springs.clear();
         for e in &sb.edges {
+            let material = sb.element_material(e.material);
             let softness = e.softness.unwrap_or(match e.kind {
-                SoftBodyEdgeKind::Structural => sb.material.edge_softness,
-                SoftBodyEdgeKind::Bend => sb.material.bend_softness,
+                SoftBodyEdgeKind::Structural => material.edge_softness,
+                SoftBodyEdgeKind::Bend => material.bend_softness,
             });
             let w = sb.particles[e.vertices[0] as usize].inv_mass
                 + sb.particles[e.vertices[1] as usize].inv_mass;
-            let (stiffness, beta) = Self::spring_stiffness(&softness, w);
+            // A spring in physical units is its own stiffness, damped by `c = β k`.
+            let (stiffness, beta) = match e.spring {
+                Some(spring) if spring.stiffness > 0.0 && spring.stiffness.is_finite() => (
+                    spring.stiffness,
+                    spring.damping.max(0.0) / spring.stiffness,
+                ),
+                _ => Self::spring_stiffness(&softness, w),
+            };
             let blocks = core::array::from_fn(|k| {
                 self.matrix
                     .block_index(e.vertices[k / 2], e.vertices[k % 2])
@@ -175,7 +184,15 @@ impl SoftFemSystem {
                 rest_length: e.rest_length,
                 stiffness,
                 beta,
-                tension_only: e.tension_only,
+                bounds: e.load_bounds(),
+                yield_limits: e.yield_limits(material),
+                rest_range: {
+                    let initial = e.initial_rest_length();
+                    (
+                        (initial * (1.0 - material.edge_plastic_bound(-1.0))).max(Real::EPSILON).min(e.rest_length),
+                        (initial * (1.0 + material.edge_plastic_bound(1.0))).max(e.rest_length),
+                    )
+                },
             });
         }
     }
@@ -184,8 +201,8 @@ impl SoftFemSystem {
     #[cfg(feature = "dim3")]
     fn prepare_dihedrals(&mut self, sb: &SoftBody) {
         self.dihedrals.clear();
-        let softness = sb.material.bend_softness;
         for d in &sb.dihedrals {
+            let softness = sb.element_material(d.material).bend_softness;
             let pos: [Vector; 4] =
                 core::array::from_fn(|k| sb.particles[d.vertices[k] as usize].position);
             let mut grad = [Vector::ZERO; 4];

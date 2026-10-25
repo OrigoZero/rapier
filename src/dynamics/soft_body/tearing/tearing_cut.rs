@@ -325,8 +325,9 @@ impl SoftBody {
                 inv_mass: crate::utils::inv(mass),
                 force: Vector::ZERO,
                 next_position: None,
-                // New material, not a copy: its own root.
+                // New material, not a copy: its own root, and no author's number.
                 split_root: self.particles.len() as u32,
+                tag: u32::MAX,
                 ..if k == 0 { pa } else { pb }
             });
             inserted[k] = self.particles.len() as u32 - 1;

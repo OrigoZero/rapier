@@ -46,8 +46,9 @@ impl SoftBodyEdge {
     }
 
     /// Flows the rest length toward `length` when the strain exceeds the material's edge yield
-    /// ([`SoftBodyMaterial::edge_plastic_yield`]; `dt`: the step length). Returns whether the edge
-    /// flowed significantly (such a body is kept awake).
+    /// ([`SoftBodyMaterial::edge_plastic_yield`]); `dt`: the step length. Returns whether the
+    /// edge flowed significantly (such a body is kept awake). An edge carrying its yield force
+    /// ([`SoftBodyMaterial::edge_yield_force`]) flows within the solver's substeps instead.
     pub(crate) fn plastic_flow(
         &mut self,
         length: Real,
@@ -67,7 +68,8 @@ impl SoftBodyEdge {
         if !allowed || strain.abs() <= yield_strain {
             return false;
         }
-        // The rest length that would leave exactly the yield strain: only the excess flows.
+        // The rest length that would leave exactly the yield strain: only the excess flows, at
+        // the creep rate.
         let signed_yield = if strain > 0.0 {
             yield_strain
         } else {
@@ -76,11 +78,13 @@ impl SoftBodyEdge {
         let target = length / (1.0 + signed_yield);
         let blend = (material.edge_plastic_creep * dt).min(1.0);
         let initial = self.initial_rest_length();
-        let max = material.edge_plastic_max.max(0.0);
-        let new_rest = (self.rest_length + (target - self.rest_length) * blend).clamp(
-            initial * (1.0 - max).max(Real::EPSILON),
-            initial * (1.0 + max),
-        );
+        // Within the plastic bounds; a set a yield force carried past one stays where it is.
+        let shortest = (initial * (1.0 - material.edge_plastic_bound(-1.0)))
+            .max(Real::EPSILON)
+            .min(self.rest_length);
+        let longest = (initial * (1.0 + material.edge_plastic_bound(1.0))).max(self.rest_length);
+        let new_rest =
+            (self.rest_length + (target - self.rest_length) * blend).clamp(shortest, longest);
         let increment = (new_rest - self.rest_length).abs() / initial;
         // The warm-start impulse followed the old length error; it scales with what is left of it.
         let error = length - self.rest_length;
@@ -91,7 +95,34 @@ impl SoftBodyEdge {
         self.plastic_strain = new_rest / initial - 1.0;
         increment > 1.0e-4
     }
+
+    /// Moves the rest length of an actuated edge toward its target by its speed over a step of
+    /// length `dt`, keeping its permanent set. Returns whether it moved.
+    pub(crate) fn advance_actuator(&mut self, dt: Real) -> bool {
+        let Some(actuator) = self.actuator else {
+            return false;
+        };
+        let target = actuator.target.max(0.0);
+        let initial = self.initial_rest_length();
+        // The length read back through a permanent set rounds, so one within a few ulps of the
+        // target has reached it.
+        if !target.is_finite() || (target - initial).abs() <= ACTUATOR_REACHED * target.max(initial) {
+            return false;
+        }
+        let reach = actuator.speed.max(0.0) * dt;
+        let length = if (target - initial).abs() <= reach {
+            target
+        } else {
+            initial + reach.copysign(target - initial)
+        };
+        self.rest_length = length * (1.0 + self.plastic_strain);
+        true
+    }
 }
+
+/// The share of its target an actuated edge's length may stand from it and count as there: a few
+/// ulps, what reading the length back through its permanent set rounds by.
+const ACTUATOR_REACHED: Real = 4.0 * Real::EPSILON;
 
 #[cfg(feature = "dim3")]
 impl SoftBodyDihedral {
@@ -316,10 +347,10 @@ impl SoftBody {
     /// flow (cells with a cell yield, edges with an edge yield): Jacobi sweeps to a least-squares
     /// fit. Returns whether the fit settled; until then it continues at the next step.
     pub(crate) fn fit_rest_positions(&mut self) -> bool {
-        let cells_flow = self.material.plastic_yield > 0.0
+        let cells_flow = self.any_material(|m| m.plastic_yield > 0.0)
             && self.cell_model != SoftBodyCellModel::Volume
             && !self.cells.is_empty();
-        let edges_flow = self.material.edge_plastic_yield > 0.0 && !self.edges.is_empty();
+        let edges_flow = self.any_material(|m| m.edges_flow()) && !self.edges.is_empty();
         if !cells_flow && !edges_flow {
             return true;
         }

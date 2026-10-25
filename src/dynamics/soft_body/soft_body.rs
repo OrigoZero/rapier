@@ -71,6 +71,15 @@ pub struct SoftBody {
     #[cfg_attr(feature = "serde-serialize", serde(default))]
     pub(crate) boundary_element_cells: Vec<u32>,
     pub(crate) material: SoftBodyMaterial,
+    /// The materials of the body's regions: an element whose `material` is `k > 0` takes
+    /// `region_materials[k - 1]`, one whose `material` is `0` the body's own `material`.
+    #[cfg_attr(feature = "serde-serialize", serde(default))]
+    pub(crate) region_materials: Vec<SoftBodyMaterial>,
+    /// The plane the particles are held to, as its unit normal and its offset along it (a
+    /// particle at `x` stands on it when `normal · x == offset`); `None`: the particles move in
+    /// all three dimensions.
+    #[cfg_attr(feature = "serde-serialize", serde(default))]
+    pub(crate) plane: Option<(Vector, Real)>,
     pub(crate) cell_model: SoftBodyCellModel,
     /// Which solver simulates this body's elasticity.
     #[cfg(feature = "fem")]

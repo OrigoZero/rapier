@@ -107,6 +107,8 @@ pub(super) struct SplitLog {
     /// The segments a cut inserted particles into, as `[a, b, p, q]`: the segment `(a, b)` became
     /// `(a, p)` and `(q, b)`.
     pub inserted: Vec<[u32; 4]>,
+    /// The particle pairs of the authored edges removed whole.
+    pub removed_links: Vec<[u32; 2]>,
 }
 
 /// Replaces every occurrence of `from` in `vertices` by `to`.

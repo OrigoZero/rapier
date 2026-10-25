@@ -51,6 +51,23 @@ pub struct SoftJointMove {
     pub to: RigidBodyHandle,
 }
 
+/// An authored edge a tear removed from a soft body (see [`crate::dynamics::SoftBodyEdge::tag`]):
+/// the element left the body whole, its particles stayed.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct SoftBodyLinkBreak {
+    /// The number the author gave the edge.
+    pub tag: u32,
+    /// Its two particles (indices in the torn body before the split).
+    pub vertices: [u32; 2],
+    /// The force it carried over its last step, in newtons: positive pulling, negative pushing.
+    pub force: Real,
+    /// Its load as a fraction of its tear threshold when it broke (past `1.0` when the load tore
+    /// it; a break group or a requested tear may break it below that).
+    pub stress: Real,
+    /// Its break group (`0`: none).
+    pub break_group: u32,
+}
+
 /// What a tear or a cut did to a soft body (see `EventHandler::handle_soft_body_tear_event`,
 /// [`crate::dynamics::SoftBodySet::tear`] and [`crate::dynamics::SoftBodySet::cut`]); the
 /// indices of `torn_edges`/`torn_cells` predate the tear, the others follow it, before the split.
@@ -67,6 +84,10 @@ pub struct SoftBodyTearEvent {
     /// The particle pairs of the edges removed for straddling an opened crack: bending edges over
     /// a split particle, quad diagonals across an opened triangle side, edges joining two pieces.
     pub removed_edges: Vec<[u32; 2]>,
+    /// The authored edges the tear removed whole (see [`crate::dynamics::SoftBodyEdge::tag`]),
+    /// the most loaded first: the edge its own load broke leads, the edges its break group
+    /// took along follow.
+    pub broken_links: Vec<SoftBodyLinkBreak>,
     /// The particles the tear passed through, duplicated one copy per piece: `(copy, source)`.
     pub split_particles: Vec<(u32, u32)>,
     /// The particles a cut inserted where it crosses a rope, polyline or wire segment: two per
@@ -125,6 +146,7 @@ impl SoftBodyTearEvent {
                 .chunks_exact(2)
                 .map(|pair| [pair[0], pair[1]]),
         );
+        seeds.extend(self.broken_links.iter().map(|link| link.vertices));
         seeds
     }
 }

@@ -13,5 +13,7 @@ mod tearing_validate;
 #[cfg(test)]
 mod tests;
 
-pub use self::tearing_event::{SoftBodyPiece, SoftBodyTearEvent, SoftClusterSplit, SoftJointMove};
+pub use self::tearing_event::{
+    SoftBodyLinkBreak, SoftBodyPiece, SoftBodyTearEvent, SoftClusterSplit, SoftJointMove,
+};
 pub(super) use super::collision_mesh;

@@ -6,7 +6,7 @@ pub use self::collision_mesh::{
     SoftMeshId, SoftMeshMapping, SoftMeshRef,
 };
 pub use self::soft_body::{SOFT_BODY_MAX_CONSTRAINT_PARTICLES, SoftBody};
-pub use self::soft_body_builder::{SoftBodyBuilder, SoftBodyParticleSettings};
+pub use self::soft_body_builder::{SoftBodyBuilder, SoftBodyParticleSettings, SoftEdgeLaw};
 pub use self::soft_body_cluster::{SoftBodyCluster, SoftClusterRemoval};
 pub(crate) use self::soft_body_cluster::{inertia_noise_floor, pseudo_inverse_inertia};
 pub use self::soft_body_contacts::SoftVolumeContact;
@@ -16,6 +16,7 @@ pub use self::soft_body_elements::SoftBodyDihedral;
 pub use self::soft_body_elements::SoftBodySolver;
 pub use self::soft_body_elements::{
     SoftBodyCell, SoftBodyCellModel, SoftBodyEdge, SoftBodyEdgeKind, SoftBodyParticle,
+    SoftEdgeActuator, SoftEdgeSpring,
 };
 pub use self::soft_body_handle::SoftBodyHandle;
 pub use self::soft_body_material::SoftBodyMaterial;
@@ -55,4 +56,6 @@ mod soft_body_set;
 pub(crate) mod soft_body_shape_matching;
 mod soft_body_volume;
 mod tearing;
-pub use self::tearing::{SoftBodyPiece, SoftBodyTearEvent, SoftClusterSplit, SoftJointMove};
+pub use self::tearing::{
+    SoftBodyLinkBreak, SoftBodyPiece, SoftBodyTearEvent, SoftClusterSplit, SoftJointMove,
+};

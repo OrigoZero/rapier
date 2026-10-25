@@ -538,8 +538,8 @@ impl SoftConstraintsSet {
                 counts[d.color as usize] += 1;
             }
         }
-        let (mu, _) = sb.material.lame_parameters();
         for c in &sb.cells[cells] {
+            let (mu, _) = sb.element_material(c.material).lame_parameters();
             match sb.cell_model {
                 // The FEM solver integrates the volume cells itself; they get no constraint.
                 SoftBodyCellModel::Volume if sb.uses_fem() => {}
@@ -604,13 +604,7 @@ impl SoftConstraintsSet {
         let (edges, dihedrals, cells) = element_ranges(sb, range);
         #[cfg(feature = "dim2")]
         let _ = dihedrals;
-        let material = &sb.material;
         let coeffs_of = |c: &SpringCoefficients<Real>| (c.erp_inv_dt(dt), c.cfm_coeff(dt));
-        let (edge_erp, edge_cfm) = coeffs_of(&material.edge_softness);
-        let (bend_erp, bend_cfm) = coeffs_of(&material.bend_softness);
-        let (vol_erp, vol_cfm) = coeffs_of(&material.volume_softness);
-        let (mu, lambda) = material.lame_parameters();
-        let elastic_zeta = material.elastic_damping_ratio;
         let im_of = |i: u32| -> Real {
             let s = slots[i as usize];
             if s == u32::MAX {
@@ -655,7 +649,11 @@ impl SoftConstraintsSet {
                 rhs: 0.0,
                 impulse,
                 peak_impulse: 0.0,
+                trough_impulse: 0.0,
                 impulse_bounds: [-Real::MAX, Real::MAX],
+                load_bounds: [Real::MAX, Real::MAX],
+                yield_bounds: [Real::MAX, Real::MAX],
+                rest_range: [0.0, Real::MAX],
             }
         };
 
@@ -668,10 +666,14 @@ impl SoftConstraintsSet {
             .skip(edges.start)
             .filter(|_| element_constraints)
         {
-            let (erp, cfm) = match (e.softness, e.kind) {
-                (Some(softness), _) => coeffs_of(&softness),
-                (None, SoftBodyEdgeKind::Structural) => (edge_erp, edge_cfm),
-                (None, SoftBodyEdgeKind::Bend) => (bend_erp, bend_cfm),
+            let material = sb.element_material(e.material);
+            let spring = e
+                .spring
+                .and_then(|spring| spring.softness(im_of(e.vertices[0]) + im_of(e.vertices[1])));
+            let (erp, cfm) = match (spring, e.softness, e.kind) {
+                (Some(softness), _, _) | (None, Some(softness), _) => coeffs_of(&softness),
+                (None, None, SoftBodyEdgeKind::Structural) => coeffs_of(&material.edge_softness),
+                (None, None, SoftBodyEdgeKind::Bend) => coeffs_of(&material.bend_softness),
             };
             let mut constraint = base_constraint(
                 SoftScalarConstraintKind::Distance,
@@ -683,10 +685,33 @@ impl SoftConstraintsSet {
                 cfm,
                 e.impulse,
             );
-            if e.tension_only {
-                constraint.impulse_bounds = [0.0, Real::MAX];
-                constraint.impulse = constraint.impulse.max(0.0);
-            }
+            // The force bounds (a cable pushes with nothing, a strut pulls with nothing, a
+            // bounded edge carries no more than its bound) and the forces a yielding edge gives
+            // way at, as impulses per substep; the substeps flow a yielding edge's rest length
+            // within its plastic range (`SoftScalarConstraint::return_map`).
+            let bound = |force: Real| {
+                if force.is_finite() {
+                    force * dt
+                } else {
+                    Real::MAX
+                }
+            };
+            let (push, pull) = e.load_bounds();
+            let (push_yield, pull_yield) = e.yield_limits(material);
+            constraint.load_bounds = [bound(push), bound(pull)];
+            constraint.yield_bounds = [bound(push_yield), bound(pull_yield)];
+            let initial = e.initial_rest_length();
+            constraint.rest_range = [
+                (initial * (1.0 - material.edge_plastic_bound(-1.0))).max(Real::EPSILON),
+                initial * (1.0 + material.edge_plastic_bound(1.0)),
+            ];
+            constraint.impulse_bounds = [
+                -constraint.load_bounds[0].min(constraint.yield_bounds[0]),
+                constraint.load_bounds[1].min(constraint.yield_bounds[1]),
+            ];
+            constraint.impulse = constraint
+                .impulse
+                .clamp(constraint.impulse_bounds[0], constraint.impulse_bounds[1]);
             out.push_constraint(e.color, constraint);
         }
 
@@ -699,6 +724,7 @@ impl SoftConstraintsSet {
             .skip(dihedrals.start)
             .filter(|_| element_constraints)
         {
+            let (bend_erp, bend_cfm) = coeffs_of(&sb.element_material(d.material).bend_softness);
             let constraint = base_constraint(
                 SoftScalarConstraintKind::Dihedral,
                 SoftScalarConstraintWriteback::Dihedral,
@@ -723,6 +749,8 @@ impl SoftConstraintsSet {
                 // Integrated implicitly by the FEM solver instead (see `soft_fem`).
                 SoftBodyCellModel::Volume if sb.uses_fem() => continue,
                 SoftBodyCellModel::Volume => {
+                    let (vol_erp, vol_cfm) =
+                        coeffs_of(&sb.element_material(c.material).volume_softness);
                     let constraint = base_constraint(
                         SoftScalarConstraintKind::CellVolume,
                         SoftScalarConstraintWriteback::CellVolume,
@@ -741,6 +769,9 @@ impl SoftConstraintsSet {
                         continue;
                     }
                     let neo_hookean = sb.cell_model == SoftBodyCellModel::NeoHookean;
+                    let material = sb.element_material(c.material);
+                    let (mu, lambda) = material.lame_parameters();
+                    let elastic_zeta = material.elastic_damping_ratio;
                     // Constraint-space stiffnesses 2μV₀ / 4μV₀ (diagonal / shear rows) and λV₀
                     // (volumetric, at rest) map to natural frequencies via the effective masses,
                     // ω² = k · Σ w |∇C|²; Neo-Hookean damping/snap-back caps use (2μ + λ)V₀ / 4μV₀.

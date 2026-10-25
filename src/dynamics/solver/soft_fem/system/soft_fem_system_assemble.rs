@@ -3,7 +3,7 @@
 use super::super::soft_fem_sparse::Preconditioner;
 use super::SoftFemSystem;
 use crate::alloc_prelude::*;
-use crate::dynamics::SoftBody;
+use crate::dynamics::{SoftBody, SoftBodyMaterial};
 use crate::dynamics::soft_body::soft_body_shape_matching::extract_rotation;
 use crate::dynamics::solver::soft_constraint::soft_constraints_set::{
     plastic_flow, total_tensile_strain,
@@ -178,32 +178,45 @@ impl SoftFemSystem {
 
     /// Accumulates the distance elements' force and Gauss-Newton tangent.
     fn assemble_springs(&mut self, dt: Real) {
-        for spring in &self.springs {
+        let Self {
+            springs,
+            position,
+            force: forces,
+            matrix,
+            ..
+        } = self;
+        for spring in springs.iter_mut() {
             if spring.stiffness <= 0.0 {
                 continue;
             }
             let a = spring.vertices[0] as usize;
             let b = spring.vertices[1] as usize;
-            let d = self.position[b] - self.position[a];
+            let d = position[b] - position[a];
             let length = d.length();
             if length < 1.0e-9 {
                 continue;
             }
+            // A yielding element gives way at its yield force: its rest length follows the
+            // load within the substep, so it never carries past it. It keeps its elastic
+            // stiffness in the solve, which holds the substep's motion against it.
+            spring.return_map(length);
             let c = length - spring.rest_length;
-            if spring.tension_only && c <= 0.0 {
+            let (magnitude, stiff) = spring.force(c);
+            let n = d / length;
+            let force = n * magnitude;
+            forces[a] += force;
+            forces[b] -= force;
+            if !stiff {
+                // Slack in the direction it does not load: no force, no stiffness.
                 continue;
             }
-            let n = d / length;
-            let force = n * (spring.stiffness * c);
-            self.force[a] += force;
-            self.force[b] -= force;
 
             let block = outer_product(n, n) * (spring.stiffness * (dt * dt + dt * spring.beta));
             for (k, &slot) in spring.blocks.iter().enumerate() {
                 if slot != u32::MAX {
                     // Diagonal blocks (k = 0, 3) get `+k nnᵀ`, off-diagonal ones `−k nnᵀ`.
                     let sign = if k == 0 || k == 3 { 1.0 } else { -1.0 };
-                    self.matrix.blocks[slot as usize] += block * sign;
+                    matrix.blocks[slot as usize] += block * sign;
                 }
             }
         }
@@ -284,39 +297,49 @@ impl SoftFemSystem {
     /// the step's plastic flow, and the tearing marks of elements strained past `tear_strain`
     /// (the FEM counterpart of `SoftConstraintsSet::writeback_constraints`).
     pub fn writeback(&self, sb: &mut SoftBody, step_dt: Real) {
-        let material = sb.material;
-        let plastic = material.plastic_yield > 0.0 && material.plastic_creep > 0.0;
         let mut flowing = false;
         let mut torn = false;
         // The interior strength reads the particles' flags: taken before the cells are borrowed.
-        let cell_resistance: Vec<Real> = if material.tear_strain.is_some() {
-            sb.cells
-                .iter()
-                .map(|c| sb.effective_tear_resistance(c.tear_resistance, &c.vertices))
-                .collect()
-        } else {
-            Vec::new()
-        };
-        let edge_resistance: Vec<Real> = if material.tears() {
-            sb.edges
-                .iter()
-                .map(|e| sb.effective_tear_resistance(e.tear_resistance, &e.vertices))
-                .collect()
-        } else {
-            Vec::new()
-        };
+        let cell_resistance: Vec<Real> = sb
+            .cells
+            .iter()
+            .map(|c| {
+                if sb.element_material(c.material).tear_strain.is_some() {
+                    sb.effective_tear_resistance(c.tear_resistance, &c.vertices)
+                } else {
+                    1.0
+                }
+            })
+            .collect();
+        let edge_resistance: Vec<Real> = sb
+            .edges
+            .iter()
+            .map(|e| {
+                if sb.element_material(e.material).tears() {
+                    sb.effective_tear_resistance(e.tear_resistance, &e.vertices)
+                } else {
+                    1.0
+                }
+            })
+            .collect();
+        let cell_materials: Vec<SoftBodyMaterial> = sb
+            .cells
+            .iter()
+            .map(|c| *sb.element_material(c.material))
+            .collect();
         for ((cell, out), ci) in self.cells.iter().zip(sb.cells.iter_mut()).zip(0..) {
             out.rotation = cell.rotation;
             if cell.mu <= 0.0 {
                 continue;
             }
+            let material = &cell_materials[ci];
             // The tear strain counts the plastic stretch, as it stood before this step's flow.
             let tensile = total_tensile_strain(&cell.strain, &out.plastic_stretch);
-            if plastic {
+            if material.plastic_yield > 0.0 && material.plastic_creep > 0.0 {
                 let rest0: [Vector; MAX_CONSTRAINT_PARTICLES] = core::array::from_fn(|k| {
                     sb.particles[out.vertices[k] as usize].initial_rest_position
                 });
-                if plastic_flow(out, &cell.strain, cell.inverted, &rest0, &material, step_dt) {
+                if plastic_flow(out, &cell.strain, cell.inverted, &rest0, material, step_dt) {
                     flowing = true;
                 }
             }
@@ -330,44 +353,73 @@ impl SoftFemSystem {
                 }
             }
         }
-        let edge_plasticity =
-            material.edge_plastic_yield > 0.0 && material.edge_plastic_creep > 0.0;
         #[cfg(feature = "dim3")]
-        if edge_plasticity {
-            for (dihedral, d) in self.dihedrals.iter().zip(sb.dihedrals.iter_mut()) {
+        {
+            let dihedral_materials: Vec<SoftBodyMaterial> = sb
+                .dihedrals
+                .iter()
+                .map(|d| *sb.element_material(d.material))
+                .collect();
+            for ((dihedral, d), material) in self
+                .dihedrals
+                .iter()
+                .zip(sb.dihedrals.iter_mut())
+                .zip(&dihedral_materials)
+            {
+                if material.edge_plastic_yield <= 0.0 || material.edge_plastic_creep <= 0.0 {
+                    continue;
+                }
                 let pos: [Vector; 4] =
                     core::array::from_fn(|k| self.position[dihedral.vertices[k] as usize]);
                 let mut grad = [Vector::ZERO; 4];
                 let angle = d.rest_angle + dihedral_gradients(&pos, d.rest_angle, &mut grad);
-                if d.plastic_flow(angle, &material, step_dt) {
+                if d.plastic_flow(angle, material, step_dt) {
                     flowing = true;
                 }
             }
         }
-        if material.tears() || edge_plasticity {
-            for ((spring, edge), ei) in self.springs.iter().zip(sb.edges.iter_mut()).zip(0..) {
-                if spring.rest_length <= 0.0 {
-                    continue;
-                }
-                let d = self.position[spring.vertices[1] as usize]
-                    - self.position[spring.vertices[0] as usize];
-                let length = d.length();
-                if edge.plastic_flow(length, &material, step_dt) {
+        let edge_materials: Vec<SoftBodyMaterial> = sb
+            .edges
+            .iter()
+            .map(|e| *sb.element_material(e.material))
+            .collect();
+        for ((spring, edge), ei) in self.springs.iter().zip(sb.edges.iter_mut()).zip(0..) {
+            let d = self.position[spring.vertices[1] as usize]
+                - self.position[spring.vertices[0] as usize];
+            let length = d.length();
+            // The elastic force of the implicit step's end state, within the element's bounds:
+            // positive resisting a stretch, negative resisting a squeeze.
+            edge.force = if spring.rest_length > 0.0 && length >= 1.0e-9 {
+                spring.force(length - spring.rest_length).0
+            } else {
+                0.0
+            };
+            if spring.rest_length <= 0.0 {
+                continue;
+            }
+            let material = &edge_materials[ei];
+            // The rest length the substeps' flow at the yield force left.
+            if spring.rest_length != edge.rest_length {
+                let initial = edge.initial_rest_length();
+                if (spring.rest_length - edge.rest_length).abs() > 1.0e-4 * initial {
                     flowing = true;
                 }
-                if !material.tears() {
-                    continue;
-                }
-                // The elastic force of the implicit step's end state, resisting stretching; the
-                // stretch is measured against the initial rest length (plastic flow counts).
-                let force = spring.stiffness * (length - spring.rest_length).max(0.0);
-                let load = material.edge_tear_load(length, edge.initial_rest_length(), force)
-                    * crate::utils::inv(edge_resistance[ei]);
-                edge.stress = material.smooth_stress(edge.stress, load, step_dt);
-                if edge.stress > 1.0 {
-                    edge.torn = true;
-                    torn = true;
-                }
+                edge.rest_length = spring.rest_length;
+                edge.plastic_strain = spring.rest_length / initial - 1.0;
+            }
+            if edge.plastic_flow(length, material, step_dt) {
+                flowing = true;
+            }
+            if !material.tears() {
+                continue;
+            }
+            // The stretch is measured against the initial rest length (plastic flow counts).
+            let load = material.edge_tear_load(length, edge.initial_rest_length(), edge.force)
+                * crate::utils::inv(edge_resistance[ei]);
+            edge.stress = material.smooth_stress(edge.stress, load, step_dt);
+            if edge.stress > 1.0 {
+                edge.torn = true;
+                torn = true;
             }
         }
         sb.plastic_flowing |= flowing;

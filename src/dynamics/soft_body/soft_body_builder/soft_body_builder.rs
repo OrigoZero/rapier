@@ -69,6 +69,21 @@ pub struct SoftBodyBuilder {
     /// Per-edge tear-threshold multipliers (indices into the concatenation of `edges` then
     /// `bend_edges`, see [`crate::dynamics::SoftBodyEdge::tear_resistance`]); `1.0` for the others.
     pub edge_tear_resistance: Vec<(u32, Real)>,
+    /// Per-edge laws, parallel to the concatenation of `edges` then `bend_edges` (an edge past
+    /// the end takes the default law); the tension-only, softness and tear-resistance lists
+    /// apply on top of them.
+    pub edge_laws: Vec<SoftEdgeLaw>,
+    /// The numbers the author gave the particles, parallel to `positions` (a particle past the
+    /// end has none; see [`crate::dynamics::SoftBodyParticle::tag`]).
+    pub particle_tags: Vec<u32>,
+    /// The materials of the body's regions (see [`crate::dynamics::SoftBody::region_materials`]).
+    pub region_materials: Vec<SoftBodyMaterial>,
+    /// The material index of each cell, parallel to `cells` (a cell past the end takes `0`, the
+    /// body's own material).
+    pub cell_materials: Vec<u16>,
+    /// The plane the particles are held to, as a normal and an offset (see
+    /// [`crate::dynamics::SoftBody::set_plane`]).
+    pub plane: Option<(Vector, Real)>,
     /// Dihedral bending constraints: shared edge then the two opposite vertices.
     #[cfg(feature = "dim3")]
     pub dihedrals: Vec<[u32; 4]>,
@@ -115,6 +130,58 @@ pub struct SoftBodyBuilder {
     pub particle_settings: SoftBodyParticleSettings,
     /// User data of the soft body.
     pub user_data: u128,
+}
+
+/// The settings an authored edge is built with: what kind of load it carries, the spring
+/// holding it, its bound, its drive, its material, the number that names it and its break group
+/// (see the fields of [`crate::dynamics::SoftBodyEdge`] of the same names).
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct SoftEdgeLaw {
+    /// Only resists stretching (a cable).
+    pub tension_only: bool,
+    /// Only resists squeezing (a strut against a stop).
+    pub compression_only: bool,
+    /// The spring in physical units; `None`: the material's softness.
+    pub spring: Option<super::super::SoftEdgeSpring>,
+    /// The most force the edge carries, in newtons.
+    pub max_force: Real,
+    /// The drive of the edge's rest length.
+    pub actuator: Option<super::super::SoftEdgeActuator>,
+    /// The material index (see [`crate::dynamics::SoftBody::region_materials`]).
+    pub material: u16,
+    /// The number that names the edge (`u32::MAX`: none).
+    pub tag: u32,
+    /// The break group (`0`: none).
+    pub break_group: u32,
+}
+
+impl Default for SoftEdgeLaw {
+    fn default() -> Self {
+        Self {
+            tension_only: false,
+            compression_only: false,
+            spring: None,
+            max_force: Real::INFINITY,
+            actuator: None,
+            material: 0,
+            tag: u32::MAX,
+            break_group: 0,
+        }
+    }
+}
+
+impl SoftEdgeLaw {
+    /// Writes this law into the edge `edge`.
+    pub(crate) fn apply(&self, edge: &mut crate::dynamics::SoftBodyEdge) {
+        edge.tension_only = self.tension_only;
+        edge.compression_only = self.compression_only;
+        edge.spring = self.spring;
+        edge.max_force = self.max_force.max(0.0);
+        edge.actuator = self.actuator;
+        edge.material = self.material;
+        edge.tag = self.tag;
+        edge.break_group = self.break_group;
+    }
 }
 
 impl Default for SoftBodyBuilder {

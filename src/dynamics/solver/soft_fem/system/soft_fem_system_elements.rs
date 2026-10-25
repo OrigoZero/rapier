@@ -65,8 +65,54 @@ pub(super) struct FemSpring {
     pub(super) rest_length: Real,
     pub(super) stiffness: Real,
     pub(super) beta: Real,
-    /// A rope segment: no stiffness under compression.
-    pub(super) tension_only: bool,
+    /// The largest compressive and tensile force the element carries, `(push, pull)`: a rope
+    /// segment pushes with nothing, a strut pulls with nothing, a bounded element carries no
+    /// more than its bound (see `SoftBodyEdge::load_bounds`). Past a bound the element's force
+    /// is the bound (see [`Self::force`]).
+    pub(super) bounds: (Real, Real),
+    /// The forces past which the element yields, `(push, pull)` (`Real::INFINITY`: it does not):
+    /// past one, its rest length flows within the substep so it carries exactly that force
+    /// (see [`Self::return_map`]), down to `rest_range.0` and up to `rest_range.1`.
+    pub(super) yield_limits: (Real, Real),
+    /// The shortest and the longest rest length the element's plastic bounds allow.
+    pub(super) rest_range: (Real, Real),
+}
+
+impl FemSpring {
+    /// The element's force at length error `c` (positive pulling its particles together),
+    /// clamped to its bounds, and whether it carries stiffness: an element slack in the direction
+    /// it does not load (a cable squeezed, a strut stretched) carries none, while one held at a
+    /// nonzero bound keeps its elastic stiffness in the implicit solve, which holds the substep's
+    /// motion against it the way the bound's own constraint would.
+    pub(super) fn force(&self, c: Real) -> (Real, bool) {
+        let force = self.stiffness * c;
+        let (push, pull) = self.bounds;
+        if force > pull {
+            (pull, pull > 0.0)
+        } else if force < -push {
+            (-push, push > 0.0)
+        } else {
+            (force, true)
+        }
+    }
+
+    /// Flows the element's rest length so that, at `length`, it carries no more than its yield
+    /// force (an elastoplastic return mapping), within its rest range.
+    pub(super) fn return_map(&mut self, length: Real) {
+        if self.stiffness <= 0.0 {
+            return;
+        }
+        let (push, pull) = self.yield_limits;
+        let (shortest, longest) = self.rest_range;
+        let trial = self.stiffness * (length - self.rest_length);
+        if trial > pull && self.rest_length < longest {
+            let rest = (length - pull / self.stiffness).min(longest);
+            self.rest_length = self.rest_length.max(rest);
+        } else if trial < -push && self.rest_length > shortest {
+            let rest = (length + push / self.stiffness).max(shortest);
+            self.rest_length = self.rest_length.min(rest);
+        }
+    }
 }
 
 /// One dihedral bending element of a FEM soft body (3D): energy `½ k (θ − θ₀)²`, Gauss-Newton

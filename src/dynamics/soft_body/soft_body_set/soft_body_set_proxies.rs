@@ -287,6 +287,15 @@ pub(super) fn sync_soft_body(
             max_speed
         };
     }
+    // Actuated edges move their rest length toward their targets; a body whose actuators are
+    // still moving stays awake.
+    let mut actuated = false;
+    for e in &mut sb.edges {
+        actuated |= e.advance_actuator(params.dt);
+    }
+    if actuated {
+        sb.sleep_speed = Real::MAX;
+    }
     outcome.margin = Some(max_speed * dt);
 
     // Impact-adaptive substeps: while something moves faster than one particle radius per

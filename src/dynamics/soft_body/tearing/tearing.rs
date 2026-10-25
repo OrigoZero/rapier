@@ -101,7 +101,23 @@ impl SoftBody {
             edges.truncate(keep);
         }
         let mut edges: Vec<u32> = edges.into_iter().map(|(_, i)| i).collect();
+        // A torn edge of a break group takes its whole group with it, whatever the pace.
+        let mut groups: Vec<u32> = edges
+            .iter()
+            .map(|&i| self.edges[i as usize].break_group)
+            .filter(|&g| g != 0)
+            .collect();
+        if !groups.is_empty() {
+            groups.sort_unstable();
+            groups.dedup();
+            for (i, e) in self.edges.iter().enumerate() {
+                if e.break_group != 0 && groups.binary_search(&e.break_group).is_ok() {
+                    edges.push(i as u32);
+                }
+            }
+        }
         edges.sort_unstable();
+        edges.dedup();
         let mut cells = Vec::new();
         for (i, c) in self.cells.iter_mut().enumerate() {
             if core::mem::take(&mut c.torn) {
@@ -139,6 +155,7 @@ impl SoftBody {
             particles: &[],
             split: &log.split_particles,
             inserted: &log.inserted,
+            removed: &log.removed_links,
         };
         self.for_each_mesh_mut(|body, mesh| {
             mesh.remap_topology(body, &remap_tables);

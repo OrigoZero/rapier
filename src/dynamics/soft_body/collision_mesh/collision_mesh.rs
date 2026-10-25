@@ -170,4 +170,7 @@ pub(crate) struct SoftTopologyRemap<'a> {
     pub particles: &'a [u32],
     pub split: &'a [(u32, u32)],
     pub inserted: &'a [[u32; 4]],
+    /// The particle pairs of the authored edges a tear removed whole: a wire drops their
+    /// segments.
+    pub removed: &'a [[u32; 2]],
 }

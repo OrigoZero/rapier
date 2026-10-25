@@ -59,10 +59,23 @@ pub struct SoftBodyMaterial {
     /// nothing.
     #[cfg_attr(feature = "serde-serialize", serde(default = "half"))]
     pub edge_plastic_max: Real,
+    /// Largest permanent stretch an edge may accumulate, as a fraction of its initial length
+    /// (default: `None`, the same bound as a squeeze, [`Self::edge_plastic_max`]): an element that
+    /// may shorten by much and lengthen by little, or the other way round.
+    #[cfg_attr(feature = "serde-serialize", serde(default))]
+    pub edge_plastic_max_stretch: Option<Real>,
     /// Whether the edges take a permanent set under a squeeze, a stretch, or both (default:
     /// both).
     #[cfg_attr(feature = "serde-serialize", serde(default))]
     pub edge_plastic_flow: SoftEdgePlasticFlow,
+    /// Force past which an edge yields (default: `None`, none): while its force along its
+    /// direction would exceed this, the edge carries exactly this force and its rest length
+    /// follows its length within the solver's substeps, whatever [`Self::edge_plastic_creep`]
+    /// is, so the excess load becomes a permanent set (up to `edge_plastic_max` /
+    /// `edge_plastic_max_stretch`, past which the edge carries more again). Read alongside the
+    /// strain yield [`Self::edge_plastic_yield`].
+    #[cfg_attr(feature = "serde-serialize", serde(default))]
+    pub edge_yield_force: Option<Real>,
     /// Strain beyond which elements break (default: `None`, unbreakable): an edge stretched past
     /// this fraction of its initial rest length, or a corotational cell whose largest tensile
     /// principal strain (capped at `1.0`) exceeds it, tears at step end; volume cells never do.
@@ -73,6 +86,11 @@ pub struct SoftBodyMaterial {
     /// torn at the end of the step. Either criterion tears an edge; cells tear on strain only.
     #[cfg_attr(feature = "serde-serialize", serde(default))]
     pub tear_force: Option<Real>,
+    /// Compressive force beyond which the edges break (default: `None`): an edge pushing back
+    /// with more than this along its direction is torn at the end of the step, the way
+    /// [`Self::tear_force`] tears one pulled past it.
+    #[cfg_attr(feature = "serde-serialize", serde(default))]
+    pub crush_force: Option<Real>,
     /// Time constant, in seconds, over which an element's load is smoothed exponentially before the
     /// tear test (default: `0.0`, one step past the threshold tears); applies to the strain and
     /// force criteria alike, and [`crate::dynamics::SoftBodyEdge::stress`] reads the smoothed load.
@@ -135,9 +153,12 @@ impl Default for SoftBodyMaterial {
             edge_plastic_yield: 0.0,
             edge_plastic_creep: 1.0,
             edge_plastic_max: 0.5,
+            edge_plastic_max_stretch: None,
             edge_plastic_flow: SoftEdgePlasticFlow::Both,
+            edge_yield_force: None,
             tear_strain: None,
             tear_force: None,
+            crush_force: None,
             tear_smoothing: 0.0,
             interior_strength: 1.0,
             max_tears_per_step: u32::MAX,
@@ -159,14 +180,35 @@ impl SoftBodyMaterial {
         }
     }
 
-    /// Whether some tear criterion is set (`tear_strain` or `tear_force`).
+    /// Whether some tear criterion is set (`tear_strain`, `tear_force` or `crush_force`).
     pub fn tears(&self) -> bool {
-        self.tear_strain.is_some() || self.tear_force.is_some()
+        self.tear_strain.is_some() || self.tear_force.is_some() || self.crush_force.is_some()
     }
 
-    /// Load of an edge as a fraction of its tear threshold: the larger of its stretch (`length`
-    /// over its initial rest length `rest`) over `tear_strain` and its `force` along its direction
-    /// (positive when resisting stretching) over `tear_force`; compression or no threshold: `0.0`.
+    /// Whether the edges flow plastically: a strain yield with a creep rate, or a yield force
+    /// (which gives way within the solver's substeps, unpaced by the creep rate).
+    pub fn edges_flow(&self) -> bool {
+        (self.edge_plastic_yield > 0.0 && self.edge_plastic_creep > 0.0)
+            || self.edge_yield_force.is_some()
+    }
+
+    /// The largest permanent set an edge takes in the direction of `strain` (a fraction of its
+    /// initial length): [`Self::edge_plastic_max_stretch`] for a stretch when set,
+    /// [`Self::edge_plastic_max`] otherwise.
+    pub(crate) fn edge_plastic_bound(&self, strain: Real) -> Real {
+        if strain > 0.0 {
+            self.edge_plastic_max_stretch
+                .unwrap_or(self.edge_plastic_max)
+                .max(0.0)
+        } else {
+            self.edge_plastic_max.max(0.0)
+        }
+    }
+
+    /// Load of an edge as a fraction of its tear threshold: the largest of its stretch (`length`
+    /// over its initial rest length `rest`) over `tear_strain`, its `force` along its direction
+    /// (positive when resisting stretching) over `tear_force`, and its push (a negative `force`)
+    /// over `crush_force`; no threshold: `0.0`.
     pub(crate) fn edge_tear_load(&self, length: Real, rest: Real, force: Real) -> Real {
         let mut load: Real = 0.0;
         if let Some(tear) = self.tear_strain {
@@ -176,6 +218,9 @@ impl SoftBodyMaterial {
         }
         if let Some(tear) = self.tear_force {
             load = load.max(force.max(0.0) / tear.max(Real::EPSILON));
+        }
+        if let Some(crush) = self.crush_force {
+            load = load.max((-force).max(0.0) / crush.max(Real::EPSILON));
         }
         load
     }
