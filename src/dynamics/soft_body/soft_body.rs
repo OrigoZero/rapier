@@ -110,11 +110,19 @@ pub struct SoftBody {
     /// (see `SoftBody::fit_rest_positions`).
     #[cfg_attr(feature = "serde-serialize", serde(skip))]
     pub(crate) rest_fit_pending: bool,
-    /// The speed the sleep rule reads for this body's cluster proxies: the fastest particle at the
-    /// end of the last step, or `Real::MAX` while the body flows plastically (kept awake).
+    /// The speed the sleep rule reads for this body's cluster proxies: the farthest any particle
+    /// moved over the last step, divided by the step's length, or `Real::MAX` while the body
+    /// flows plastically (kept awake). A step with no [`Self::sleep_reference`] to measure from
+    /// reads the fastest particle's velocity instead.
     /// `RigidBodyActivation::update_energy` compares it against the proxies' activation threshold.
     #[cfg_attr(feature = "serde-serialize", serde(default))]
     pub(crate) sleep_speed: Real,
+    /// Each particle's position at the end of the last step this body was simulated in, which
+    /// [`Self::sleep_speed`] measures the next step's travel from. Empty until the body's first
+    /// step, and after its particles were placed by `SoftBodySet::rest_at`; a reference whose
+    /// length differs from the particles' (a tear or a cut changed them) is not read.
+    #[cfg_attr(feature = "serde-serialize", serde(skip))]
+    pub(crate) sleep_reference: Vec<Vector>,
     /// Set when some edge or cell has a `torn` mark: the tearing pass at the end of the step
     /// removes them (see `SoftBodySet::tear`).
     #[cfg_attr(feature = "serde-serialize", serde(skip))]

@@ -271,6 +271,15 @@ impl SoftBody {
         self.sleeping
     }
 
+    /// The speed this soft body's sleep rule read at the end of its last simulated step: the
+    /// farthest any particle moved over that step, divided by the step's length (the fastest
+    /// particle's velocity on a step with no earlier positions to measure from), or `Real::MAX`
+    /// while the body flows plastically. The body falls asleep once this stays under its
+    /// proxies' activation threshold for their time until sleep.
+    pub fn sleep_speed(&self) -> Real {
+        self.sleep_speed
+    }
+
     /// Wakes this soft body up (effective at the start of the next step, together with the
     /// island of the bodies it touches).
     pub fn wake_up(&mut self) {

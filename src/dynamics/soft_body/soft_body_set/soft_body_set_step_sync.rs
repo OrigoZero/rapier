@@ -526,6 +526,7 @@ impl SoftBodySet {
         sb.sleeping = true;
         sb.modified = false;
         sb.positions_modified = true;
+        sb.sleep_reference.clear();
         true
     }
 

@@ -240,6 +240,7 @@ impl SoftBodyBuilder {
             plastic_flowing: false,
             rest_fit_pending: false,
             sleep_speed: 0.0,
+            sleep_reference: Vec::new(),
             tearing_pending: false,
             topology_version: 0,
             contact_approach_speeds: [None; 2],

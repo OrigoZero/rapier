@@ -1458,8 +1458,9 @@ impl RigidBodyActivation {
 
         let can_sleep = match body_type {
             // A soft-frame proxy's pose is derived from its cluster's particles (fit noise
-            // included), so the drift rule applies to the fastest particle instead
-            // (`sq_linvel` is that speed squared, see `IslandManager::update_body_energy`).
+            // included), so the drift rule applies to the particles instead: `sq_linvel` is the
+            // square of the farthest any particle moved over the last step, over the step's
+            // length (see `IslandManager::update_body_energy`).
             RigidBodyType::SoftFrame => {
                 let linear_threshold = self.normalized_linear_threshold * length_unit;
                 self.normalized_linear_threshold >= 0.0
