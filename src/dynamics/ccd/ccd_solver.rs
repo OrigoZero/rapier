@@ -1,5 +1,8 @@
 use crate::alloc_prelude::*;
-use crate::dynamics::{IntegrationParameters, IslandManager, RigidBodySet, SoftBodySet};
+use crate::dynamics::{
+    ImpulseJointSet, IntegrationParameters, IslandManager, MultibodyJointSet, RigidBodySet,
+    SoftBodySet,
+};
 use crate::geometry::{
     BroadPhaseBvh, Collider, ColliderHandle, ColliderSet, CollisionEvent, NarrowPhase,
 };
@@ -9,6 +12,7 @@ use crate::pipeline::{EventHandler, PhysicsHooks, QueryFilter};
 use crate::prelude::{ActiveEvents, CollisionEventFlags};
 use parry::query::sweep_toi::Sweep;
 
+use super::kinematic_sweeps::{KinematicPairs, KinematicStrike, solve_kinematic_sweeps};
 use super::sweeps::{
     BodyContinuousResult, CcdTargets, PseudoHitMode, collect_fixed_targets, collect_soft_targets,
     is_bullet, map_bodies_parallel, sweep_fast_body,
@@ -22,6 +26,10 @@ use super::sweeps::{
 /// Fast dynamic bodies sweep against fixed colliders and soft-body meshes; `ccd_enabled` makes a
 /// bullet that also sweeps kinematic/dynamic bodies (never other bullets); mesh-like colliders are
 /// never the moving shape; compounds sweep per convex child; `max_ccd_substeps = 0` disables CCD.
+///
+/// Moving kinematic bodies sweep the dynamic bodies in their path before that: a dynamic body a
+/// kinematic body reaches within the step is struck at the time of impact
+/// ([`CCDSolver::solve_kinematic_sweeps`]), whatever either body's `ccd_enabled` says.
 #[derive(Clone, Default)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 pub struct CCDSolver {
@@ -30,6 +38,13 @@ pub struct CCDSolver {
     /// the scene-change flag — re-scanning every collider each step dominated CCD on large scenes.
     #[cfg_attr(feature = "serde-serialize", serde(skip))]
     fixed_targets_cache: Option<FixedTargetsCache>,
+    /// The strikes the kinematic sweeps of the last step resolved.
+    #[cfg_attr(feature = "serde-serialize", serde(skip))]
+    kinematic_strikes: Vec<KinematicStrike>,
+    /// The pairs the kinematic sweeps of the current pass swept, which the bullets' sweeps of
+    /// the same pass leave to them.
+    #[cfg_attr(feature = "serde-serialize", serde(skip))]
+    kinematic_pairs: KinematicPairs,
 }
 
 /// The AABB loosening the cached fixed-target list was built with, paired with the list
@@ -47,6 +62,17 @@ impl CCDSolver {
     /// it is called for you. If not, it must be called manually.
     pub fn invalidate_fixed_targets_cache(&mut self) {
         self.fixed_targets_cache = None;
+    }
+
+    /// The dynamic bodies kinematic bodies struck in the last step
+    /// ([`Self::solve_kinematic_sweeps`]), in the order they were struck.
+    pub fn kinematic_strikes(&self) -> &[KinematicStrike] {
+        &self.kinematic_strikes
+    }
+
+    /// Forgets the strikes of the step before. The pipeline calls it as each step starts.
+    pub fn clear_kinematic_strikes(&mut self) {
+        self.kinematic_strikes.clear();
     }
 
     /// Updates the set of bodies that needs CCD to be resolved.
@@ -99,6 +125,51 @@ impl CCDSolver {
         ccd_active
     }
 
+    /// Sweeps every flagged kinematic body along its motion of the step against the dynamic
+    /// bodies in its path, and strikes each one it reaches at the time of impact: the struck
+    /// body leaves the contact at the velocity of the kinematic surface there, with the pair's
+    /// restitution and friction applied, and ends the step clear of the kinematic body. A
+    /// struck body is woken, and its own CCD flag is set from its new motion so the
+    /// continuous pass that follows ([`Self::solve_continuous`]) sweeps it. Each strike is
+    /// recorded for [`Self::kinematic_strikes`]. A body that touched the kinematic body as the
+    /// step started keeps the velocity the contact solver gave it, and is set back in front of
+    /// the kinematic face when the face overtakes it within the step. The bullets' sweeps of
+    /// the continuous pass that follows leave every pair swept here alone.
+    ///
+    /// Returns `true` if any body was struck or set back.
+    #[profiling::function]
+    #[allow(clippy::too_many_arguments)]
+    pub fn solve_kinematic_sweeps(
+        &mut self,
+        params: &IntegrationParameters,
+        islands: &mut IslandManager,
+        bodies: &mut RigidBodySet,
+        colliders: &ColliderSet,
+        impulse_joints: &ImpulseJointSet,
+        multibody_joints: &MultibodyJointSet,
+        broad_phase: &mut BroadPhaseBvh,
+        narrow_phase: &NarrowPhase,
+        hooks: &dyn PhysicsHooks,
+        events: &dyn EventHandler,
+    ) -> bool {
+        solve_kinematic_sweeps(
+            params.dt,
+            params.allowed_linear_error(),
+            params.prediction_distance(),
+            islands,
+            bodies,
+            colliders,
+            impulse_joints,
+            multibody_joints,
+            broad_phase,
+            narrow_phase,
+            hooks,
+            events,
+            &mut self.kinematic_strikes,
+            &mut self.kinematic_pairs,
+        )
+    }
+
     /// Find the first time a CCD-active body has a non-sensor collider hitting another
     /// non-sensor collider, for the multi-substep splitter.
     ///
@@ -130,7 +201,7 @@ impl CCDSolver {
         let linear_slop = params.allowed_linear_error();
         let fast_bodies: Vec<_> = islands
             .active_bodies()
-            .filter(|h| bodies[*h].ccd.ccd_active)
+            .filter(|h| bodies[*h].ccd.ccd_active && bodies[*h].is_dynamic())
             .collect();
 
         let fractions = map_bodies_parallel(&fast_bodies, hooks, |handle, hooks| {
@@ -150,6 +221,7 @@ impl CCDSolver {
                 dt,
                 linear_slop,
                 PseudoHitMode::Ignore,
+                None,
             )
             .fraction
         });
@@ -161,7 +233,8 @@ impl CCDSolver {
     /// Runs the continuous-collision pass on all fast bodies and clamps their `next_position`
     /// to their earliest time of impact: non-bullets sweep the automatic targets (fixed
     /// colliders and soft-body collision meshes) first, then bullets sweep every (possibly
-    /// already clamped) body; velocities are never modified. Sensor
+    /// already clamped) body, except the kinematic colliders whose contact with them the
+    /// kinematic sweeps of this pass resolved; velocities are never modified. Sensor
     /// crossings the narrow phase would miss entirely emit paired `Started`/`Stopped`
     /// intersection events.
     #[profiling::function]
@@ -186,7 +259,7 @@ impl CCDSolver {
         // the tree leak into the next step's broad phase (pair explosion, ~2x narrow-phase cost).
         let (non_bullets, bullets): (Vec<_>, Vec<_>) = islands
             .active_bodies()
-            .filter(|h| bodies[*h].ccd.ccd_active)
+            .filter(|h| bodies[*h].ccd.ccd_active && bodies[*h].is_dynamic())
             .partition(|h| !is_bullet(&bodies[*h]));
 
         let mut all_results = Vec::new();
@@ -233,6 +306,7 @@ impl CCDSolver {
                     dt,
                     linear_slop,
                     PseudoHitMode::Record,
+                    None,
                 )
             });
             all_results.extend(results);
@@ -250,6 +324,7 @@ impl CCDSolver {
                     QueryFilter::default(),
                 );
                 let (bvh, dispatcher) = (query_pipeline.bvh, query_pipeline.dispatcher);
+                let kinematic_pairs = &self.kinematic_pairs;
                 map_bodies_parallel(&bullets, hooks, |handle, hooks| {
                     sweep_fast_body(
                         handle,
@@ -262,6 +337,7 @@ impl CCDSolver {
                         dt,
                         linear_slop,
                         PseudoHitMode::Record,
+                        Some(kinematic_pairs),
                     )
                 })
             };
@@ -330,6 +406,7 @@ impl CCDSolver {
                 }
             }
         }
+        self.kinematic_pairs.clear();
     }
 
     /// Clamps each impacted body's `next_position` to the interpolated pose at its impact
