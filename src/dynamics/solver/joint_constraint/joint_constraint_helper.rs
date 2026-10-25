@@ -72,6 +72,39 @@ impl AngularLimitParams<Real> {
     }
 }
 
+/// The share of a row's inverse-mass scale below which the inverse mass the row has left after
+/// orthogonalization is rounding error.
+///
+/// A row whose jacobian lies in the degrees of freedom both bodies hold locked, or in the span of
+/// the joint's rows before it, has no inverse mass left in exact arithmetic. Floating point leaves
+/// a few ulps of it, well above `INV_EPSILON`'s absolute 1e-20, and inverting them gives the row
+/// an impulse large enough to throw the bodies. `1e-10` of the scale is a jacobian within ~1e-5
+/// rad of that subspace, far above the rounding a pose carries and far below any direction the
+/// bodies are built to move along.
+const DEPENDENT_ROW_TOLERANCE: Real = 1.0e-10;
+
+impl<N: ScalarType, const LANES: usize> JointConstraint<N, LANES> {
+    /// Records this row's inverse-mass scale: its jacobian against the traces of the bodies'
+    /// effective (lock-projected) inverse masses and inertias. It bounds the inverse mass the row
+    /// can have, and [`JointConstraintHelper::finalize_constraints`] measures what
+    /// orthogonalization leaves of the row's inverse mass against it.
+    pub fn with_lhs_scale(
+        mut self,
+        body1: &JointSolverBody<N, LANES>,
+        body2: &JointSolverBody<N, LANES>,
+    ) -> Self {
+        let imsum = body1.im + body2.im;
+        let mut im_trace = N::zero();
+        for i in 0..DIM {
+            im_trace += imsum[i];
+        }
+        self.lhs_scale = self.lin_jac.gdot(self.lin_jac) * im_trace
+            + self.ang_jac1.gdot(self.ang_jac1) * body1.ii.trace()
+            + self.ang_jac2.gdot(self.ang_jac2) * body2.ii.trace();
+        self
+    }
+}
+
 #[derive(Debug, Copy, Clone)]
 pub struct JointConstraintHelper<N: ScalarType> {
     pub basis: N::Matrix,
@@ -274,12 +307,14 @@ impl<N: ScalarType> JointConstraintHelper<N> {
             ii_ang_jac1,
             ii_ang_jac2,
             inv_lhs: N::zero(), // Will be set during orthogonalization.
+            lhs_scale: N::zero(), // Set by `with_lhs_scale`.
             cfm_coeff,
             cfm_gain: N::zero(),
             rhs,
             rhs_wo_bias,
             writeback_id,
         }
+        .with_lhs_scale(body1, body2)
     }
 
     pub fn motor_linear<const LANES: usize>(
@@ -400,12 +435,14 @@ impl<N: ScalarType> JointConstraintHelper<N> {
             ii_ang_jac1,
             ii_ang_jac2,
             inv_lhs: N::zero(), // Will be set during orthogonalization.
+            lhs_scale: N::zero(), // Set by `with_lhs_scale`.
             cfm_coeff: motor_params.cfm_coeff,
             cfm_gain: motor_params.cfm_gain,
             rhs: rhs_wo_bias,
             rhs_wo_bias,
             writeback_id,
         }
+        .with_lhs_scale(body1, body2)
     }
 
     pub fn lock_linear<const LANES: usize>(
@@ -449,12 +486,14 @@ impl<N: ScalarType> JointConstraintHelper<N> {
             ii_ang_jac1,
             ii_ang_jac2,
             inv_lhs: N::zero(), // Will be set during orthogonalization.
+            lhs_scale: N::zero(), // Set by `with_lhs_scale`.
             cfm_coeff,
             cfm_gain: N::zero(),
             rhs: rhs_wo_bias + rhs_bias,
             rhs_wo_bias,
             writeback_id,
         }
+        .with_lhs_scale(body1, body2)
     }
 
     /// The relative rotation's angle around `_limited_axis`, measured from `limit`'s center
@@ -555,12 +594,14 @@ impl<N: ScalarType> JointConstraintHelper<N> {
             ii_ang_jac1,
             ii_ang_jac2,
             inv_lhs: N::zero(), // Will be set during orthogonalization.
+            lhs_scale: N::zero(), // Set by `with_lhs_scale`.
             cfm_coeff,
             cfm_gain: N::zero(),
             rhs: rhs_wo_bias + rhs_bias,
             rhs_wo_bias,
             writeback_id,
         }
+        .with_lhs_scale(body1, body2)
     }
 
     pub fn motor_angular<const LANES: usize>(
@@ -617,12 +658,14 @@ impl<N: ScalarType> JointConstraintHelper<N> {
             ii_ang_jac1,
             ii_ang_jac2,
             inv_lhs: N::zero(), // Will be set during orthogonalization.
+            lhs_scale: N::zero(), // Set by `with_lhs_scale`.
             cfm_coeff: motor_params.cfm_coeff,
             cfm_gain: motor_params.cfm_gain,
             rhs: rhs_wo_bias,
             rhs_wo_bias,
             writeback_id,
         }
+        .with_lhs_scale(body1, body2)
     }
 
     pub fn lock_angular<const LANES: usize>(
@@ -664,12 +707,14 @@ impl<N: ScalarType> JointConstraintHelper<N> {
             ii_ang_jac1,
             ii_ang_jac2,
             inv_lhs: N::zero(), // Will be set during orthogonalization.
+            lhs_scale: N::zero(), // Set by `with_lhs_scale`.
             cfm_coeff,
             cfm_gain: N::zero(),
             rhs: rhs_wo_bias + rhs_bias,
             rhs_wo_bias,
             writeback_id,
         }
+        .with_lhs_scale(body1, body2)
     }
 
     /// Orthogonalize the constraints and set their inv_lhs field.
@@ -685,12 +730,27 @@ impl<N: ScalarType> JointConstraintHelper<N> {
         // Use the modified Gram-Schmidt orthogonalization.
         for j in 0..len {
             let c_j = &mut constraints[j];
-            let dot_jj = c_j.lin_jac.gdot(imsum.component_mul(&c_j.lin_jac))
+            let mut dot_jj = c_j.lin_jac.gdot(imsum.component_mul(&c_j.lin_jac))
                 + c_j.ii_ang_jac1.gdot(c_j.ang_jac1)
                 + c_j.ii_ang_jac2.gdot(c_j.ang_jac2);
+
+            // A row with no inverse mass left, because the bodies' locks or the rows before it
+            // already hold what it asks for, is emptied: it then gets a zero `inv_lhs` and
+            // removes nothing from the rows after it.
+            let independent = dot_jj.simd_gt(c_j.lhs_scale * N::splat(DEPENDENT_ROW_TOLERANCE));
+            let kept = N::one().select(independent, N::zero());
+            c_j.lin_jac *= kept;
+            c_j.ang_jac1 *= kept;
+            c_j.ang_jac2 *= kept;
+            c_j.ii_ang_jac1 *= kept;
+            c_j.ii_ang_jac2 *= kept;
+            c_j.rhs *= kept;
+            c_j.rhs_wo_bias *= kept;
+            dot_jj *= kept;
+
             let cfm_gain = dot_jj * c_j.cfm_coeff + c_j.cfm_gain;
             let inv_dot_jj = crate::utils::simd_inv(dot_jj);
-            c_j.inv_lhs = crate::utils::simd_inv(dot_jj + cfm_gain); // Don’t forget to update the inv_lhs.
+            c_j.inv_lhs = crate::utils::simd_inv(dot_jj + cfm_gain) * kept; // Don’t forget to update the inv_lhs.
             c_j.cfm_gain = cfm_gain;
 
             if c_j.impulse_bounds != [-N::splat(Real::MAX), N::splat(Real::MAX)] {
@@ -780,12 +840,14 @@ impl JointConstraintHelper<Real> {
             ii_ang_jac1,
             ii_ang_jac2,
             inv_lhs: 0.0, // Will be set during orthogonalization.
+            lhs_scale: 0.0, // Set by `with_lhs_scale`.
             cfm_coeff,
             cfm_gain: 0.0,
             rhs: rhs_wo_bias + rhs_bias,
             rhs_wo_bias,
             writeback_id,
         }
+        .with_lhs_scale(body1, body2)
     }
 }
 

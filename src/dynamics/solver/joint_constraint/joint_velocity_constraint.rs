@@ -82,6 +82,8 @@ pub struct JointConstraint<N: ScalarType, const LANES: usize> {
     pub ii_ang_jac2: N::AngVector,
 
     pub inv_lhs: N,
+    /// The row's inverse-mass scale, from [`JointConstraint::with_lhs_scale`].
+    pub lhs_scale: N,
     pub rhs: N,
     pub rhs_wo_bias: N,
     pub cfm_gain: N,

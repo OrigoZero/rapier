@@ -19,6 +19,9 @@ pub trait AngularInertiaOps<N>: Copy + core::fmt::Debug + Default {
     fn transform_vector(&self, pt: Self::AngVector) -> Self::AngVector;
     /// Converts this angular inertia into a matrix.
     fn into_matrix(self) -> Self::AngMatrix;
+    /// The sum of the diagonal entries: for the positive semi-definite matrices an
+    /// (inverse) angular inertia is, an upper bound of its largest eigenvalue.
+    fn trace(&self) -> N;
 }
 
 impl<N: SimdRealCopy + Default> AngularInertiaOps<N> for N {
@@ -35,6 +38,10 @@ impl<N: SimdRealCopy + Default> AngularInertiaOps<N> for N {
 
     fn into_matrix(self) -> Self::AngMatrix {
         self
+    }
+
+    fn trace(&self) -> N {
+        *self
     }
 }
 
@@ -82,6 +89,11 @@ impl AngularInertiaOps<Real> for SdpMatrix3<Real> {
             self.m13, self.m23, self.m33,
         ])
     }
+
+    #[inline]
+    fn trace(&self) -> Real {
+        self.m11 + self.m22 + self.m33
+    }
 }
 
 impl AngularInertiaOps<SimdReal> for parry::utils::SdpMatrix3<SimdReal> {
@@ -109,5 +121,10 @@ impl AngularInertiaOps<SimdReal> for parry::utils::SdpMatrix3<SimdReal> {
             self.m12, self.m22, self.m23,
             self.m13, self.m23, self.m33,
         )
+    }
+
+    #[inline]
+    fn trace(&self) -> SimdReal {
+        self.m11 + self.m22 + self.m33
     }
 }
