@@ -1,7 +1,9 @@
 //! Structures related to dynamics: bodies, impulse_joints, etc.
 
 #[cfg(feature = "alloc")]
-pub use self::ccd::CCDSolver;
+pub use self::ccd::{CCDSolver, KinematicStrike};
+#[cfg(feature = "alloc")]
+pub(crate) use self::ccd::kinematic_sweeps_this_step;
 pub use self::coefficient_combine_rule::CoefficientCombineRule;
 #[cfg(feature = "dim3")]
 pub use self::integration_parameters::FrictionModel;

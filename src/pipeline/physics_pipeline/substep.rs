@@ -5,7 +5,7 @@ use crate::alloc_prelude::*;
 
 use crate::dynamics::{
     CCDSolver, ImpulseJointSet, IntegrationParameters, IslandManager, MultibodyJointSet,
-    RigidBodyChanges, RigidBodySet, RigidBodyType, SoftBodySet,
+    RigidBodyChanges, RigidBodySet, RigidBodyType, SoftBodySet, kinematic_sweeps_this_step,
 };
 #[cfg(feature = "parallel")]
 use crate::geometry::ColliderHandle;
@@ -64,7 +64,9 @@ impl PhysicsPipeline {
         hooks: &dyn PhysicsHooks,
         events: &dyn EventHandler,
     ) {
-        self.counters.ccd.toi_computation_time.start();
+        // Resumed rather than restarted: the step's counters start from zero, and the time
+        // counts every continuous pass of the step, the kinematic sweeps included.
+        self.counters.ccd.toi_computation_time.resume();
         // Handle CCD: sweep the fast bodies and clamp their `next_position` to their
         // earliest time of impact (velocities are preserved).
         ccd_solver.solve_continuous(
@@ -281,28 +283,49 @@ impl PhysicsPipeline {
         }
     }
 
+    /// Interpolates the velocity of every active position-based kinematic body from the pose it
+    /// was aimed at, turning it the shorter way to that pose's rotation. With `sweep_slop` (CCD
+    /// enabled), also flags each active kinematic body
+    /// moving farther than it in the pass for the kinematic sweeps, and returns whether any is.
     fn interpolate_kinematic_velocities(
         &mut self,
         integration_parameters: &IntegrationParameters,
         islands: &IslandManager,
         bodies: &mut RigidBodySet,
-    ) {
+        sweep_slop: Option<Real>,
+    ) -> bool {
         // Update kinematic bodies velocities.
         // TODO: what is the best place for this? It should at least be
         // located before the island computation because we test the velocity
         // there to determine if this kinematic body should wake-up dynamic
         // bodies it is touching.
+        let mut any_sweeps = false;
         for handle in islands.active_bodies() {
             // TODO PERF: only iterate on kinematic position-based bodies
             let rb = bodies.index_mut_internal(handle);
 
             if rb.body_type == RigidBodyType::KinematicPositionBased {
+                // A target pose names a rotation and not the way to it, and its quaternion may
+                // come with either sign: the gap is read as the shorter turn, from the
+                // quaternion on the same side as the body's current one.
+                #[cfg(feature = "dim3")]
+                if rb.pos.next_position.rotation.dot(rb.pos.position.rotation) < 0.0 {
+                    rb.pos.next_position.rotation = -rb.pos.next_position.rotation;
+                }
                 rb.vels = rb.pos.interpolate_velocity(
                     integration_parameters.inv_dt(),
                     rb.mprops.local_mprops.local_com,
                 );
             }
+            if let Some(slop) = sweep_slop
+                && rb.is_kinematic()
+            {
+                let sweeps = kinematic_sweeps_this_step(rb, integration_parameters.dt, slop);
+                rb.ccd.ccd_active = sweeps;
+                any_sweeps |= sweeps;
+            }
         }
+        any_sweeps
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -325,6 +348,7 @@ impl PhysicsPipeline {
         self.counters.reset();
         self.counters.step_started();
         self.quarantine.clear();
+        ccd_solver.clear_kinematic_strikes();
 
         // Apply some of delayed wake-ups.
         self.counters.stages.user_changes.start();
@@ -564,7 +588,12 @@ impl PhysicsPipeline {
             num_passes += 1;
 
             self.counters.custom.resume();
-            self.interpolate_kinematic_velocities(&integration_parameters, islands, bodies);
+            let kinematic_ccd_active = self.interpolate_kinematic_velocities(
+                &integration_parameters,
+                islands,
+                bodies,
+                ccd_is_enabled.then(|| integration_parameters.allowed_linear_error()),
+            );
             self.counters.custom.pause();
             self.build_islands_and_solve_velocity_constraints(
                 gravity,
@@ -594,8 +623,26 @@ impl PhysicsPipeline {
                     ),
                 };
                 any_ccd_active |= ccd_active;
-                if ccd_active {
+                if ccd_active || kinematic_ccd_active {
                     self.join_deferred_bvh_optimize(broad_phase);
+                    if kinematic_ccd_active {
+                        // Before the dynamic bodies' own sweeps, so a body a kinematic body
+                        // strikes then sweeps the fixed geometry along its new motion.
+                        self.counters.ccd.toi_computation_time.resume();
+                        any_ccd_active |= ccd_solver.solve_kinematic_sweeps(
+                            &integration_parameters,
+                            islands,
+                            bodies,
+                            colliders,
+                            impulse_joints,
+                            multibody_joints,
+                            broad_phase,
+                            narrow_phase,
+                            hooks,
+                            events,
+                        );
+                        self.counters.ccd.toi_computation_time.pause();
+                    }
                     self.run_ccd_motion_clamping(
                         &integration_parameters,
                         islands,

@@ -3,6 +3,7 @@
 //! and the per-body continuous solve.
 
 use crate::alloc_prelude::*;
+use super::kinematic_sweeps::KinematicPairs;
 use crate::dynamics::{RigidBody, RigidBodyHandle, RigidBodySet, SoftBodySet};
 use crate::geometry::{Collider, ColliderHandle, ColliderSet};
 use crate::math::{Pose, Real, Vector};
@@ -537,7 +538,8 @@ pub(super) enum PseudoHitMode {
 /// sweeps each of its colliders through `targets`, keeps the earliest solid impact fraction,
 /// and records sensor crossings in [`PseudoHitMode::Record`] mode. Shared by the continuous
 /// pass (end pose = solved `next_position`) and the substep splitter (end pose = the
-/// forces/velocities integration, pseudo pairs ignored).
+/// forces/velocities integration, pseudo pairs ignored). Targets in `kinematic_pairs` with this
+/// body are left out: the kinematic sweeps of the pass resolved those contacts.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn sweep_fast_body(
     handle: RigidBodyHandle,
@@ -550,6 +552,7 @@ pub(super) fn sweep_fast_body(
     dt: Real,
     linear_slop: Real,
     pseudo_mode: PseudoHitMode,
+    kinematic_pairs: Option<&KinematicPairs>,
 ) -> BodyContinuousResult {
     let rb1 = &bodies[handle];
     let mut fraction: Real = 1.0;
@@ -586,6 +589,9 @@ pub(super) fn sweep_fast_body(
             let bh2 = co2.parent.map(|p| p.handle);
             if bh2 == Some(handle) {
                 return; // Skip same body.
+            }
+            if kinematic_pairs.is_some_and(|pairs| pairs.contains(*ch1, ch2)) {
+                return; // The kinematic sweeps of this pass resolved this pair.
             }
             let rb2 = bh2.and_then(|h| bodies.get(h));
             if !tier_allows(rb1, rb2, co2) {
