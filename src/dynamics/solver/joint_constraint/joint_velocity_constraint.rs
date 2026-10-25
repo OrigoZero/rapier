@@ -189,8 +189,11 @@ impl JointConstraint<Real, 1> {
         );
 
         let start = len;
+        // An angular motor drives its own axis whether or not that axis is
+        // coupled: coupling two angles shares their limit (a swing cone), and
+        // each angle's motor still measures and drives that angle alone.
         for i in DIM..SPATIAL_DIM {
-            if (motor_axes & !coupled_axes) & (1 << i) != 0 {
+            if motor_axes & (1 << i) != 0 {
                 out[len] = builder.motor_angular(
                     [joint_id],
                     body1,
@@ -222,10 +225,6 @@ impl JointConstraint<Real, 1> {
                 );
                 len += 1;
             }
-        }
-
-        if (motor_axes & coupled_axes) & JointAxesMask::ANG_AXES.bits() != 0 {
-            // TODO: coupled angular motor constraint.
         }
 
         if (motor_axes & coupled_axes) & JointAxesMask::LIN_AXES.bits() != 0 {
