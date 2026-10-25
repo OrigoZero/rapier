@@ -11,6 +11,23 @@ use crate::pipeline::QueryPipeline;
 use crate::prelude::QueryPipelineMut;
 use crate::utils::{CrossProduct, DotProduct};
 
+/// The least a surface's normal faces back along a wheel's suspension ray, as the cosine of the
+/// angle between them, for the wheel to stand on that surface: the cosine of 45 degrees.
+///
+/// Up to that angle the surface holds the wheel up along its travel at least as hard as it pushes
+/// it along the ground. Past it the ray meets a wall, a kerb's face or the side of a box, and reads
+/// past it to the ground beyond: a ray tilted with its chassis meets the side of a box a little
+/// below its top edge, and standing on that face would push the chassis along the ground with
+/// many times the spring's force.
+pub const WHEEL_GROUND_MIN_FACING: Real = core::f32::consts::FRAC_1_SQRT_2 as Real;
+
+/// Whether a wheel whose suspension ray runs along `direction` stands on a surface whose normal is
+/// `normal`: whether that normal faces back along the ray by more than
+/// [`WHEEL_GROUND_MIN_FACING`].
+pub fn wheel_stands_on(normal: Vector, direction: Vector) -> bool {
+    -normal.dot(direction) > WHEEL_GROUND_MIN_FACING * direction.length()
+}
+
 /// A character controller to simulate vehicles using ray-casting for the wheels.
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[derive(Clone, Debug)]
@@ -367,29 +384,34 @@ impl DynamicRayCastVehicleController {
         let source = wheel.raycast_info.hard_point_ws;
         wheel.raycast_info.contact_point_ws = source + rayvector;
         let ray = Ray::new(source, rayvector);
-        let hit = queries.cast_ray_and_get_normal(&ray, 1.0, true);
+        // The nearest surface along the ray the wheel stands on ([`wheel_stands_on`]).
+        let direction = wheel.wheel_direction_ws;
+        let hit = queries
+            .intersect_ray(ray, 1.0, true)
+            .filter_map(|(collider_hit, collider, mut hit)| {
+                if hit.time_of_impact == 0.0 {
+                    let up_ray = Ray::new(source + rayvector, -rayvector);
+                    if let Some(hit2) =
+                        collider
+                            .shape
+                            .cast_ray_and_get_normal(collider.position(), &up_ray, 1.0, false)
+                    {
+                        hit.normal = -hit2.normal;
+                    }
+
+                    if hit.normal == Vector::ZERO {
+                        // If the hit is still not defined, set the normal.
+                        hit.normal = -direction;
+                    }
+                }
+                wheel_stands_on(hit.normal, direction).then_some((collider_hit, hit))
+            })
+            .min_by(|a, b| a.1.time_of_impact.total_cmp(&b.1.time_of_impact));
 
         wheel.raycast_info.ground_object = None;
         wheel.raycast_info.ground_velocity_ws = Vector::ZERO;
 
-        if let Some((collider_hit, mut hit)) = hit {
-            if hit.time_of_impact == 0.0 {
-                let collider = &queries.colliders[collider_hit];
-                let up_ray = Ray::new(source + rayvector, -rayvector);
-                if let Some(hit2) =
-                    collider
-                        .shape
-                        .cast_ray_and_get_normal(collider.position(), &up_ray, 1.0, false)
-                {
-                    hit.normal = -hit2.normal;
-                }
-
-                if hit.normal == Vector::ZERO {
-                    // If the hit is still not defined, set the normal.
-                    hit.normal = -wheel.wheel_direction_ws;
-                }
-            }
-
+        if let Some((collider_hit, hit)) = hit {
             wheel.raycast_info.contact_normal_ws = hit.normal;
             wheel.raycast_info.is_in_contact = true;
             wheel.raycast_info.ground_object = Some(collider_hit);
@@ -425,14 +447,9 @@ impl DynamicRayCastVehicleController {
                 .contact_normal_ws
                 .dot(chassis_velocity_at_contact_point - ground_velocity_at_contact_point);
 
-            if denominator >= -0.1 {
-                wheel.suspension_relative_velocity = 0.0;
-                wheel.clipped_inv_contact_dot_suspension = 1.0 / 0.1;
-            } else {
-                let inv = -1.0 / denominator;
-                wheel.suspension_relative_velocity = proj_vel * inv;
-                wheel.clipped_inv_contact_dot_suspension = inv;
-            }
+            let inv = -1.0 / denominator;
+            wheel.suspension_relative_velocity = proj_vel * inv;
+            wheel.clipped_inv_contact_dot_suspension = inv;
         } else {
             // No contact, put wheel info as in rest position
             wheel.raycast_info.suspension_length = wheel.suspension_rest_length;
