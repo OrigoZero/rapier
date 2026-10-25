@@ -153,6 +153,50 @@ impl SoftBody {
         self.modified = true;
     }
 
+    /// Clears what the solver carries from one step to the next: every element's warm-start
+    /// impulse and smoothed load, the attachments' and volume pieces' warm-start impulses, each
+    /// cell's and cluster's rotation (back to the identity a built body starts from), the
+    /// clusters' shape-matching history, and the contact load and approach speeds the next step
+    /// sizes its substeps by. The body then steps from its particles, rest shape and pins alone,
+    /// the way a body just built at those particles does, so two bodies set to the same
+    /// particles step the same way whatever each went through before.
+    pub fn forget_solver_history(&mut self) {
+        for e in &mut self.edges {
+            e.impulse = 0.0;
+            e.stress = 0.0;
+            e.force = 0.0;
+        }
+        #[cfg(feature = "dim3")]
+        for d in &mut self.dihedrals {
+            d.impulse = 0.0;
+        }
+        for c in &mut self.cells {
+            c.impulses = Default::default();
+            c.stress = 0.0;
+            c.rotation = crate::math::Rotation::IDENTITY;
+        }
+        for piece in &mut self.volume_pieces {
+            piece.impulse = 0.0;
+        }
+        for attachment in &mut self.attachments {
+            attachment.impulse = Vector::ZERO;
+        }
+        for cluster in &mut self.clusters {
+            cluster.rotation = crate::math::Rotation::IDENTITY;
+            cluster.shape_matching_target = None;
+            cluster.prev_shape_matching_target = None;
+            cluster.last_gather = Default::default();
+            cluster.shape_impulses.clear();
+        }
+        self.contact_approach_speeds = [None; 2];
+        self.contact_approach_step_open = false;
+        self.contact_load = 0.0;
+        self.load_extra_substeps = 0;
+        self.sleep_speed = 0.0;
+        self.sleep_reference.clear();
+        self.modified = true;
+    }
+
     /// Moves the pinned `i`-th particle to `position` over the next step (with the matching
     /// velocity, so dragged cloth and friction see the motion), then holds it there until the next
     /// target or velocity is set. Ignored for a free particle.
