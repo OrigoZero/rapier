@@ -11,7 +11,9 @@ use crate::dynamics::solver::contact_constraint::ContactWithCoulombFrictionBuild
 #[cfg(feature = "dim3")]
 use crate::dynamics::solver::contact_constraint::ContactWithTwistFrictionBuilder;
 use crate::dynamics::solver::joint_constraint::GenericJointConstraintBuilder;
-use crate::dynamics::solver::solver_body::{SOLVER_BODY_ALLOW_FAST_ROTATION, SOLVER_BODY_RECORD_SUBSTEPS};
+use crate::dynamics::solver::solver_body::{
+    SOLVER_BODY_ALLOW_FAST_ROTATION, SOLVER_BODY_PLANE_HOLD, SOLVER_BODY_RECORD_SUBSTEPS,
+};
 use crate::dynamics::solver::solver_contact_graph::ContactRef;
 use crate::dynamics::{JointGraphEdge, RigidBodySubstep, RigidBodyType, RigidBodyVelocity};
 use crate::geometry::ContactManifold;
@@ -699,6 +701,18 @@ pub(super) unsafe fn run_worker(ctx: &SharedCtx, worker_id: usize) {
                             }
                         }
 
+                        // A body held to a plane moves along it and turns about its normal
+                        // alone: the motion the substep's constraints left across it goes.
+                        if vs.solver_bodies.flags[i] & SOLVER_BODY_PLANE_HOLD != 0 {
+                            let held = RigidBodyVelocity {
+                                linvel: vs.solver_bodies.vels[i].linear,
+                                angvel: vs.solver_bodies.vels[i].angular,
+                            }
+                            .held_to_plane(vs.solver_bodies.planes[i]);
+                            vs.solver_bodies.vels[i].linear = held.linvel;
+                            vs.solver_bodies.vels[i].angular = held.angvel;
+                        }
+
                         let vels = vs.solver_bodies.vels[i];
                         let pose = &mut vs.solver_bodies.poses[i];
                         let new_vels = RigidBodyVelocity {
@@ -987,14 +1001,19 @@ pub(super) unsafe fn run_worker(ctx: &SharedCtx, worker_id: usize) {
                 let solver_vels = &vs.solver_bodies.vels[rb.ids.active_set_id as usize];
                 let solver_poses = &vs.solver_bodies.poses[rb.ids.active_set_id as usize];
 
-                let undamped = RigidBodyVelocity {
+                let mut undamped = RigidBodyVelocity {
                     linvel: solver_vels.linear,
                     angvel: solver_vels.angular,
                 };
+                // The passes after the last integration (stabilization, restitution) leave
+                // motion across a held body's plane; the body ends the step without it.
+                let slot = rb.ids.active_set_id as usize;
+                if vs.solver_bodies.flags[slot] & SOLVER_BODY_PLANE_HOLD != 0 {
+                    undamped = undamped.held_to_plane(vs.solver_bodies.planes[slot]);
+                }
                 let new_vels = undamped.apply_damping(base_params.dt, &rb.damping);
                 rb.vels = new_vels;
 
-                let slot = rb.ids.active_set_id as usize;
                 if vs.solver_bodies.flags[slot] & SOLVER_BODY_RECORD_SUBSTEPS != 0 {
                     // The damping the step applies once, to the velocity it ends with, is
                     // spread evenly over its substeps: the substep `k` of `n` carries `k / n`
