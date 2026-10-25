@@ -209,7 +209,10 @@ impl Collider {
     ///
     /// Use to opt colliders into custom collision filtering logic.
     pub fn set_active_hooks(&mut self, active_hooks: ActiveHooks) {
-        self.flags.active_hooks = active_hooks;
+        if self.flags.active_hooks != active_hooks {
+            self.changes.insert(ColliderChanges::MATERIAL);
+            self.flags.active_hooks = active_hooks;
+        }
     }
 
     /// Which events are enabled for this collider.
@@ -265,7 +268,10 @@ impl Collider {
     /// Controls how much this surface resists sliding. Higher values = more grip.
     /// Works with other collider's friction via the combine rule.
     pub fn set_friction(&mut self, coefficient: Real) {
-        self.material.friction = coefficient
+        if self.material.friction != coefficient {
+            self.changes.insert(ColliderChanges::MATERIAL);
+            self.material.friction = coefficient;
+        }
     }
 
     /// The combine rule used by this collider to combine its friction
@@ -279,7 +285,10 @@ impl Collider {
     /// coefficient with the friction coefficient of the other collider it
     /// is in contact with.
     pub fn set_friction_combine_rule(&mut self, rule: CoefficientCombineRule) {
-        self.material.friction_combine_rule = rule;
+        if self.material.friction_combine_rule != rule {
+            self.changes.insert(ColliderChanges::MATERIAL);
+            self.material.friction_combine_rule = rule;
+        }
     }
 
     /// The restitution coefficient of this collider (how "bouncy" it is).
@@ -297,7 +306,10 @@ impl Collider {
     /// Controls how much velocity is preserved after impact. Higher values = more bounce.
     /// Works with other collider's restitution via the combine rule.
     pub fn set_restitution(&mut self, coefficient: Real) {
-        self.material.restitution = coefficient
+        if self.material.restitution != coefficient {
+            self.changes.insert(ColliderChanges::MATERIAL);
+            self.material.restitution = coefficient;
+        }
     }
 
     /// The combine rule used by this collider to combine its restitution
@@ -311,7 +323,10 @@ impl Collider {
     /// coefficient with the restitution coefficient of the other collider it
     /// is in contact with.
     pub fn set_restitution_combine_rule(&mut self, rule: CoefficientCombineRule) {
-        self.material.restitution_combine_rule = rule;
+        if self.material.restitution_combine_rule != rule {
+            self.changes.insert(ColliderChanges::MATERIAL);
+            self.material.restitution_combine_rule = rule;
+        }
     }
 
     /// Sets the total force magnitude beyond which a contact force event can be emitted.
