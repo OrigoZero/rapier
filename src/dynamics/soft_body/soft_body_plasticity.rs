@@ -128,6 +128,114 @@ impl SoftBodyDihedral {
     }
 }
 
+/// Everything plastic flow changed in a soft body since it was created: each particle's rest
+/// position, each cell's plastic stretch, each edge's plastic strain and each dihedral's plastic
+/// set, in the body's element order (see [`SoftBody::plastic_state`]).
+///
+/// Restored onto a body of the same elements with [`SoftBody::set_plastic_state`], it carries a
+/// permanent deformation across a rebuild of the body (a new cell model, a new mass) while the
+/// body's creation shape, which the material's `plastic_max` bounds the flow against, stays the
+/// one the new body was created in.
+#[derive(Clone, Debug, Default, PartialEq)]
+#[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
+pub struct SoftBodyPlasticState {
+    /// Each particle's rest position, relative to the rest center of mass.
+    pub rest_positions: Vec<Vector>,
+    /// Each cell's plastic stretch (unit determinant, see [`crate::dynamics::SoftBodyCell::plastic_stretch`]).
+    pub cell_stretches: Vec<Matrix>,
+    /// Each edge's plastic strain (see [`crate::dynamics::SoftBodyEdge::plastic_strain`]).
+    pub edge_strains: Vec<Real>,
+    /// Each dihedral's plastic set, in radians (see [`SoftBodyDihedral::plastic_set`]).
+    pub dihedral_sets: Vec<Real>,
+}
+
+impl SoftBodyPlasticState {
+    /// Whether the state holds no flow: every rest position at the creation shape's, every
+    /// stretch the identity, every strain and set zero. `initial` is the creation shape's rest
+    /// positions, in the same order.
+    pub fn is_unflowed(&self, initial: impl IntoIterator<Item = Vector>) -> bool {
+        self.rest_positions
+            .iter()
+            .zip(initial)
+            .all(|(rest, initial)| *rest == initial)
+            && self.cell_stretches.iter().all(|p| *p == Matrix::IDENTITY)
+            && self.edge_strains.iter().all(|s| *s == 0.0)
+            && self.dihedral_sets.iter().all(|s| *s == 0.0)
+    }
+}
+
+impl SoftBody {
+    /// The body's plastic state: its rest shape as plastic flow has left it, element by element
+    /// (see [`SoftBodyPlasticState`]). A body that has not flowed returns its creation rest
+    /// positions, identity stretches and zero strains and sets.
+    pub fn plastic_state(&self) -> SoftBodyPlasticState {
+        SoftBodyPlasticState {
+            rest_positions: self.particles.iter().map(|p| p.rest_position).collect(),
+            cell_stretches: self.cells.iter().map(|c| c.plastic_stretch).collect(),
+            edge_strains: self.edges.iter().map(|e| e.plastic_strain).collect(),
+            #[cfg(feature = "dim3")]
+            dihedral_sets: self.dihedrals.iter().map(|d| d.plastic_set).collect(),
+            #[cfg(feature = "dim2")]
+            dihedral_sets: Vec::new(),
+        }
+    }
+
+    /// Restores a plastic state read from a body of the same elements in the same order (a
+    /// rebuild of the same shape), turned by `rotation` (an orthonormal matrix: the turn from the
+    /// axes the state's body was created along to the axes this body was created along; the
+    /// identity when both were created along the same axes).
+    ///
+    /// Each particle's rest position, each cell's rest shape, each edge's rest length and each
+    /// dihedral's rest angle become the state's, measured against this body's own creation
+    /// shape, so the material's `plastic_max` keeps bounding the flow against that shape. The
+    /// particles stay where they are. Returns `false`, changing nothing, when the state's
+    /// element counts are not this body's.
+    pub fn set_plastic_state(&mut self, state: &SoftBodyPlasticState, rotation: Matrix) -> bool {
+        #[cfg(feature = "dim3")]
+        let dihedral_count = self.dihedrals.len();
+        #[cfg(feature = "dim2")]
+        let dihedral_count = 0;
+        if state.rest_positions.len() != self.particles.len()
+            || state.cell_stretches.len() != self.cells.len()
+            || state.edge_strains.len() != self.edges.len()
+            || state.dihedral_sets.len() != dihedral_count
+        {
+            return false;
+        }
+        for (p, rest) in self.particles.iter_mut().zip(&state.rest_positions) {
+            p.rest_position = rotation * *rest;
+        }
+        for (e, strain) in self.edges.iter_mut().zip(&state.edge_strains) {
+            let initial = e.initial_rest_length();
+            e.plastic_strain = *strain;
+            e.rest_length = initial * (1.0 + *strain);
+        }
+        #[cfg(feature = "dim3")]
+        for (d, set) in self.dihedrals.iter_mut().zip(&state.dihedral_sets) {
+            let initial = d.initial_rest_angle();
+            d.plastic_set = *set;
+            d.rest_angle = initial + *set;
+        }
+        let factorial = if DIM == 2 { 2.0 } else { 6.0 };
+        for (c, stretch) in self.cells.iter_mut().zip(&state.cell_stretches) {
+            let rest0: [Vector; DIM + 1] = core::array::from_fn(|k| {
+                self.particles[c.vertices[k] as usize].initial_rest_position
+            });
+            let plastic = rotation * *stretch * rotation.transpose();
+            let dm = plastic * Self::cell_edge_matrix(rest0);
+            let volume = dm.determinant() / factorial;
+            c.plastic_stretch = plastic;
+            if volume.is_finite() && volume.abs() > Real::EPSILON {
+                c.rest_volume = volume;
+                c.inv_rest_matrix = dm.inverse();
+            }
+        }
+        self.rest_fit_pending = false;
+        self.modified = true;
+        true
+    }
+}
+
 impl SoftBody {
     /// Moves the particles' rest positions toward the flowed rest shapes of the elements that can
     /// flow (cells with a cell yield, edges with an edge yield): Jacobi sweeps to a least-squares
