@@ -176,7 +176,8 @@ impl SoftFemSystem {
         }
     }
 
-    /// Accumulates the distance elements' force and Gauss-Newton tangent.
+    /// Accumulates the distance elements' force and tangent: the Gauss-Newton term along each
+    /// element, and across a pulled one the tension's own stiffness.
     fn assemble_springs(&mut self, dt: Real) {
         let Self {
             springs,
@@ -211,7 +212,15 @@ impl SoftFemSystem {
                 continue;
             }
 
-            let block = outer_product(n, n) * (spring.stiffness * (dt * dt + dt * spring.beta));
+            let mut block = outer_product(n, n) * (spring.stiffness * (dt * dt + dt * spring.beta));
+            // A pulled element also resists turning: its pull, over its length, across it.
+            // This is the tensile part of the element's geometric stiffness (`f / |d|` times
+            // `I − nnᵀ`), positive semi-definite while the element pulls; it is what holds a
+            // taut rope or cable sideways, so a load pressed across it (a body resting on a
+            // rope) sees the stiffness the cable's tension gives it.
+            if magnitude > 0.0 {
+                block += (Matrix::IDENTITY - outer_product(n, n)) * (magnitude / length * dt * dt);
+            }
             for (k, &slot) in spring.blocks.iter().enumerate() {
                 if slot != u32::MAX {
                     // Diagonal blocks (k = 0, 3) get `+k nnᵀ`, off-diagonal ones `−k nnᵀ`.

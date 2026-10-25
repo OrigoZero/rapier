@@ -55,8 +55,9 @@ pub(super) struct FemVolumeCell {
 
 /// One distance element (a structural or bending edge) of a FEM soft body.
 ///
-/// Energy `½ k (|d| − L)²`, with the Gauss-Newton tangent `k ∇C ∇Cᵀ` (the indefinite `C ∂²C`
-/// term dropped: an implicit step needs a positive semi-definite stiffness).
+/// Energy `½ k (|d| − L)²`, with the Gauss-Newton tangent `k ∇C ∇Cᵀ` and, while the element
+/// pulls, the tensile part of `C ∂²C` (`f / |d|` across it); a pushed element's `C ∂²C` is
+/// indefinite and dropped, since an implicit step needs a positive semi-definite stiffness.
 #[derive(Copy, Clone, Debug)]
 pub(super) struct FemSpring {
     pub(super) vertices: [u32; 2],
