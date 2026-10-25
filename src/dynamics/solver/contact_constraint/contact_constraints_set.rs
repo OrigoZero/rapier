@@ -27,8 +27,10 @@ pub fn joint_data_num_constraints(joint: &crate::dynamics::GenericJoint) -> usiz
     let limit_axes = joint.limit_axes.bits() & !locked_axes;
     let coupled_axes = joint.coupled_axes.bits();
 
-    (motor_axes & !coupled_axes).count_ones() as usize
-        + ((motor_axes & coupled_axes) & JointAxesMask::ANG_AXES.bits() != 0) as usize
+    // Every angular motor is a row of its own, coupled or not; coupled linear
+    // motors share one.
+    ((motor_axes & !coupled_axes) & JointAxesMask::LIN_AXES.bits()).count_ones() as usize
+        + (motor_axes & JointAxesMask::ANG_AXES.bits()).count_ones() as usize
         + ((motor_axes & coupled_axes) & JointAxesMask::LIN_AXES.bits() != 0) as usize
         + locked_axes.count_ones() as usize
         + (limit_axes & !coupled_axes).count_ones() as usize
