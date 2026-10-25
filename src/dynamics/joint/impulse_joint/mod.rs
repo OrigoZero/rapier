@@ -1,4 +1,4 @@
-pub use self::impulse_joint::ImpulseJoint;
+pub use self::impulse_joint::{ImpulseJoint, ImpulseJointReaction};
 pub use self::impulse_joint_handle::ImpulseJointHandle;
 #[cfg(feature = "alloc")]
 pub use self::impulse_joint_set::ImpulseJointSet;

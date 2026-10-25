@@ -141,6 +141,17 @@ impl JointConstraintsSet {
     }
 
     pub fn writeback_impulses(&mut self, joints_all: &mut [JointGraphEdge]) {
+        // Each joint's reaction over the step: what its builder took in from
+        // the substeps before the last, and the last substep's rows.
+        for builder in &self.velocity_constraints_builder {
+            joints_all[builder.joint_id()].weight.reaction = builder.step_reaction(&self.velocity_constraints);
+        }
+        for builder in &self.simd_velocity_constraints_builder {
+            let reactions = builder.step_reactions(&self.simd_velocity_constraints);
+            for (joint_id, reaction) in builder.joint_ids().iter().zip(reactions) {
+                joints_all[*joint_id].weight.reaction = reaction;
+            }
+        }
         let (_, constraints) = self.iter_constraints_mut();
         for mut c in constraints {
             c.writeback_impulses(joints_all);
