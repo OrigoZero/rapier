@@ -37,23 +37,30 @@ impl SoftBody {
     }
 
     /// The signed area (2D) or volume (3D) enclosed by `elements` (segments or triangles).
+    ///
+    /// Measured from the first element's first vertex rather than from the world origin: a
+    /// closed boundary encloses the same volume about any point, and products of coordinates
+    /// taken about a point on the body keep their precision wherever the body is, while
+    /// products of world coordinates far from the origin cancel to a few significant bits.
     pub(crate) fn elements_volume<'a>(
         elements: impl IntoIterator<Item = &'a [u32; DIM]>,
         position: impl Fn(u32) -> Vector,
     ) -> Real {
         let mut vol = 0.0;
+        let mut origin = None;
         for element in elements {
+            let o = *origin.get_or_insert_with(|| position(element[0]));
             #[cfg(feature = "dim2")]
             {
-                let a = position(element[0]);
-                let b = position(element[1]);
+                let a = position(element[0]) - o;
+                let b = position(element[1]) - o;
                 vol += a.perp_dot(b) * 0.5;
             }
             #[cfg(feature = "dim3")]
             {
-                let a = position(element[0]);
-                let b = position(element[1]);
-                let c = position(element[2]);
+                let a = position(element[0]) - o;
+                let b = position(element[1]) - o;
+                let c = position(element[2]) - o;
                 vol += a.dot(b.cross(c)) / 6.0;
             }
         }
@@ -61,24 +68,30 @@ impl SoftBody {
     }
 
     /// Accumulates the gradient of the enclosed area/volume with respect to every particle.
+    ///
+    /// Taken about the first element's first vertex, like [`Self::elements_volume`]: the
+    /// gradient of a closed boundary's volume is the same about any point, and is only precise
+    /// about one on the body.
     pub(crate) fn boundary_volume_gradients<'a>(
         boundary: impl IntoIterator<Item = &'a [u32; DIM]>,
         position: impl Fn(u32) -> Vector,
         gradients: &mut [Vector],
     ) {
+        let mut origin = None;
         for element in boundary {
+            let o = *origin.get_or_insert_with(|| position(element[0]));
             #[cfg(feature = "dim2")]
             {
-                let a = position(element[0]);
-                let b = position(element[1]);
+                let a = position(element[0]) - o;
+                let b = position(element[1]) - o;
                 gradients[element[0] as usize] += Vector::new(b.y, -b.x) * 0.5;
                 gradients[element[1] as usize] += Vector::new(-a.y, a.x) * 0.5;
             }
             #[cfg(feature = "dim3")]
             {
-                let a = position(element[0]);
-                let b = position(element[1]);
-                let c = position(element[2]);
+                let a = position(element[0]) - o;
+                let b = position(element[1]) - o;
+                let c = position(element[2]) - o;
                 gradients[element[0] as usize] += b.cross(c) / 6.0;
                 gradients[element[1] as usize] += c.cross(a) / 6.0;
                 gradients[element[2] as usize] += a.cross(b) / 6.0;
