@@ -15,6 +15,11 @@ use crate::math::{AngularInertia, DIM, Matrix, Real, SPATIAL_DIM, Vector};
 use core::ops::Range;
 use parry::utils::hashmap::HashMap;
 
+/// The most multiply-adds a body's direct factorization may cost for it to be refactorized at
+/// every substep (see [`SoftFemSet::refactors_every_substep`]): a chain of a few thousand
+/// particles, a box of a few dozen.
+const SUBSTEP_FACTOR_WORK: usize = 250_000;
+
 /// One awake soft body solved by the FEM path, during one island solve.
 struct ActiveFem {
     /// The soft body, valid for the solve's scope (same contract as `AwakeSoftBody::ptr`).
@@ -672,6 +677,30 @@ impl SoftFemSet {
                 }
             }
         }
+    }
+
+    /// Whether `active[index]` refactorizes its operator, and answers its constraints through
+    /// it, at every substep rather than once a step: a body whose direct factorization costs no
+    /// more than [`SUBSTEP_FACTOR_WORK`] (a rope, a cable, a truss: a chain of particles factors
+    /// in a few multiply-adds per particle). The step-start operator holds each element's
+    /// direction and load where the step began, and a body that turns within the step (a rope
+    /// swinging a weight) answers its constraints through a stiffness that has turned away from
+    /// its elements: a heavy body attached to it is then pushed along that stale direction at
+    /// every substep, and the swing gains energy until it flies apart.
+    pub fn refactors_every_substep(&self, index: usize) -> bool {
+        let entry = &self.active[index];
+        // SAFETY: read-only access to the body's own system during its own stage.
+        let system = unsafe { &*entry.system };
+        system.direct_factor_work().is_some_and(|work| work <= SUBSTEP_FACTOR_WORK)
+    }
+
+    /// Reads `active[index]`'s particle state from the solver bodies.
+    /// # Safety
+    /// Same contract as [`Self::predict`].
+    pub unsafe fn refresh_state(&self, index: usize, bodies: &SolverBodies) {
+        let entry = &self.active[index];
+        let system = unsafe { &mut *entry.system };
+        system.refresh_state(bodies);
     }
 
     /// The implicit elastic step of `active[index]` (one substep).

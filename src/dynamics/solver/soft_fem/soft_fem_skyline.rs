@@ -78,6 +78,11 @@ impl SkylineCholesky {
         }
     }
 
+    /// The multiply-adds a factorization costs: each row's envelope length squared, halved.
+    pub fn factor_work(&self) -> usize {
+        self.row_start.windows(2).map(|w| (w[1] - w[0]) * (w[1] - w[0]) / 2).sum()
+    }
+
     /// The number of stored factor entries.
     #[cfg(test)]
     pub fn envelope_len(&self) -> usize {
