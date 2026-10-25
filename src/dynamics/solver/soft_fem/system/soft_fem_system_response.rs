@@ -1,6 +1,7 @@
 //! The step matrix: its factorization at the step start, and the response and column solves the constraints go through.
 
 use super::super::soft_fem_skyline::SkylineCholesky;
+use super::super::soft_fem_sparse::Preconditioner;
 use super::SoftFemSystem;
 use crate::dynamics::SoftFemParameters;
 use crate::math::{DIM, Matrix, Real, Vector};
@@ -39,6 +40,7 @@ impl SoftFemSystem {
                 x,
                 params.linear_tolerance,
                 params.max_linear_iterations,
+                Preconditioner::BlockJacobi,
             );
         }
     }

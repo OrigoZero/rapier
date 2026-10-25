@@ -354,5 +354,17 @@ mod tests {
             assert!(err < 1.0e-4, "residual {err} at row {k}");
         }
         assert_eq!(x[id(3, 2) as usize], rhs[id(3, 2) as usize]);
+
+        // As the conjugate gradient's preconditioner, the factor of the matrix solved converges
+        // at once, where the block-Jacobi preconditioner takes many iterations.
+        use super::super::soft_fem_sparse::{ConjugateGradient, Preconditioner};
+        let mut cg = ConjugateGradient::default();
+        cg.update_preconditioner(&matrix);
+        let mut y = vec![Vector::ZERO; n];
+        let factored = cg.solve(&matrix, &rhs, &mut y, 1.0e-5, 100, Preconditioner::Factor(&mut skyline));
+        y.fill(Vector::ZERO);
+        let jacobi = cg.solve(&matrix, &rhs, &mut y, 1.0e-5, 100, Preconditioner::BlockJacobi);
+        assert!(factored <= 2, "the factor preconditioner took {factored} iterations");
+        assert!(jacobi > 4 * factored.max(1), "block-Jacobi took {jacobi} iterations against {factored}");
     }
 }
