@@ -27,6 +27,23 @@ pub struct DynamicRayCastVehicleController {
     pub index_up_axis: usize,
     /// The chassis’ local _forward_ direction (`0 = x, 1 = y, 2 = z`)
     pub index_forward_axis: usize,
+    /// The reactions the last [`Self::update_vehicle`] left for the bodies under the wheels.
+    ground_reactions: Vec<GroundReaction>,
+}
+
+/// The reaction one wheel of a vehicle owes the rigid-body under it: the opposite of an impulse
+/// the wheel applied to the chassis, at the point the wheel applied it.
+#[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct GroundReaction {
+    /// The index of the wheel whose impulse this is the reaction of.
+    pub wheel: usize,
+    /// The rigid-body the wheel stands on.
+    pub ground: RigidBodyHandle,
+    /// The reaction impulse.
+    pub impulse: Vector,
+    /// The world-space point the impulse acts at.
+    pub point: Vector,
 }
 
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
@@ -248,6 +265,10 @@ pub struct RayCastInfo {
     pub is_in_contact: bool,
     /// The collider hit by the ray-cast.
     pub ground_object: Option<ColliderHandle>,
+    /// The (world-space) velocity at the contact point of the rigid-body the hit collider is
+    /// attached to, as the ray-cast found it, before the wheels pushed on it. Zero when the
+    /// collider has no rigid-body or the wheel is not in contact.
+    pub ground_velocity_ws: Vector,
 }
 
 impl DynamicRayCastVehicleController {
@@ -263,6 +284,7 @@ impl DynamicRayCastVehicleController {
             chassis,
             index_up_axis: 1,
             index_forward_axis: 0,
+            ground_reactions: vec![],
         }
     }
 
@@ -341,6 +363,7 @@ impl DynamicRayCastVehicleController {
         let hit = queries.cast_ray_and_get_normal(&ray, 1.0, true);
 
         wheel.raycast_info.ground_object = None;
+        wheel.raycast_info.ground_velocity_ws = Vector::ZERO;
 
         if let Some((collider_hit, mut hit)) = hit {
             if hit.time_of_impact == 0.0 {
@@ -382,10 +405,18 @@ impl DynamicRayCastVehicleController {
                 .dot(wheel.wheel_direction_ws);
             let chassis_velocity_at_contact_point =
                 chassis.velocity_at_point(wheel.raycast_info.contact_point_ws);
+            // The suspension compresses at the speed the chassis closes on the ground, which
+            // is the chassis' velocity less the ground body's at the contact.
+            let ground_velocity_at_contact_point = queries.colliders[collider_hit]
+                .parent()
+                .and_then(|h| queries.bodies.get(h))
+                .map(|b| b.velocity_at_point(wheel.raycast_info.contact_point_ws))
+                .unwrap_or_default();
+            wheel.raycast_info.ground_velocity_ws = ground_velocity_at_contact_point;
             let proj_vel = wheel
                 .raycast_info
                 .contact_normal_ws
-                .dot(chassis_velocity_at_contact_point);
+                .dot(chassis_velocity_at_contact_point - ground_velocity_at_contact_point);
 
             if denominator >= -0.1 {
                 wheel.suspension_relative_velocity = 0.0;
@@ -405,8 +436,15 @@ impl DynamicRayCastVehicleController {
     }
 
     /// Updates the vehicle’s velocity based on its suspension, engine force, and brake.
+    ///
+    /// The reaction of every suspension, drive, brake and side-friction impulse a wheel applies
+    /// to the chassis is recorded for the rigid-body under that wheel
+    /// ([`Self::take_ground_reactions`]), each at the wheel's contact point, and the caller
+    /// applies them ([`Self::apply_ground_reaction`]). The reactions of the previous call are
+    /// dropped.
     #[profiling::function]
     pub fn update_vehicle(&mut self, dt: Real, queries: QueryPipelineMut) {
+        self.ground_reactions.clear();
         let num_wheels = self.wheels.len();
         let chassis = &queries.bodies[self.chassis];
 
@@ -438,7 +476,7 @@ impl DynamicRayCastVehicleController {
             .get_mut_internal_with_modification_tracking(self.chassis)
             .unwrap();
 
-        for wheel in &mut self.wheels {
+        for (wheel_id, wheel) in self.wheels.iter_mut().enumerate() {
             if wheel.engine_force > 0.0 {
                 chassis.wake_up(true);
             }
@@ -452,6 +490,16 @@ impl DynamicRayCastVehicleController {
 
             let impulse = wheel.raycast_info.contact_normal_ws * suspension_force * dt;
             chassis.apply_impulse_at_point(impulse, wheel.raycast_info.contact_point_ws, false);
+            // The ground under the wheel carries the load the suspension holds the chassis up
+            // with.
+            record_ground_reaction(
+                &mut self.ground_reactions,
+                queries.colliders,
+                wheel_id,
+                wheel.raycast_info.ground_object,
+                -impulse,
+                wheel.raycast_info.contact_point_ws,
+            );
         }
 
         self.update_friction(queries.bodies, queries.colliders, dt);
@@ -679,14 +727,14 @@ impl DynamicRayCastVehicleController {
 
             for wheel_id in 0..num_wheels {
                 let wheel = &self.wheels[wheel_id];
-                let mut impulse_point = wheel.raycast_info.contact_point_ws;
+                let contact_point = wheel.raycast_info.contact_point_ws;
+                let mut impulse_point = contact_point;
+                let mut ground_impulse = Vector::ZERO;
 
                 if wheel.forward_impulse != 0.0 {
-                    chassis.apply_impulse_at_point(
-                        self.forward_ws[wheel_id] * wheel.forward_impulse,
-                        impulse_point,
-                        false,
-                    );
+                    let forward_impulse = self.forward_ws[wheel_id] * wheel.forward_impulse;
+                    chassis.apply_impulse_at_point(forward_impulse, impulse_point, false);
+                    ground_impulse -= forward_impulse;
                 }
                 if wheel.side_impulse != 0.0 {
                     let side_impulse = self.axle[wheel_id] * wheel.side_impulse;
@@ -698,16 +746,97 @@ impl DynamicRayCastVehicleController {
                             * (1.0 - wheel.roll_influence));
 
                     chassis.apply_impulse_at_point(side_impulse, impulse_point, false);
-
-                    // TODO: apply friction impulse on the ground
-                    // let ground_object = self.wheels[wheel_id].raycast_info.ground_object;
-                    // ground_object.apply_impulse_at_point(
-                    //     -side_impulse,
-                    //     wheels.raycast_info.contact_point_ws,
-                    //     false,
-                    // );
+                    ground_impulse -= side_impulse;
                 }
+                // The tyre's grip pushes the ground back at the contact as hard as it pushes
+                // the chassis.
+                record_ground_reaction(
+                    &mut self.ground_reactions,
+                    colliders,
+                    wheel_id,
+                    wheel.raycast_info.ground_object,
+                    ground_impulse,
+                    contact_point,
+                );
             }
+        }
+    }
+}
+
+/// Records the reaction `impulse` at `point` of wheel `wheel` for the rigid-body the collider
+/// `ground` is attached to.
+fn record_ground_reaction(
+    reactions: &mut Vec<GroundReaction>,
+    colliders: &ColliderSet,
+    wheel: usize,
+    ground: Option<ColliderHandle>,
+    impulse: Vector,
+    point: Vector,
+) {
+    if impulse == Vector::ZERO {
+        return;
+    }
+    if let Some(ground) = ground.and_then(|c| colliders.get(c)).and_then(|c| c.parent()) {
+        reactions.push(GroundReaction { wheel, ground, impulse, point });
+    }
+}
+
+impl DynamicRayCastVehicleController {
+    /// The reactions the last [`Self::update_vehicle`] recorded for the rigid-bodies under the
+    /// wheels, in the order the wheels applied their impulses; the controller keeps none of
+    /// them.
+    pub fn take_ground_reactions(&mut self) -> Vec<GroundReaction> {
+        core::mem::take(&mut self.ground_reactions)
+    }
+
+    /// Applies `impulse` at `point` to the rigid-body `ground` over the next step of `dt`: the
+    /// reaction of an impulse a wheel of this vehicle applied to its chassis at that point. A
+    /// fixed or kinematic ground takes nothing.
+    ///
+    /// The reaction is added to the ground's force as `impulse / dt`, which the step integrates
+    /// substep by substep the way it integrates gravity, so whatever holds the ground up (its
+    /// contacts, its joints) carries the vehicle's weight the way it carries a body resting on
+    /// the ground directly. The force stays on the ground until the caller resets it once that
+    /// step has run.
+    ///
+    /// The chassis and the dynamic bodies under its wheels rest the way bodies resting on each
+    /// other do, which is as one: each reaction leaves both with the shorter of their two sleep
+    /// timers, so neither falls asleep while the other still moves and they become eligible
+    /// for sleep together. A sleeping ground is woken to take the reaction, unless the chassis
+    /// is itself eligible for sleep and so goes to sleep with it on this step.
+    pub fn apply_ground_reaction(
+        &self,
+        bodies: &mut RigidBodySet,
+        ground: RigidBodyHandle,
+        impulse: Vector,
+        point: Vector,
+        dt: Real,
+    ) {
+        if impulse == Vector::ZERO || ground == self.chassis || dt <= 0.0 {
+            return;
+        }
+        let Some(chassis) = bodies.get(self.chassis) else {
+            return;
+        };
+        let chassis_rests = chassis.activation().is_eligible_for_sleep();
+        let chassis_timer = chassis.activation().time_since_can_sleep;
+        let Some(body) = bodies.get_mut_internal_with_modification_tracking(ground) else {
+            return;
+        };
+        if !body.is_dynamic() {
+            return;
+        }
+        if body.is_sleeping() {
+            if chassis_rests {
+                return;
+            }
+            body.wake_up(true);
+        }
+        body.add_force_at_point(impulse / dt, point, false);
+        let timer = body.activation().time_since_can_sleep.min(chassis_timer);
+        body.activation_mut().time_since_can_sleep = timer;
+        if let Some(chassis) = bodies.get_mut_internal_with_modification_tracking(self.chassis) {
+            chassis.activation_mut().time_since_can_sleep = timer;
         }
     }
 }
