@@ -225,8 +225,11 @@ impl GenericContactConstraintBuilder {
                 let is_new = pt_data.impulse == 0.0;
                 let is_bouncy = crate::geometry::is_bouncy(manifold.data.restitution, is_new);
 
-                restitution_seed =
-                    (is_bouncy * manifold.data.restitution) * (vel1 - vel2).dot(force_dir1);
+                let projected_velocity = (vel1 - vel2).dot(force_dir1);
+                restitution_seed = (is_bouncy * manifold.data.restitution) * projected_velocity;
+                // `force_dir1` points from the second body into the first, so the
+                // projection is negative while the two close.
+                out_constraint.closing_speed[k] = -projected_velocity;
 
                 out_constraint.normal_part[k] = ContactConstraintNormalPart {
                     torque_dir1,
@@ -569,6 +572,9 @@ pub(crate) struct GenericContactConstraint {
     pub num_contacts: u8,
     pub normal_part: [ContactConstraintNormalPart<Real>; MAX_MANIFOLD_POINTS],
     pub tangent_part: [ContactConstraintTangentPart<Real>; MAX_MANIFOLD_POINTS],
+    /// Each point's closing speed at the start of the step (see
+    /// [`crate::geometry::ContactData::closing_speed`]), written back with the impulses.
+    pub closing_speed: [Real; MAX_MANIFOLD_POINTS],
 }
 
 impl GenericContactConstraint {
@@ -592,6 +598,7 @@ impl GenericContactConstraint {
             num_contacts: u8::MAX,
             normal_part: [ContactConstraintNormalPart::zero(); MAX_MANIFOLD_POINTS],
             tangent_part: [ContactConstraintTangentPart::zero(); MAX_MANIFOLD_POINTS],
+            closing_speed: [0.0; MAX_MANIFOLD_POINTS],
         }
     }
 
@@ -727,6 +734,7 @@ impl GenericContactConstraint {
                 utils::canonicalize_zero(self.normal_part[k].total_impulse());
             active_contact.data.tangent_impulse =
                 utils::canonicalize_zero(self.tangent_part[k].total_impulse());
+            active_contact.data.closing_speed = utils::canonicalize_zero(self.closing_speed[k]);
         }
     }
 

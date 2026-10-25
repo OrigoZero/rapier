@@ -86,6 +86,13 @@ pub struct ContactData {
     /// The solver's lever arm for the second body (see [`Self::solver_dp1`]).
     #[cfg_attr(feature = "serde-serialize", serde(default))]
     pub solver_dp2: Vector,
+    /// The speed at which the two bodies approached each other along the contact normal
+    /// at this point when the step began, before the solver acted on them: positive while
+    /// they close, negative while they separate. The constraint solver measures it as it
+    /// builds the step's constraints, so it is written for the contacts it solved, beside
+    /// [`Self::impulse`].
+    #[cfg_attr(feature = "serde-serialize", serde(default))]
+    pub closing_speed: Real,
 }
 
 impl Default for ContactData {
@@ -101,6 +108,7 @@ impl Default for ContactData {
             warmstart_tangent_world: Vector::ZERO,
             solver_dp1: Vector::ZERO,
             solver_dp2: Vector::ZERO,
+            closing_speed: 0.0,
         }
     }
 }
