@@ -4,7 +4,7 @@ use crate::dynamics::solver::joint_constraint::joint_velocity_constraint::{
 use crate::dynamics::solver::joint_constraint::{AngularLimitParams, JointSolverBody};
 use crate::dynamics::solver::solver_body::SolverBodies;
 use crate::dynamics::solver::{joint_data_num_constraints, joint_num_constraints};
-use crate::dynamics::{GenericJoint, ImpulseJoint, IntegrationParameters, JointIndex};
+use crate::dynamics::{GenericJoint, ImpulseJoint, ImpulseJointReaction, IntegrationParameters, JointIndex};
 use crate::math::{ANG_DIM, Real, SPATIAL_DIM};
 use crate::prelude::RigidBodySet;
 
@@ -28,9 +28,46 @@ pub struct JointConstraintBuilder {
     /// The per-dof impulses written back at the end of the previous step, used to
     /// seed the constraint impulses when joint warm-starting is enabled.
     prev_dof_impulses: crate::math::SpatialVector,
+    /// The impulse this joint's rows applied over the substeps of this step
+    /// before the one its rows hold now.
+    step_reaction: ImpulseJointReaction,
+    /// How many rows the last update built.
+    rows: usize,
+}
+
+/// The impulse `rows` applied over the substep they were solved for: each
+/// row's impulse along its jacobian.
+fn rows_reaction(rows: &[JointConstraint<Real, 1>]) -> ImpulseJointReaction {
+    let mut reaction = ImpulseJointReaction::default();
+    for row in rows {
+        reaction.linear += row.lin_jac * row.impulse;
+        reaction.angular1 += row.ang_jac1 * row.impulse;
+        reaction.angular2 += row.ang_jac2 * row.impulse;
+    }
+    reaction
+}
+
+fn add_reaction(into: &mut ImpulseJointReaction, more: ImpulseJointReaction) {
+    into.linear += more.linear;
+    into.angular1 += more.angular1;
+    into.angular2 += more.angular2;
 }
 
 impl JointConstraintBuilder {
+    /// The joint this builder builds the rows of.
+    pub fn joint_id(&self) -> JointIndex {
+        self.joint_id
+    }
+
+    /// The impulse this joint applied over the whole step, once its last
+    /// substep is solved: what the earlier substeps applied, and the rows of
+    /// the last one in `rows`.
+    pub fn step_reaction(&self, rows: &[JointConstraint<Real, 1>]) -> ImpulseJointReaction {
+        let mut reaction = self.step_reaction;
+        add_reaction(&mut reaction, rows_reaction(&rows[self.constraint_id..self.constraint_id + self.rows]));
+        reaction
+    }
+
     pub fn generate(
         joint: &ImpulseJoint,
         bodies: &RigidBodySet,
@@ -54,6 +91,8 @@ impl JointConstraintBuilder {
             }),
             constraint_id: *out_constraint_id,
             prev_dof_impulses: joint.impulses,
+            step_reaction: ImpulseJointReaction::default(),
+            rows: 0,
         };
         // Since solver body poses are given in center-of-mass space,
         // we need to transform the anchors to that space.
@@ -79,7 +118,7 @@ impl JointConstraintBuilder {
     }
 
     pub fn update(
-        &self,
+        &mut self,
         params: &IntegrationParameters,
         substep_id: usize,
         // `Some(warmstart_coefficient)` when joint warm-starting is enabled.
@@ -87,6 +126,15 @@ impl JointConstraintBuilder {
         bodies: &SolverBodies,
         out: &mut [JointConstraint<Real, 1>],
     ) {
+        // The rows still hold the substep before this one: take in what they
+        // applied before they are rebuilt.
+        if substep_id == 0 {
+            self.step_reaction = ImpulseJointReaction::default();
+        } else {
+            let applied = rows_reaction(&out[self.constraint_id..self.constraint_id + self.rows]);
+            add_reaction(&mut self.step_reaction, applied);
+        }
+
         // NOTE: right now, the "update", is basically reconstructing all the
         //       constraints. Could we make this more incremental?
 
@@ -135,6 +183,7 @@ impl JointConstraintBuilder {
             &self.ang_limits,
             out_rows,
         );
+        self.rows = len;
 
         if let Some(coeff) = warmstart {
             if substep_id == 0 {
@@ -210,6 +259,32 @@ pub struct JointConstraintBuilderSimd {
     ii1: <SimdReal as ScalarType>::AngInertia,
     im2: <SimdReal as ScalarType>::Vector,
     ii2: <SimdReal as ScalarType>::AngInertia,
+    /// The impulse each lane's rows applied over the substeps of this step
+    /// before the one the rows hold now: linear, then angular on each body.
+    step_linear: <SimdReal as ScalarType>::Vector,
+    step_angular1: <SimdReal as ScalarType>::AngVector,
+    step_angular2: <SimdReal as ScalarType>::AngVector,
+    /// How many rows the last update built.
+    rows: usize,
+}
+
+/// The impulse `rows` applied over the substep they were solved for, per lane.
+fn wide_rows_reaction(
+    rows: &[JointConstraint<SimdReal, SIMD_WIDTH>],
+) -> (
+    <SimdReal as ScalarType>::Vector,
+    <SimdReal as ScalarType>::AngVector,
+    <SimdReal as ScalarType>::AngVector,
+) {
+    let mut linear = <SimdReal as ScalarType>::Vector::default();
+    let mut angular1 = <SimdReal as ScalarType>::AngVector::default();
+    let mut angular2 = <SimdReal as ScalarType>::AngVector::default();
+    for row in rows {
+        linear += row.lin_jac * row.impulse;
+        angular1 += row.ang_jac1 * row.impulse;
+        angular2 += row.ang_jac2 * row.impulse;
+    }
+    (linear, angular1, angular2)
 }
 
 impl JointConstraintBuilderSimd {
@@ -328,6 +403,10 @@ impl JointConstraintBuilderSimd {
             ii1: Default::default(),
             im2: Default::default(),
             ii2: Default::default(),
+            step_linear: Default::default(),
+            step_angular1: Default::default(),
+            step_angular2: Default::default(),
+            rows: 0,
         };
 
         *out_constraint_id += joint_num_constraints(joint[0]);
@@ -355,6 +434,37 @@ impl JointConstraintBuilderSimd {
         }
     }
 
+    /// The joints of this builder's lanes.
+    pub fn joint_ids(&self) -> [JointIndex; SIMD_WIDTH] {
+        self.joint_id
+    }
+
+    /// The impulse each lane's joint applied over the whole step, once its
+    /// last substep is solved: what the earlier substeps applied, and the rows
+    /// of the last one in `rows`.
+    pub fn step_reactions(&self, rows: &[JointConstraint<SimdReal, SIMD_WIDTH>]) -> [ImpulseJointReaction; SIMD_WIDTH] {
+        let (linear, angular1, angular2) =
+            wide_rows_reaction(&rows[self.constraint_id..self.constraint_id + self.rows]);
+        let linear = linear + self.step_linear;
+        let angular1 = angular1 + self.step_angular1;
+        let angular2 = angular2 + self.step_angular2;
+        #[cfg(feature = "dim3")]
+        let lane = |v: &<SimdReal as ScalarType>::Vector, ii: usize| {
+            crate::math::Vector::new(v.x.extract(ii), v.y.extract(ii), v.z.extract(ii))
+        };
+        #[cfg(feature = "dim3")]
+        let ang_lane = lane;
+        #[cfg(feature = "dim2")]
+        let lane = |v: &<SimdReal as ScalarType>::Vector, ii: usize| crate::math::Vector::new(v.x.extract(ii), v.y.extract(ii));
+        #[cfg(feature = "dim2")]
+        let ang_lane = |v: &SimdReal, ii: usize| v.extract(ii);
+        core::array::from_fn(|ii| ImpulseJointReaction {
+            linear: lane(&linear, ii),
+            angular1: ang_lane(&angular1, ii),
+            angular2: ang_lane(&angular2, ii),
+        })
+    }
+
     pub fn update(
         &mut self,
         params: &IntegrationParameters,
@@ -364,6 +474,20 @@ impl JointConstraintBuilderSimd {
         bodies: &SolverBodies,
         out: &mut [JointConstraint<SimdReal, SIMD_WIDTH>],
     ) {
+        // The rows still hold the substep before this one: take in what they
+        // applied before they are rebuilt.
+        if substep_id == 0 {
+            self.step_linear = Default::default();
+            self.step_angular1 = Default::default();
+            self.step_angular2 = Default::default();
+        } else {
+            let (linear, angular1, angular2) =
+                wide_rows_reaction(&out[self.constraint_id..self.constraint_id + self.rows]);
+            self.step_linear += linear;
+            self.step_angular1 += angular1;
+            self.step_angular2 += angular2;
+        }
+
         // NOTE: right now, the "update", is basically reconstructing all the
         //       constraints. Could we make this more incremental?
 
@@ -480,6 +604,7 @@ impl JointConstraintBuilderSimd {
             ang_motor_params.as_ref(),
             out_rows,
         );
+        self.rows = len;
 
         if let Some(coeff) = warmstart {
             let coeff = SimdReal::splat(coeff);
