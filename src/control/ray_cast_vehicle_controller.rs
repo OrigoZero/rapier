@@ -12,7 +12,8 @@ use crate::prelude::QueryPipelineMut;
 use crate::utils::{CrossProduct, DotProduct};
 
 /// The least a surface's normal faces back along a wheel's suspension ray, as the cosine of the
-/// angle between them, for the wheel to stand on that surface: the cosine of 45 degrees.
+/// angle between them, for the wheel to stand on that surface, unless the wheel states its own
+/// ([`Wheel::ground_min_facing`]): the cosine of 45 degrees.
 ///
 /// Up to that angle the surface holds the wheel up along its travel at least as hard as it pushes
 /// it along the ground. Past it the ray meets a wall, a kerb's face or the side of a box, and reads
@@ -22,10 +23,10 @@ use crate::utils::{CrossProduct, DotProduct};
 pub const WHEEL_GROUND_MIN_FACING: Real = core::f32::consts::FRAC_1_SQRT_2 as Real;
 
 /// Whether a wheel whose suspension ray runs along `direction` stands on a surface whose normal is
-/// `normal`: whether that normal faces back along the ray by more than
-/// [`WHEEL_GROUND_MIN_FACING`].
-pub fn wheel_stands_on(normal: Vector, direction: Vector) -> bool {
-    -normal.dot(direction) > WHEEL_GROUND_MIN_FACING * direction.length()
+/// `normal`: whether that normal faces back along the ray by more than `min_facing`, the cosine of
+/// the widest angle between them the wheel stands on ([`WHEEL_GROUND_MIN_FACING`] by default).
+pub fn wheel_stands_on(normal: Vector, direction: Vector, min_facing: Real) -> bool {
+    -normal.dot(direction) > min_facing * direction.length()
 }
 
 /// A character controller to simulate vehicles using ray-casting for the wheels.
@@ -88,6 +89,9 @@ pub struct WheelTuning {
     pub friction_slip: Real,
     /// The maximum force applied by the suspension.
     pub max_suspension_force: Real,
+    /// The least a surface's normal faces back along the wheel's suspension ray, as the cosine
+    /// of the angle between them, for the wheel to stand on it ([`wheel_stands_on`]).
+    pub ground_min_facing: Real,
 }
 
 impl Default for WheelTuning {
@@ -100,6 +104,7 @@ impl Default for WheelTuning {
             side_friction_stiffness: 1.0,
             friction_slip: 10.5,
             max_suspension_force: 6000.0,
+            ground_min_facing: WHEEL_GROUND_MIN_FACING,
         }
     }
 }
@@ -140,6 +145,8 @@ struct WheelDesc {
     pub max_suspension_force: Real,
     /// The multiplier of friction between a tire and the collider it's on top of.
     pub side_friction_stiffness: Real,
+    /// The least a surface's normal faces back along the suspension ray for the wheel to stand on it.
+    pub ground_min_facing: Real,
 }
 
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
@@ -189,6 +196,10 @@ pub struct Wheel {
     roll_influence: Real, // TODO: make this public?
     /// The maximum force applied by the suspension.
     pub max_suspension_force: Real,
+    /// The least a surface's normal faces back along the wheel's suspension ray, as the cosine
+    /// of the angle between them, for the wheel to stand on it ([`wheel_stands_on`]): the ray
+    /// reads past a steeper face to the nearest ground beyond it.
+    pub ground_min_facing: Real,
 
     /// The forward impulses applied by the wheel on the chassis.
     pub forward_impulse: Real,
@@ -247,6 +258,7 @@ impl Wheel {
             held_side_impulse: 0.0,
             forward_impulse: 0.0,
             side_friction_stiffness: info.side_friction_stiffness,
+            ground_min_facing: info.ground_min_facing,
         }
     }
 
@@ -338,6 +350,7 @@ impl DynamicRayCastVehicleController {
             max_suspension_travel: tuning.max_suspension_travel,
             max_suspension_force: tuning.max_suspension_force,
             side_friction_stiffness: tuning.side_friction_stiffness,
+            ground_min_facing: tuning.ground_min_facing,
         };
 
         let wheel_id = self.wheels.len();
@@ -386,6 +399,7 @@ impl DynamicRayCastVehicleController {
         let ray = Ray::new(source, rayvector);
         // The nearest surface along the ray the wheel stands on ([`wheel_stands_on`]).
         let direction = wheel.wheel_direction_ws;
+        let min_facing = wheel.ground_min_facing;
         let hit = queries
             .intersect_ray(ray, 1.0, true)
             .filter_map(|(collider_hit, collider, mut hit)| {
@@ -404,7 +418,7 @@ impl DynamicRayCastVehicleController {
                         hit.normal = -direction;
                     }
                 }
-                wheel_stands_on(hit.normal, direction).then_some((collider_hit, hit))
+                wheel_stands_on(hit.normal, direction, min_facing).then_some((collider_hit, hit))
             })
             .min_by(|a, b| a.1.time_of_impact.total_cmp(&b.1.time_of_impact));
 
