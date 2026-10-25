@@ -104,6 +104,8 @@ pub(crate) struct SoftGroupLayout {
     pub slots: Range<usize>,
     /// Range into `attachments`.
     pub attachments: Range<usize>,
+    /// Range into `attachment_blocks`: the group's attachments as they are solved.
+    pub attachment_blocks: Range<usize>,
     /// Range into `clusters`.
     pub clusters: Range<usize>,
     /// Index range into `color_ranges`.
@@ -210,6 +212,16 @@ pub(crate) struct SoftConstraintsSet {
     pub overlap_fem_sides: Vec<FemOverlapSide>,
     /// The particle attachments of the awake soft bodies, group-major.
     pub attachments: Vec<super::soft_attachment::SoftAttachmentConstraint>,
+    /// The attachments as they are solved, group-major (see
+    /// `SoftConstraintsSet::plan_attachment_blocks`): the blocks of attachments held to one rigid
+    /// body, then the attachments solved one at a time.
+    pub attachment_blocks: Vec<super::soft_attachment::SoftAttachmentBlock>,
+    /// The members of the attachment blocks: indices into `attachments`.
+    pub attachment_block_members: Vec<u32>,
+    /// Workspaces of `plan_attachment_blocks`: `(key, attachment)` pairs, and whether each
+    /// attachment's particle is held by another attachment too.
+    pub(crate) attachment_block_workspace: Vec<(u32, u32)>,
+    pub(crate) attachment_shared_workspace: Vec<bool>,
     /// The active clusters (a joint or an external impulse acts on their proxy), group-major.
     pub clusters: Vec<SoftClusterRecord>,
     /// The contact constraints chunked by body pair (see `soft_contact_chunks`): constraint indices into

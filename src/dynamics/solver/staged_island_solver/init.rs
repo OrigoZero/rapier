@@ -254,6 +254,8 @@ impl StagedIslandSolver {
             // computed by the workers' first stage.
             #[cfg(feature = "fem")]
             self.soft_fem.plan_responses(&mut self.soft_constraints);
+            // The attachments the FEM bodies answer are known: lay out the attachment blocks.
+            self.soft_constraints.plan_attachment_blocks();
         }
 
         // Avoid spawning more workers than there is work: soft constraints count like element
