@@ -358,6 +358,19 @@ impl RigidBody {
         &mut self.activation
     }
 
+    /// Takes on the motion `other` holds, a copy of this rigid-body a computation changed apart
+    /// from its set: its velocity (with the impulses recorded for its substeps), the forces and
+    /// torques on it, its activation, and the changes it recorded. Every other part of this body
+    /// stays as it is, so a copy taken from it, pushed by impulses, forces and wakes and handed
+    /// back, leaves this body as those pushes made on it directly would.
+    pub fn take_motion_of(&mut self, other: &RigidBody) {
+        self.vels = other.vels.clone();
+        self.impulse_vels = other.impulse_vels.clone();
+        self.forces = other.forces.clone();
+        self.activation = other.activation.clone();
+        self.changes |= other.changes;
+    }
+
     /// Is this rigid-body enabled?
     pub fn is_enabled(&self) -> bool {
         self.enabled

@@ -509,12 +509,31 @@ impl DynamicRayCastVehicleController {
     /// every wheel's [`Wheel::held_side_impulse`] to zero.
     #[profiling::function]
     pub fn update_suspension(&mut self, dt: Real, queries: QueryPipelineMut) {
+        self.cast_suspension(&queries.bodies[self.chassis], &queries.as_ref());
+        let chassis = queries
+            .bodies
+            .get_mut_internal_with_modification_tracking(self.chassis)
+            .unwrap();
+        self.apply_suspension(dt, chassis, queries.colliders);
+    }
+
+    /// [`Self::update_suspension`] on a chassis held apart from the rigid-body set `queries`
+    /// reads: `chassis` is this controller's chassis as the caller holds it, and its suspension
+    /// impulses are applied to it alone. The rays read every other body from `queries`, and
+    /// past the chassis' colliders as `queries.filter` excludes them. Several vehicles step at
+    /// once this way, each on its own chassis, over one shared set they all only read.
+    pub fn update_suspension_of(&mut self, dt: Real, chassis: &mut RigidBody, queries: &QueryPipeline) {
+        self.cast_suspension(chassis, queries);
+        self.apply_suspension(dt, chassis, queries.colliders);
+    }
+
+    /// Finds the ground under every wheel of `chassis` and sizes each wheel's suspension force.
+    fn cast_suspension(&mut self, chassis: &RigidBody, queries: &QueryPipeline) {
         self.ground_reactions.clear();
         for wheel in &mut self.wheels {
             wheel.held_side_impulse = 0.0;
         }
         let num_wheels = self.wheels.len();
-        let chassis = &queries.bodies[self.chassis];
 
         for i in 0..num_wheels {
             self.update_wheel_transform(chassis, i);
@@ -533,17 +552,16 @@ impl DynamicRayCastVehicleController {
         //
 
         for wheel_id in 0..self.wheels.len() {
-            self.ray_cast(&queries.as_ref(), chassis, wheel_id);
+            self.ray_cast(queries, chassis, wheel_id);
         }
 
         let chassis_mass = chassis.mass();
         self.compute_suspension_forces(chassis_mass);
+    }
 
-        let chassis = queries
-            .bodies
-            .get_mut_internal_with_modification_tracking(self.chassis)
-            .unwrap();
-
+    /// Applies each wheel's suspension impulse to `chassis` at its contact point and records its
+    /// ground reaction.
+    fn apply_suspension(&mut self, dt: Real, chassis: &mut RigidBody, colliders: &ColliderSet) {
         for (wheel_id, wheel) in self.wheels.iter_mut().enumerate() {
             if wheel.engine_force > 0.0 {
                 chassis.wake_up(true);
@@ -562,7 +580,7 @@ impl DynamicRayCastVehicleController {
             // with.
             record_ground_reaction(
                 &mut self.ground_reactions,
-                queries.colliders,
+                colliders,
                 wheel_id,
                 wheel.raycast_info.ground_object,
                 -impulse,
@@ -577,17 +595,37 @@ impl DynamicRayCastVehicleController {
     /// reactions, and turns the wheels by the distance they roll.
     #[profiling::function]
     pub fn update_tyres(&mut self, dt: Real, bodies: &mut RigidBodySet, colliders: &ColliderSet) {
-        self.update_friction(bodies, colliders, dt);
-
+        self.size_friction(&bodies[self.chassis], bodies, colliders, dt);
         let chassis = bodies
             .get_mut_internal_with_modification_tracking(self.chassis)
             .unwrap();
+        self.apply_friction(chassis, colliders);
+        self.turn_wheels(chassis, dt);
+    }
 
+    /// [`Self::update_tyres`] on a chassis held apart from `bodies`: `chassis` is this
+    /// controller's chassis as the caller holds it, and the tyres' impulses are applied to it
+    /// alone. The ground under each wheel is read from `bodies`, which the call only reads.
+    #[profiling::function]
+    pub fn update_tyres_of(
+        &mut self,
+        dt: Real,
+        chassis: &mut RigidBody,
+        bodies: &RigidBodySet,
+        colliders: &ColliderSet,
+    ) {
+        self.size_friction(chassis, bodies, colliders, dt);
+        self.apply_friction(chassis, colliders);
+        self.turn_wheels(chassis, dt);
+    }
+
+    /// Turns each wheel by the distance it rolls over `dt` at the chassis' velocity.
+    fn turn_wheels(&mut self, chassis: &RigidBody, dt: Real) {
         for wheel in &mut self.wheels {
             let vel = chassis.velocity_at_point(wheel.raycast_info.hard_point_ws);
 
             if wheel.raycast_info.is_in_contact {
-                // Use the same per-wheel forward direction as `update_friction` (rolling
+                // Use the same per-wheel forward direction as `size_friction` (rolling
                 // direction on the contact plane) instead of the chassis' forward axis:
                 // the latter yields a zero or sign-flipped rotation whenever it doesn't
                 // match the wheel's actual rolling direction.
@@ -657,8 +695,16 @@ impl DynamicRayCastVehicleController {
         }
     }
 
+    /// Sizes each grounded wheel's drive, brake and side-friction impulses from `chassis` and the
+    /// ground under the wheel, read from `bodies`.
     #[profiling::function]
-    fn update_friction(&mut self, bodies: &mut RigidBodySet, colliders: &ColliderSet, dt: Real) {
+    fn size_friction(
+        &mut self,
+        chassis: &RigidBody,
+        bodies: &RigidBodySet,
+        colliders: &ColliderSet,
+        dt: Real,
+    ) {
         let num_wheels = self.wheels.len();
 
         if num_wheels == 0 {
@@ -702,7 +748,7 @@ impl DynamicRayCastVehicleController {
                         .filter(|b| b.is_dynamic())
                     {
                         wheel.side_impulse = resolve_single_bilateral(
-                            &bodies[self.chassis],
+                            chassis,
                             wheel.raycast_info.contact_point_ws,
                             ground_body,
                             wheel.raycast_info.contact_point_ws,
@@ -710,7 +756,7 @@ impl DynamicRayCastVehicleController {
                         );
                     } else {
                         wheel.side_impulse = resolve_single_unilateral(
-                            &bodies[self.chassis],
+                            chassis,
                             wheel.raycast_info.contact_point_ws,
                             self.axle[i],
                         );
@@ -743,7 +789,7 @@ impl DynamicRayCastVehicleController {
                             default_rolling_friction_impulse
                         };
                         let contact_pt = WheelContactPoint::new(
-                            &bodies[self.chassis],
+                            chassis,
                             ground_object
                                 .and_then(|h| colliders[h].parent())
                                 .map(|h| &bodies[h]),
@@ -792,12 +838,13 @@ impl DynamicRayCastVehicleController {
             }
         }
 
-        // apply the impulses
-        {
-            let chassis = bodies
-                .get_mut_internal_with_modification_tracking(self.chassis)
-                .unwrap();
+    }
 
+    /// Applies the impulses [`Self::size_friction`] sized to `chassis` and records their ground
+    /// reactions.
+    fn apply_friction(&mut self, chassis: &mut RigidBody, colliders: &ColliderSet) {
+        let num_wheels = self.wheels.len();
+        {
             for wheel_id in 0..num_wheels {
                 let wheel = &self.wheels[wheel_id];
                 let contact_point = wheel.raycast_info.contact_point_ws;
