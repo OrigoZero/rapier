@@ -93,6 +93,10 @@ pub struct RigidBody {
     /// step: the farthest particle travel of its soft body over the coming step (zero for
     /// regular bodies).
     pub(crate) soft_motion_margin: Real,
+    /// The unit normal of the plane this body moves along and turns about
+    /// ([`Self::set_plane_hold`]), or `None` when it moves freely.
+    #[cfg_attr(feature = "serde-serialize", serde(default))]
+    pub(crate) plane_normal: Option<Vector>,
     /// Whether the solver keeps the velocity this body ends each substep with
     /// ([`Self::set_records_substep_velocities`]).
     pub(crate) records_substeps: bool,
@@ -145,6 +149,7 @@ impl RigidBody {
             soft_body: crate::dynamics::SoftBodyHandle::invalid(),
             soft_cluster: u32::MAX,
             soft_motion_margin: 0.0,
+            plane_normal: None,
             records_substeps: false,
             substep_vels: Vec::new(),
             substep_dt: 0.0,
@@ -198,6 +203,7 @@ impl RigidBody {
             soft_body: _soft_body, // The soft-body markers belong to the proxy, not to its state.
             soft_cluster: _soft_cluster,
             soft_motion_margin: _soft_motion_margin, // Engine-managed, like the markers.
+            plane_normal,
             records_substeps,
             substep_vels: _substep_vels, // What the last step recorded belongs to this body's own run.
             substep_dt: _substep_dt,
@@ -219,6 +225,7 @@ impl RigidBody {
         self.enabled = *enabled;
         self.additional_solver_iterations = *additional_solver_iterations;
         self.additional_pgs_iterations = *additional_pgs_iterations;
+        self.plane_normal = *plane_normal;
         self.records_substeps = *records_substeps;
         self.user_data = *user_data;
 
@@ -486,6 +493,7 @@ impl RigidBody {
 
             self.mprops.flags = locked_axes;
             self.update_world_mass_properties();
+            self.drop_locked_motion();
         }
     }
 
@@ -493,6 +501,79 @@ impl RigidBody {
     #[inline]
     pub fn locked_axes(&self) -> LockedAxes {
         self.mprops.flags
+    }
+
+    /// Removes the motion a dynamic body holds along its locked axes and across the plane it is
+    /// held to, so a locked axis or a plane hold holds the body still along it whatever wrote its
+    /// velocity: a velocity set directly, or one the body had when the axis was locked or the
+    /// plane stated. A force, an impulse or a contact gives it none there.
+    fn drop_locked_motion(&mut self) {
+        if self.body_type != RigidBodyType::Dynamic {
+            return;
+        }
+        let flags = self.mprops.flags;
+        let plane = self.plane_normal;
+        for vels in [&mut self.vels, &mut self.impulse_vels] {
+            if flags.contains(LockedAxes::TRANSLATION_LOCKED_X) {
+                vels.linvel.x = 0.0;
+            }
+            if flags.contains(LockedAxes::TRANSLATION_LOCKED_Y) {
+                vels.linvel.y = 0.0;
+            }
+            #[cfg(feature = "dim3")]
+            {
+                if flags.contains(LockedAxes::TRANSLATION_LOCKED_Z) {
+                    vels.linvel.z = 0.0;
+                }
+                if flags.contains(LockedAxes::ROTATION_LOCKED_X) {
+                    vels.angvel.x = 0.0;
+                }
+                if flags.contains(LockedAxes::ROTATION_LOCKED_Y) {
+                    vels.angvel.y = 0.0;
+                }
+                if flags.contains(LockedAxes::ROTATION_LOCKED_Z) {
+                    vels.angvel.z = 0.0;
+                }
+            }
+            #[cfg(feature = "dim2")]
+            if flags.contains(LockedAxes::ROTATION_LOCKED_Z) {
+                vels.angvel = 0.0;
+            }
+            if let Some(normal) = plane {
+                *vels = vels.held_to_plane(normal);
+            }
+        }
+    }
+
+    /// The unit normal of the plane this body is held to, or `None` when it moves freely.
+    #[inline]
+    pub fn plane_hold(&self) -> Option<Vector> {
+        self.plane_normal
+    }
+
+    /// Holds this body to a plane of normal `normal` (any length but zero), or frees it with
+    /// `None`: a dynamic body then moves along the plane and turns only about its normal. The
+    /// solver keeps every substep's motion in the plane, so the body stays on whatever plane
+    /// parallel to it it stands on: put it where it should be held before holding it. Its motion
+    /// across the plane is removed at once.
+    pub fn set_plane_hold(&mut self, normal: Option<Vector>, wake_up: bool) {
+        if self.is_soft_frame() {
+            // A soft-frame proxy's state is derived from its cluster's particles: this
+            // setter is ignored for it.
+            return;
+        }
+        let normal = normal.and_then(|n| {
+            let length = n.length();
+            (length.is_finite() && length > 0.0).then(|| n / length)
+        });
+        if normal == self.plane_normal {
+            return;
+        }
+        self.plane_normal = normal;
+        self.drop_locked_motion();
+        if self.is_dynamic_or_kinematic() && wake_up {
+            self.wake_up(true);
+        }
     }
 
     /// Locks or unlocks all rotational movement for this body.
@@ -515,6 +596,7 @@ impl RigidBody {
             self.mprops.flags.set(LockedAxes::ROTATION_LOCKED_Y, locked);
             self.mprops.flags.set(LockedAxes::ROTATION_LOCKED_Z, locked);
             self.update_world_mass_properties();
+            self.drop_locked_motion();
         }
     }
 
@@ -550,6 +632,7 @@ impl RigidBody {
                 .flags
                 .set(LockedAxes::ROTATION_LOCKED_Z, !allow_rotations_z);
             self.update_world_mass_properties();
+            self.drop_locked_motion();
         }
     }
 
@@ -590,6 +673,7 @@ impl RigidBody {
                 .flags
                 .set(LockedAxes::TRANSLATION_LOCKED, locked);
             self.update_world_mass_properties();
+            self.drop_locked_motion();
         }
     }
 
@@ -638,6 +722,7 @@ impl RigidBody {
             .flags
             .set(LockedAxes::TRANSLATION_LOCKED_Z, !allow_translation_z);
         self.update_world_mass_properties();
+        self.drop_locked_motion();
     }
 
     #[inline]
@@ -1126,6 +1211,7 @@ impl RigidBody {
                 RigidBodyType::Dynamic | RigidBodyType::KinematicVelocityBased => {
                     self.vels.linvel = linvel;
                     self.impulse_vels.linvel = Vector::ZERO;
+                    self.drop_locked_motion();
                     if wake_up {
                         self.wake_up(true)
                     }
@@ -1153,6 +1239,7 @@ impl RigidBody {
                 RigidBodyType::Dynamic | RigidBodyType::KinematicVelocityBased => {
                     self.vels.angvel = angvel;
                     self.impulse_vels.angvel = Default::default();
+                    self.drop_locked_motion();
                     if wake_up {
                         self.wake_up(true)
                     }
@@ -1180,6 +1267,7 @@ impl RigidBody {
                 RigidBodyType::Dynamic | RigidBodyType::KinematicVelocityBased => {
                     self.vels.angvel = angvel;
                     self.impulse_vels.angvel = Default::default();
+                    self.drop_locked_motion();
                     if wake_up {
                         self.wake_up(true)
                     }

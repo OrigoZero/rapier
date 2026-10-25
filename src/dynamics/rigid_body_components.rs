@@ -623,6 +623,20 @@ impl RigidBodyVelocity<Real> {
         Self { linvel, angvel }
     }
 
+    /// This velocity held to a plane of unit normal `normal`: its linear part along the plane,
+    /// and its angular part about the normal alone (none in 2D, where every turn is about an
+    /// axis across a line's normal).
+    #[must_use]
+    pub fn held_to_plane(&self, normal: Vector) -> Self {
+        Self {
+            linvel: self.linvel - normal * normal.dot(self.linvel),
+            #[cfg(feature = "dim2")]
+            angvel: 0.0,
+            #[cfg(feature = "dim3")]
+            angvel: normal * normal.dot(self.angvel),
+        }
+    }
+
     /// Create a new rigid-body velocity component.
     #[must_use]
     #[cfg(feature = "dim3")]

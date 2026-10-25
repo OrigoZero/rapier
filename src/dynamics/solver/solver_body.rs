@@ -39,6 +39,9 @@ pub(crate) const SOLVER_BODY_ALLOW_FAST_ROTATION: u8 = 1;
 /// Per-solver-body flag: keep the velocity the body ends each substep with
 /// (`RigidBody::set_records_substep_velocities`).
 pub(crate) const SOLVER_BODY_RECORD_SUBSTEPS: u8 = 2;
+/// Per-solver-body flag: the body is held to a plane (`RigidBody::set_plane_hold`), whose unit
+/// normal is `SolverBodies::planes` at its slot.
+pub(crate) const SOLVER_BODY_PLANE_HOLD: u8 = 4;
 
 #[derive(Default)]
 pub struct SolverBodies {
@@ -46,6 +49,9 @@ pub struct SolverBodies {
     pub poses: Vec<SolverPose<Real>>,
     /// Per-body flag bytes (see `SOLVER_BODY_ALLOW_FAST_ROTATION`), indexed like `vels`/`poses`.
     pub flags: Vec<u8>,
+    /// The unit normal of the plane each body flagged `SOLVER_BODY_PLANE_HOLD` is held to,
+    /// indexed like `vels`/`poses` (zero for the others).
+    pub planes: Vec<Vector>,
 }
 
 impl SolverBodies {
@@ -53,12 +59,14 @@ impl SolverBodies {
         self.vels.clear();
         self.poses.clear();
         self.flags.clear();
+        self.planes.clear();
     }
 
     pub fn resize(&mut self, sz: usize) {
         self.vels.resize(sz, Default::default());
         self.poses.resize(sz, Default::default());
         self.flags.resize(sz, 0);
+        self.planes.resize(sz, Vector::ZERO);
     }
 
     pub fn len(&self) -> usize {
@@ -94,7 +102,12 @@ impl SolverBodies {
             SOLVER_BODY_RECORD_SUBSTEPS
         } else {
             0
+        } | if rb.plane_normal.is_some() && rb.is_dynamic() && !rb.is_soft_frame() {
+            SOLVER_BODY_PLANE_HOLD
+        } else {
+            0
         };
+        self.planes[i] = rb.plane_normal.unwrap_or(Vector::ZERO);
 
         // NOTE: gyroscopic forces (3D) are applied per-substep by the staged
         // solver's velocity-increment stage, not here.
