@@ -20,7 +20,7 @@ pub use self::soft_body_elements::{
 pub use self::soft_body_handle::SoftBodyHandle;
 pub use self::soft_body_material::SoftBodyMaterial;
 pub use self::soft_body_motion::SoftParticleAttachment;
-pub use self::soft_body_plasticity::SoftEdgePlasticFlow;
+pub use self::soft_body_plasticity::{SoftBodyPlasticState, SoftEdgePlasticFlow};
 pub use self::soft_body_set::SoftBodySet;
 pub use self::soft_body_volume::SoftVolumePiece;
 
