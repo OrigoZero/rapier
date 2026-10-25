@@ -28,6 +28,14 @@ impl SoftFemSystem {
         }
     }
 
+    /// The multiply-adds of the step matrix's direct factorization, when the body has one.
+    pub fn direct_factor_work(&self) -> Option<usize> {
+        match (self.direct_valid, self.direct.as_ref()) {
+            (true, Some(direct)) => Some(direct.factor_work()),
+            _ => None,
+        }
+    }
+
     /// Solves `A_step x = b`.
     fn solve_step(&mut self, b: &[Vector], x: &mut [Vector], params: &SoftFemParameters) {
         if let (true, Some(direct)) = (self.direct_valid, self.direct.as_mut()) {

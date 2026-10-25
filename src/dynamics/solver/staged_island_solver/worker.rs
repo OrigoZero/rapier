@@ -360,11 +360,27 @@ pub(super) unsafe fn run_worker(ctx: &SharedCtx, worker_id: usize) {
                 let stage_work = fem_bodies.len();
                 let mut done = 0;
                 while let Some(claimed) = sync.claim(stage, &fem_bodies, 1, worker_id) {
-                    let solver_bodies = unsafe { &mut (*ctx.velocity_solver).solver_bodies };
                     let claimed_len = claimed.len();
                     for index in claimed {
                         // SAFETY: one worker per claimed index; a body writes only its own
                         // particles (soft bodies share no particle).
+                        // A body cheap to factorize answers this substep's constraints
+                        // through its operator where the substep starts (see
+                        // `SoftFemSet::refactors_every_substep`); the first substep's is the
+                        // step's own.
+                        if substep_id > 0 && soft_fem.refactors_every_substep(index) {
+                            // SAFETY: as for the step's responses stage; this body's system,
+                            // pool ranges and constraint sides are its own.
+                            unsafe {
+                                soft_fem.refresh_state(index, &(*ctx.velocity_solver).solver_bodies);
+                                soft_fem.compute_responses(
+                                    index,
+                                    ctx.soft_constraints,
+                                    core::ptr::addr_of_mut!((*ctx.velocity_solver).solver_bodies),
+                                );
+                            }
+                        }
+                        let solver_bodies = unsafe { &mut (*ctx.velocity_solver).solver_bodies };
                         unsafe {
                             soft_fem.predict(index, solver_bodies, &params.soft_bodies.fem);
                         }

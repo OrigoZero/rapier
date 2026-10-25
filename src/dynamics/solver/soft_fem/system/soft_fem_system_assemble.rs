@@ -23,6 +23,11 @@ use simba::scalar::{ComplexField as _, RealField as _};
 
 impl SoftFemSystem {
     /// Reads the particles' state from their solver bodies.
+    pub(crate) fn refresh_state(&mut self, bodies: &SolverBodies) {
+        self.read_state(bodies);
+    }
+
+    /// Reads the particles' state from their solver bodies.
     fn read_state(&mut self, bodies: &SolverBodies) {
         for (k, &slot) in self.slots.iter().enumerate() {
             if slot != u32::MAX {
