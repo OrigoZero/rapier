@@ -484,6 +484,51 @@ impl SoftBodySet {
         }
     }
 
+    /// Puts soft body `handle` at rest with each listed particle at the given position: the
+    /// particles stop there (a pinned one is held there), the cells and clusters take the
+    /// orientation the placed shape gives, each cluster's proxy body stands at the frame the placed
+    /// particles give, and the body sleeps there until something wakes it. A change made to the
+    /// body since the last step that would wake it (a new rest shape, a new material) takes effect
+    /// without waking it.
+    ///
+    /// It restores a resting state read from another simulation of the same body, such as a copy
+    /// of a body another simulation settled: placed in that body's resting shape, it stays in that
+    /// shape. Returns `false`, changing nothing, when `handle` names no body, an index is past the
+    /// body's particles or a position is not a number.
+    #[cfg(feature = "dim3")]
+    pub fn rest_at(&mut self, handle: SoftBodyHandle, places: &[(usize, Vector)], bodies: &mut RigidBodySet) -> bool {
+        let Some(sb) = self.bodies.get_mut(handle.0) else {
+            return false;
+        };
+        if places.iter().any(|(i, p)| *i >= sb.particles.len() || !p.is_finite()) {
+            return false;
+        }
+        for &(i, position) in places {
+            let p = &mut sb.particles[i];
+            p.position = position;
+            p.velocity = Vector::ZERO;
+            p.next_position = (p.inv_mass == 0.0).then_some(position);
+        }
+        sb.refresh_cell_rotations();
+        for ci in 0..sb.clusters.len() {
+            let Some(frame) = sb.cluster_frame(ci) else {
+                continue;
+            };
+            let cluster = &mut sb.clusters[ci];
+            cluster.rotation = frame.pose.rotation;
+            if let Some(rb) = bodies.get_mut(cluster.proxy()) {
+                rb.set_position(frame.pose, false);
+                rb.set_linvel(Vector::ZERO, false);
+                rb.set_angvel(Default::default(), false);
+                rb.sleep();
+            }
+        }
+        sb.sleeping = true;
+        sb.modified = false;
+        sb.positions_modified = true;
+        true
+    }
+
     /// Wakes up the given soft body (effective at the start of the next step).
     pub fn wake_up(&mut self, handle: SoftBodyHandle, bodies: &mut RigidBodySet, strong: bool) {
         if let Some(sb) = self.bodies.get_mut(handle.0) {

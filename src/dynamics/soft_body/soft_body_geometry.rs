@@ -135,6 +135,19 @@ impl SoftBody {
         grad
     }
 
+    /// Sets each cell's rotation to the rotation of the polar decomposition of its deformation
+    /// gradient where the particles stand now, warm-started from the rotation it held: the
+    /// orientation the solver would read from this shape.
+    #[cfg(feature = "dim3")]
+    pub(crate) fn refresh_cell_rotations(&mut self) {
+        let particles = &self.particles;
+        for c in &mut self.cells {
+            let x: [Vector; DIM + 1] = core::array::from_fn(|k| particles[c.vertices[k] as usize].position);
+            let deformation = Self::cell_edge_matrix(x) * c.inv_rest_matrix;
+            c.rotation = super::soft_body_shape_matching::extract_rotation(deformation, c.rotation);
+        }
+    }
+
     /// The edge matrix `[x1 - x0, x2 - x0, (x3 - x0)]` of a simplex cell.
     pub(crate) fn cell_edge_matrix(x: [Vector; DIM + 1]) -> Matrix {
         #[cfg(feature = "dim2")]
