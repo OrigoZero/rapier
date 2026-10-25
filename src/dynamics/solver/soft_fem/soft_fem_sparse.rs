@@ -2,6 +2,7 @@
 //! solver. A soft body's system matrix `A = M + h D + h² K` is symmetric positive definite with a
 //! `DIM × DIM` block per particle pair sharing an element, stored as block-CSR (both triangles).
 
+use super::soft_fem_skyline::SkylineCholesky;
 use crate::alloc_prelude::*;
 use crate::math::{Matrix, Real, Vector};
 #[cfg(not(feature = "std"))]
@@ -159,7 +160,35 @@ impl BlockMatrix {
     }
 }
 
-/// Workspace and stopping rules of the block-Jacobi preconditioned conjugate gradient.
+/// The preconditioner [`ConjugateGradient::solve`] applies to each residual.
+pub(crate) enum Preconditioner<'a> {
+    /// The inverse diagonal blocks of the matrix solved, kept by
+    /// [`ConjugateGradient::update_preconditioner`]. Cheap, and weak on a stiff body whose load
+    /// has to cross many elements: the iteration count it needs grows with the body's stiffness
+    /// and length.
+    BlockJacobi,
+    /// A direct solve against a symmetric positive-definite matrix close to the one solved: the
+    /// skyline Cholesky factor of the step-start matrix. Exact when the two are equal (a step's
+    /// first substep), so the solve converges in one iteration there, and within a few on the
+    /// later substeps, whose matrix moved with the positions alone.
+    Factor(&'a mut SkylineCholesky),
+}
+
+impl Preconditioner<'_> {
+    /// `z = P⁻¹ r`, with `jacobi` the inverse diagonal blocks.
+    fn apply(&mut self, jacobi: &[Matrix], residual: &[Vector], z: &mut [Vector]) {
+        match self {
+            Self::BlockJacobi => {
+                for (k, zk) in z.iter_mut().enumerate() {
+                    *zk = jacobi[k] * residual[k];
+                }
+            }
+            Self::Factor(factor) => factor.solve(residual, z),
+        }
+    }
+}
+
+/// Workspace and stopping rules of the preconditioned conjugate gradient.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ConjugateGradient {
     /// Inverse of every diagonal block (the preconditioner).
@@ -193,8 +222,9 @@ impl ConjugateGradient {
     }
 
     /// Solves `A x = b` from the guess in `x` with fixed-order reductions (worker-independent
-    /// result), returning the iteration count; stops on `‖r‖ ≤ tolerance · ‖b‖` or after
-    /// `max_iterations`, then scales the solution by its energy minimizer, clamped to `[0, 1]`.
+    /// result), each residual preconditioned by `preconditioner`, returning the iteration count;
+    /// stops on `‖r‖ ≤ tolerance · ‖b‖` or after `max_iterations`, then scales the solution by
+    /// its energy minimizer, clamped to `[0, 1]`.
     pub fn solve(
         &mut self,
         matrix: &BlockMatrix,
@@ -202,6 +232,7 @@ impl ConjugateGradient {
         x: &mut [Vector],
         tolerance: Real,
         max_iterations: usize,
+        mut preconditioner: Preconditioner<'_>,
     ) -> usize {
         let n = matrix.num_rows();
         debug_assert_eq!(b.len(), n);
@@ -226,9 +257,7 @@ impl ConjugateGradient {
         if residual_norm2 <= threshold {
             return 0;
         }
-        for (k, z) in self.z.iter_mut().enumerate() {
-            *z = self.preconditioner[k] * self.residual[k];
-        }
+        preconditioner.apply(&self.preconditioner, &self.residual, &mut self.z);
         self.direction.copy_from_slice(&self.z);
         let mut rz: Real = self
             .residual
@@ -260,9 +289,7 @@ impl ConjugateGradient {
             if residual_norm2 <= threshold {
                 return iteration + 1;
             }
-            for (k, z) in self.z.iter_mut().enumerate() {
-                *z = self.preconditioner[k] * self.residual[k];
-            }
+            preconditioner.apply(&self.preconditioner, &self.residual, &mut self.z);
             let rz_next: Real = self
                 .residual
                 .iter()
@@ -344,7 +371,7 @@ mod tests {
         let mut x = vec![Vector::ZERO; n];
         let mut cg = ConjugateGradient::default();
         cg.update_preconditioner(&matrix);
-        cg.solve(&matrix, &rhs, &mut x, 1.0e-10, 1000);
+        cg.solve(&matrix, &rhs, &mut x, 1.0e-10, 1000, Preconditioner::BlockJacobi);
 
         let mut ax = vec![Vector::ZERO; n];
         matrix.mul(&x, &mut ax);

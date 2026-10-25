@@ -1,5 +1,6 @@
 //! The per-substep work: reading the particle state, assembling `A` and the elastic force, the predictor solve and the writeback to the soft body.
 
+use super::super::soft_fem_sparse::Preconditioner;
 use super::SoftFemSystem;
 use crate::alloc_prelude::*;
 use crate::dynamics::SoftBody;
@@ -255,12 +256,21 @@ impl SoftFemSystem {
         // so a partial solve is an under-relaxed step, while a stale start leaves high-frequency
         // content the truncation never removes and pumps energy into a stiff body.
         self.delta.fill(Vector::ZERO);
+        // A body factorized directly at the step start is preconditioned by that factor: it is
+        // this operator on the first substep and close to it on the others, so a stiff body's
+        // step converges in a few iterations where the block-Jacobi preconditioner needs
+        // hundreds, and the truncated solve would leave the body softer than its material.
+        let preconditioner = match (self.direct_valid, self.direct.as_mut()) {
+            (true, Some(factor)) => Preconditioner::Factor(factor),
+            _ => Preconditioner::BlockJacobi,
+        };
         let iterations = self.cg.solve(
             &self.matrix,
             &self.rhs,
             &mut self.delta,
             tolerance,
             max_iterations,
+            preconditioner,
         );
         for (k, &slot) in self.slots.iter().enumerate() {
             if slot != u32::MAX && !self.pinned[k] {
