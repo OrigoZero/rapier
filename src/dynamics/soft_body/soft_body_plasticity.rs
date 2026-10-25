@@ -234,6 +234,81 @@ impl SoftBody {
         self.modified = true;
         true
     }
+
+    /// Takes the rest shape that `rest_positions` states (each particle's rest position, relative
+    /// to the rest center of mass, along the axes this body was created along) as this body's
+    /// plastic state: the particles' rest positions become these, each edge's rest length and
+    /// each dihedral's rest angle become the ones these positions give, and each cell's rest shape
+    /// becomes the shape its vertices hold here, up to a rotation, as a unit-determinant plastic
+    /// stretch of the shape it was created in.
+    ///
+    /// It restores the flow a body of the same elements took when only its rest positions are
+    /// known, such as a copy of a body another simulation flowed: the elements this sets then
+    /// hold that shape at rest, the way the flowed ones did. Returns `false`, changing nothing,
+    /// when `rest_positions` does not hold one position per particle or holds a value that is
+    /// not a number.
+    #[cfg(feature = "dim3")]
+    pub fn set_rest_shape(&mut self, rest_positions: &[Vector]) -> bool {
+        if rest_positions.len() != self.particles.len()
+            || rest_positions.iter().any(|p| !p.is_finite())
+        {
+            return false;
+        }
+        for (p, rest) in self.particles.iter_mut().zip(rest_positions) {
+            p.rest_position = *rest;
+        }
+        for e in &mut self.edges {
+            let initial = e.initial_rest_length();
+            let [a, b] = e.vertices;
+            let length = (rest_positions[b as usize] - rest_positions[a as usize]).length();
+            if initial > 0.0 && length > 0.0 {
+                e.rest_length = length;
+                e.plastic_strain = length / initial - 1.0;
+            }
+        }
+        for d in &mut self.dihedrals {
+            let initial = d.initial_rest_angle();
+            let [p0, p1, p2, p3] = d.vertices.map(|v| rest_positions[v as usize]);
+            let angle = super::soft_body_builder::dihedral_angle(p0, p1, p2, p3);
+            d.rest_angle = angle;
+            d.plastic_set = angle - initial;
+        }
+        for c in &mut self.cells {
+            let rest0: [Vector; DIM + 1] = core::array::from_fn(|k| {
+                self.particles[c.vertices[k] as usize].initial_rest_position
+            });
+            let rest: [Vector; DIM + 1] =
+                core::array::from_fn(|k| rest_positions[c.vertices[k] as usize]);
+            let dm0 = Self::cell_edge_matrix(rest0);
+            if dm0.determinant().abs() <= Real::EPSILON {
+                continue;
+            }
+            // The deformation from the created shape to this one, less its rotation: the
+            // stretch of its polar decomposition `F = R S`, held at a unit determinant the way
+            // the cells' flow keeps it.
+            let deformation = Self::cell_edge_matrix(rest) * dm0.inverse();
+            let rotation = super::soft_body_shape_matching::extract_rotation(
+                deformation,
+                crate::math::Rotation::IDENTITY,
+            );
+            let stretch = Matrix::from_quat(rotation).transpose() * deformation;
+            let det = stretch.determinant();
+            if !det.is_finite() || det <= 1.0e-6 {
+                continue;
+            }
+            let plastic = stretch * (1.0 / det.powf(1.0 / DIM as Real));
+            let dm = plastic * dm0;
+            let volume = dm.determinant() / 6.0;
+            if volume.is_finite() && volume.abs() > Real::EPSILON {
+                c.plastic_stretch = plastic;
+                c.rest_volume = volume;
+                c.inv_rest_matrix = dm.inverse();
+            }
+        }
+        self.rest_fit_pending = false;
+        self.modified = true;
+        true
+    }
 }
 
 impl SoftBody {
