@@ -10,7 +10,8 @@ pub use self::pid_controller::{PdController, PdErrors, PidController};
 
 #[cfg(all(feature = "dim3", feature = "alloc"))]
 pub use self::ray_cast_vehicle_controller::{
-    DynamicRayCastVehicleController, GroundReaction, Wheel, WheelTuning,
+    DynamicRayCastVehicleController, GroundReaction, WHEEL_GROUND_MIN_FACING, Wheel, WheelTuning,
+    wheel_stands_on,
 };
 
 #[cfg(feature = "alloc")]
