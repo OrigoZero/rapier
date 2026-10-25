@@ -18,6 +18,19 @@ use crate::utils::CrossProduct;
 #[cfg(feature = "dim2")]
 use crate::num::Zero;
 
+/// The state a rigid body ended one solver substep in: its velocity, the
+/// world position of its centre of mass and its orientation
+/// ([`RigidBody::substep_velocities`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RigidBodySubstep {
+    /// The body's linear and angular velocity at the end of the substep.
+    pub vels: RigidBodyVelocity<Real>,
+    /// The world position of the body's centre of mass at the end of the substep.
+    pub center_of_mass: Vector,
+    /// The body's orientation at the end of the substep.
+    pub rotation: Rotation,
+}
+
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 /// A physical object that can move, rotate, and collide with other objects in your simulation.
 ///
@@ -80,6 +93,20 @@ pub struct RigidBody {
     /// step: the farthest particle travel of its soft body over the coming step (zero for
     /// regular bodies).
     pub(crate) soft_motion_margin: Real,
+    /// Whether the solver keeps the velocity this body ends each substep with
+    /// ([`Self::set_records_substep_velocities`]).
+    pub(crate) records_substeps: bool,
+    /// How this body ended each substep of the last step the solver moved it
+    /// in, the last entry its state after the step, and the length of those
+    /// substeps. Filled only while `records_substeps` is set.
+    #[cfg_attr(feature = "serde-serialize", serde(skip))]
+    pub(crate) substep_vels: Vec<RigidBodySubstep>,
+    pub(crate) substep_dt: Real,
+    /// The velocity the impulses applied to this body since
+    /// [`Self::clear_impulse_velocities`] gave it, kept while
+    /// `records_substeps` is set ([`Self::impulse_velocities`]).
+    #[cfg_attr(feature = "serde-serialize", serde(skip))]
+    pub(crate) impulse_vels: RigidBodyVelocity<Real>,
     /// User-defined data associated to this rigid-body.
     pub user_data: u128,
 }
@@ -118,6 +145,10 @@ impl RigidBody {
             soft_body: crate::dynamics::SoftBodyHandle::invalid(),
             soft_cluster: u32::MAX,
             soft_motion_margin: 0.0,
+            records_substeps: false,
+            substep_vels: Vec::new(),
+            substep_dt: 0.0,
+            impulse_vels: RigidBodyVelocity::zero(),
         }
     }
 
@@ -167,6 +198,10 @@ impl RigidBody {
             soft_body: _soft_body, // The soft-body markers belong to the proxy, not to its state.
             soft_cluster: _soft_cluster,
             soft_motion_margin: _soft_motion_margin, // Engine-managed, like the markers.
+            records_substeps,
+            substep_vels: _substep_vels, // What the last step recorded belongs to this body's own run.
+            substep_dt: _substep_dt,
+            impulse_vels: _impulse_vels,
             user_data,
         } = other;
 
@@ -174,6 +209,7 @@ impl RigidBody {
         self.mprops = mprops.clone();
         self.ccd_vels = *integrated_vels;
         self.vels = *vels;
+        self.impulse_vels = RigidBodyVelocity::zero();
         self.damping = *damping;
         self.forces = *forces;
         self.ccd = *ccd;
@@ -183,9 +219,73 @@ impl RigidBody {
         self.enabled = *enabled;
         self.additional_solver_iterations = *additional_solver_iterations;
         self.additional_pgs_iterations = *additional_pgs_iterations;
+        self.records_substeps = *records_substeps;
         self.user_data = *user_data;
 
         self.changes = RigidBodyChanges::all();
+    }
+
+    /// Whether the solver keeps the velocity this body ends each substep with
+    /// ([`Self::substep_velocities`]).
+    pub fn records_substep_velocities(&self) -> bool {
+        self.records_substeps
+    }
+
+    /// Have the solver keep the velocity this body ends each substep of a step
+    /// with, read back through [`Self::substep_velocities`] after the step,
+    /// and the body keep the velocity the impulses applied to it between two
+    /// steps give it ([`Self::impulse_velocities`]). Turning it off drops what
+    /// was kept.
+    pub fn set_records_substep_velocities(&mut self, record: bool) {
+        self.records_substeps = record;
+        if !record {
+            self.substep_vels = Vec::new();
+            self.substep_dt = 0.0;
+            self.impulse_vels = RigidBodyVelocity::zero();
+        }
+    }
+
+    /// The velocity the impulses applied to this body since the last
+    /// [`Self::clear_impulse_velocities`] gave it ([`Self::apply_impulse`],
+    /// [`Self::apply_torque_impulse`], [`Self::apply_impulse_at_point`]),
+    /// while [`Self::records_substep_velocities`] is on: the body's velocity
+    /// less this is the velocity it had before those pushes. A velocity set
+    /// since ([`Self::set_linvel`], [`Self::set_angvel`],
+    /// [`Self::set_vels`]) is where the body starts again, so it zeroes the
+    /// part it sets, and so does every write that sets the whole velocity
+    /// ([`Self::sleep`], [`Self::set_body_type`] to fixed, [`Self::copy_from`]).
+    /// Zero while recording is off.
+    pub fn impulse_velocities(&self) -> RigidBodyVelocity<Real> {
+        self.impulse_vels
+    }
+
+    /// Zero what [`Self::impulse_velocities`] holds, so it counts the impulses
+    /// applied from here on.
+    pub fn clear_impulse_velocities(&mut self) {
+        self.impulse_vels = RigidBodyVelocity::zero();
+    }
+
+    /// How this body ended each substep of the last step the solver moved it
+    /// in (its velocity, centre of mass and orientation), in order, and the
+    /// length of one of those substeps. The last entry is the body's state
+    /// after that step, damping applied; the damping the step applies once is
+    /// spread evenly over the entries, the `k`-th of `n` carrying `k / n` of
+    /// it. The list holds as many entries as the step ran substeps for
+    /// the body's island (the world's solver iterations plus the extra ones
+    /// the island asked for), and stays as the solver left it until the solver
+    /// moves the body again or [`Self::clear_substep_velocities`] empties it:
+    /// a sleeping body, a multibody link and a body outside every active
+    /// island record nothing. Empty while
+    /// [`Self::records_substep_velocities`] is off.
+    pub fn substep_velocities(&self) -> (&[RigidBodySubstep], Real) {
+        (&self.substep_vels, self.substep_dt)
+    }
+
+    /// Empty what [`Self::substep_velocities`] holds, so a read after the next
+    /// step tells a step that moved this body from one that did not.
+    pub fn clear_substep_velocities(&mut self) {
+        self.substep_vels.clear();
+        self.substep_dt = 0.0;
     }
 
     /// The additional number of solver iterations run for the constraints directly
@@ -326,6 +426,7 @@ impl RigidBody {
 
             if status == RigidBodyType::Fixed {
                 self.vels = RigidBodyVelocity::zero();
+                self.impulse_vels = RigidBodyVelocity::zero();
             }
 
             // The effective mass-properties depend on the body type (kinematic and
@@ -915,6 +1016,7 @@ impl RigidBody {
     pub fn sleep(&mut self) {
         self.activation.sleep();
         self.vels = RigidBodyVelocity::zero();
+        self.impulse_vels = RigidBodyVelocity::zero();
     }
 
     /// Wakes up this body if it's sleeping, making it active in the simulation.
@@ -1023,6 +1125,7 @@ impl RigidBody {
             match self.body_type {
                 RigidBodyType::Dynamic | RigidBodyType::KinematicVelocityBased => {
                     self.vels.linvel = linvel;
+                    self.impulse_vels.linvel = Vector::ZERO;
                     if wake_up {
                         self.wake_up(true)
                     }
@@ -1049,6 +1152,7 @@ impl RigidBody {
             match self.body_type {
                 RigidBodyType::Dynamic | RigidBodyType::KinematicVelocityBased => {
                     self.vels.angvel = angvel;
+                    self.impulse_vels.angvel = Default::default();
                     if wake_up {
                         self.wake_up(true)
                     }
@@ -1075,6 +1179,7 @@ impl RigidBody {
             match self.body_type {
                 RigidBodyType::Dynamic | RigidBodyType::KinematicVelocityBased => {
                     self.vels.angvel = angvel;
+                    self.impulse_vels.angvel = Default::default();
                     if wake_up {
                         self.wake_up(true)
                     }
@@ -1450,7 +1555,11 @@ impl RigidBody {
     #[profiling::function]
     pub fn apply_impulse(&mut self, impulse: Vector, wake_up: bool) {
         if impulse != Vector::ZERO && self.body_type.is_dynamic() {
-            self.vels.linvel += impulse * self.mprops.effective_inv_mass;
+            let change = impulse * self.mprops.effective_inv_mass;
+            self.vels.linvel += change;
+            if self.records_substeps {
+                self.impulse_vels.linvel += change;
+            }
 
             if wake_up {
                 self.wake_up(true);
@@ -1465,7 +1574,11 @@ impl RigidBody {
     #[profiling::function]
     pub fn apply_torque_impulse(&mut self, torque_impulse: Real, wake_up: bool) {
         if !torque_impulse.is_zero() && self.body_type.is_dynamic() {
-            self.vels.angvel += self.mprops.effective_world_inv_inertia * torque_impulse;
+            let change = self.mprops.effective_world_inv_inertia * torque_impulse;
+            self.vels.angvel += change;
+            if self.records_substeps {
+                self.impulse_vels.angvel += change;
+            }
 
             if wake_up {
                 self.wake_up(true);
@@ -1481,7 +1594,11 @@ impl RigidBody {
     #[profiling::function]
     pub fn apply_torque_impulse(&mut self, torque_impulse: Vector, wake_up: bool) {
         if torque_impulse != Vector::ZERO && self.body_type.is_dynamic() {
-            self.vels.angvel += self.mprops.effective_world_inv_inertia * torque_impulse;
+            let change = self.mprops.effective_world_inv_inertia * torque_impulse;
+            self.vels.angvel += change;
+            if self.records_substeps {
+                self.impulse_vels.angvel += change;
+            }
 
             if wake_up {
                 self.wake_up(true);

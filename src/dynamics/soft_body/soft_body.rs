@@ -156,6 +156,22 @@ pub struct SoftBody {
     pub(crate) contact_load: Real,
     #[cfg_attr(feature = "serde-serialize", serde(default))]
     pub(crate) load_extra_substeps: u8,
+    /// The particles whose state the solver keeps at the end of every substep
+    /// ([`Self::set_recorded_particles`]), sorted and unique.
+    #[cfg_attr(feature = "serde-serialize", serde(skip))]
+    pub(crate) recorded_particles: Vec<u32>,
+    /// The state each recorded particle ended each substep of the last step the solver moved
+    /// this body in, substep-major: `substep_particles[k * recorded + r]` is the velocity and
+    /// position of `recorded_particles[r]` after substep `k`.
+    #[cfg_attr(feature = "serde-serialize", serde(skip))]
+    pub(crate) substep_particles: Vec<(Vector, Vector)>,
+    /// The length of the substeps `substep_particles` holds.
+    #[cfg_attr(feature = "serde-serialize", serde(skip))]
+    pub(crate) substep_particles_dt: Real,
+    /// The velocity the impulses applied since [`Self::clear_impulse_particles`] gave each
+    /// recorded particle, parallel to `recorded_particles` ([`Self::impulse_particles`]).
+    #[cfg_attr(feature = "serde-serialize", serde(skip))]
+    pub(crate) impulse_particles: Vec<Vector>,
     /// The soft body this one was split off from by a tear or a cut (see
     /// [`Self::origin`]).
     #[cfg_attr(feature = "serde-serialize", serde(default))]

@@ -508,6 +508,7 @@ impl SoftBodySet {
             p.position = position;
             p.velocity = Vector::ZERO;
             p.next_position = (p.inv_mass == 0.0).then_some(position);
+            sb.forget_particle_push(i);
         }
         sb.refresh_cell_rotations();
         for ci in 0..sb.clusters.len() {

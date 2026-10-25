@@ -524,6 +524,11 @@ fn extract_piece(
     body.contact_approach_step_open = false;
     body.contact_load = 0.0;
     body.load_extra_substeps = 0;
+    // The particles were renumbered: a piece records nothing until it is asked to.
+    body.recorded_particles = Vec::new();
+    body.substep_particles = Vec::new();
+    body.substep_particles_dt = 0.0;
+    body.impulse_particles = Vec::new();
     (body, moves, remap)
 }
 

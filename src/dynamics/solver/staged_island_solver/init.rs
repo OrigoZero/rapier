@@ -168,6 +168,7 @@ impl StagedIslandSolver {
             self.soft_constraints.init_solver_bodies(
                 &mut vs.solver_bodies,
                 &mut vs.solver_vels_increment,
+                &mut vs.substep_vels,
                 gravity,
                 base_params.dt,
                 |gi| groups[gi].dt,

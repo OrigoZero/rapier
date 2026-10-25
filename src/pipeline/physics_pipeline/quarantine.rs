@@ -66,6 +66,7 @@ impl Quarantine {
     fn sanitize_body_dynamics(rb: &mut RigidBody) {
         rb.vels = RigidBodyVelocity::zero();
         rb.ccd_vels = RigidBodyVelocity::zero();
+        rb.impulse_vels = RigidBodyVelocity::zero();
         rb.forces.force = Vector::ZERO;
         rb.forces.torque = Default::default();
         rb.forces.user_force = Vector::ZERO;

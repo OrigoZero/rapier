@@ -29,6 +29,91 @@ impl SoftBody {
         self.particles.len()
     }
 
+    /// Have the solver keep the velocity and position the given particles end each substep of a
+    /// step with, read back through [`Self::substep_particles`] after the step, and the body keep
+    /// the velocity the impulses applied to them between two steps give them
+    /// ([`Self::impulse_particles`], starting from zero). The indices are kept sorted and unique;
+    /// an empty list stops the recording and drops what was kept. A tear or a cut that renumbers
+    /// the particles of a piece split off clears that piece's list.
+    pub fn set_recorded_particles(&mut self, mut particles: Vec<u32>) {
+        particles.sort_unstable();
+        particles.dedup();
+        if particles.is_empty() {
+            self.substep_particles = Vec::new();
+            self.substep_particles_dt = 0.0;
+        }
+        self.impulse_particles = vec![Vector::ZERO; particles.len()];
+        self.recorded_particles = particles;
+    }
+
+    /// The velocity the impulses applied since the last [`Self::clear_impulse_particles`] gave
+    /// each of [`Self::recorded_particles`], in the same order ([`Self::apply_impulse`],
+    /// [`Self::apply_particle_impulse`], [`Self::apply_impulse_at_point`],
+    /// [`Self::apply_radial_impulse`]): a particle's velocity less its entry is the velocity it
+    /// had before those pushes. A velocity set since ([`Self::set_particle_velocity`], pinning
+    /// the particle, placing it, the body falling asleep) is where the particle starts again, so
+    /// it zeroes the particle's entry.
+    pub fn impulse_particles(&self) -> &[Vector] {
+        &self.impulse_particles
+    }
+
+    /// Zero what [`Self::impulse_particles`] holds, so it counts the impulses applied from here
+    /// on.
+    pub fn clear_impulse_particles(&mut self) {
+        self.impulse_particles.fill(Vector::ZERO);
+    }
+
+    /// Add the velocity change `dv` an impulse gave the `i`-th particle to its entry of
+    /// [`Self::impulse_particles`], when the particle is recorded.
+    pub(crate) fn note_particle_push(recorded: &[u32], pushes: &mut [Vector], i: usize, dv: Vector) {
+        if recorded.is_empty() {
+            return;
+        }
+        if let Ok(column) = recorded.binary_search(&(i as u32))
+            && let Some(push) = pushes.get_mut(column)
+        {
+            *push += dv;
+        }
+    }
+
+    /// Zero the `i`-th particle's entry of [`Self::impulse_particles`]: its velocity was set.
+    pub(crate) fn forget_particle_push(&mut self, i: usize) {
+        if self.recorded_particles.is_empty() {
+            return;
+        }
+        if let Ok(column) = self.recorded_particles.binary_search(&(i as u32))
+            && let Some(push) = self.impulse_particles.get_mut(column)
+        {
+            *push = Vector::ZERO;
+        }
+    }
+
+    /// The particles whose substep states the solver keeps ([`Self::set_recorded_particles`]),
+    /// sorted.
+    pub fn recorded_particles(&self) -> &[u32] {
+        &self.recorded_particles
+    }
+
+    /// How the recorded particles ended each substep of the last step the solver moved this body
+    /// in: their velocities and positions substep-major (`states[k * recorded + r]` is
+    /// [`Self::recorded_particles`]`[r]` after substep `k`, the last substep's after linear
+    /// damping, which the step applies once and the states spread evenly: substep `k` of `n`
+    /// carries `k / n` of it), and the length of one substep. The states hold as many substeps as the step ran
+    /// for the body's island (the world's solver iterations plus the extra ones the island asked
+    /// for, a hit soft body's impact and load substeps included), and stay as the solver left them
+    /// until it moves the body again or [`Self::clear_substep_particles`] empties them: a sleeping
+    /// body records nothing.
+    pub fn substep_particles(&self) -> (&[(Vector, Vector)], Real) {
+        (&self.substep_particles, self.substep_particles_dt)
+    }
+
+    /// Empty what [`Self::substep_particles`] holds, so a read after the next step tells a step
+    /// that moved this body from one that did not.
+    pub fn clear_substep_particles(&mut self) {
+        self.substep_particles.clear();
+        self.substep_particles_dt = 0.0;
+    }
+
     /// The world-space position of the `i`-th particle.
     pub fn particle_position(&self, i: usize) -> Vector {
         self.particles[i].position
@@ -64,6 +149,7 @@ impl SoftBody {
     pub fn set_particle_velocity(&mut self, i: usize, velocity: Vector) {
         self.particles[i].velocity = velocity;
         self.particles[i].next_position = None;
+        self.forget_particle_push(i);
         self.modified = true;
     }
 
@@ -462,5 +548,6 @@ impl SoftBody {
             p.force = Vector::ZERO;
             p.next_position = None;
         }
+        self.clear_impulse_particles();
     }
 }

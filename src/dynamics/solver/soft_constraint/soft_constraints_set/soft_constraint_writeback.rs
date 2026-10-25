@@ -6,7 +6,9 @@ use core::sync::atomic::Ordering;
 #[allow(unused_imports)]
 use simba::scalar::{ComplexField as _, RealField as _};
 
+use crate::alloc_prelude::*;
 use crate::dynamics::solver::solver_body::SolverBodies;
+use crate::dynamics::solver::velocity_solver::SubstepRecord;
 use crate::math::{DIM, Real, Vector};
 
 use super::super::soft_element_constraint::SoftScalarConstraintWriteback;
@@ -147,9 +149,17 @@ impl SoftConstraintsSet {
     }
 
     /// Writes the solved poses and velocities of awake body `ai`'s particles back to the soft
-    /// body (linear damping applied, a pinned particle snapped to its target). SAFETY: writes only
-    /// that body's particles; the caller guarantees each awake body is written back by one worker.
-    pub unsafe fn writeback_particles(&self, ai: usize, bodies: &SolverBodies, step_dt: Real) {
+    /// body (linear damping applied, a pinned particle snapped to its target), and the substep
+    /// states `substep_vels` kept for the particles the body records
+    /// (`SoftBody::substep_particles`). SAFETY: writes only that body's particles; the caller
+    /// guarantees each awake body is written back by one worker.
+    pub unsafe fn writeback_particles(
+        &self,
+        ai: usize,
+        bodies: &SolverBodies,
+        substep_vels: &[Vec<SubstepRecord>],
+        step_dt: Real,
+    ) {
         let awake = &self.awake[ai];
         let sb = unsafe { &mut *awake.ptr };
         let slots = &self.slots[awake.slot_start..awake.slot_start + awake.num_particles];
@@ -175,6 +185,9 @@ impl SoftConstraintsSet {
                 p.velocity -= normal * normal.dot(p.velocity);
                 p.position -= normal * (normal.dot(p.position) - offset);
             }
+        }
+        if !sb.recorded_particles.is_empty() {
+            record_substep_particles(sb, slots, bodies, substep_vels, awake.substep_dt);
         }
     }
 
@@ -232,3 +245,44 @@ impl SoftConstraintsSet {
 }
 
 pub(super) use super::super::soft_element_constraint::outer_product as outer;
+
+/// Copy the substep states the solver kept for `sb`'s recorded particles into
+/// `sb.substep_particles`, substep-major, the last substep's the state each particle was just
+/// written back with. The linear damping the writeback applies once, to the velocity the step
+/// ends with, is spread evenly over the substeps: substep `k` of `n` carries `k / n` of it.
+fn record_substep_particles(
+    sb: &mut crate::dynamics::SoftBody,
+    slots: &[u32],
+    bodies: &SolverBodies,
+    substep_vels: &[Vec<SubstepRecord>],
+    substep_dt: Real,
+) {
+    let earlier = sb
+        .recorded_particles
+        .first()
+        .and_then(|&particle| slots.get(particle as usize))
+        .and_then(|&slot| substep_vels.get(slot as usize))
+        .map_or(0, Vec::len);
+    let substeps = (earlier + 1) as Real;
+    let crate::dynamics::SoftBody { recorded_particles, substep_particles, particles, .. } = &mut *sb;
+    substep_particles.clear();
+    substep_particles.reserve((earlier + 1) * recorded_particles.len());
+    for k in 0..=earlier {
+        let share = (k + 1) as Real / substeps;
+        for &particle in recorded_particles.iter() {
+            let slot = slots.get(particle as usize).copied();
+            let state = if k < earlier {
+                slot.and_then(|slot| {
+                    let (vel, position, _) = substep_vels.get(slot as usize)?.get(k)?;
+                    let p = particles.get(particle as usize)?;
+                    let damped = p.velocity - bodies.get_vel(slot).linear;
+                    Some((vel.linear + damped * share, *position))
+                })
+            } else {
+                particles.get(particle as usize).map(|p| (p.velocity, p.position))
+            };
+            substep_particles.push(state.unwrap_or((Vector::ZERO, Vector::ZERO)));
+        }
+    }
+    sb.substep_particles_dt = substep_dt;
+}

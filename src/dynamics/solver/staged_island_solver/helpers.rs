@@ -2,6 +2,7 @@
 //! [`VelocitySolver`]: generic (multibody) constraint init and the
 //! multibody-only halves of buffer init and position integration.
 
+use crate::alloc_prelude::*;
 use crate::dynamics::solver::SolverVel;
 use crate::dynamics::solver::VelocitySolver;
 use crate::dynamics::solver::contact_constraint::{
@@ -80,6 +81,12 @@ impl VelocitySolver {
             self.solver_gyro.clear();
             self.solver_gyro
                 .resize(aligned_solver_bodies_len, GyroParams::default());
+        }
+
+        // Grown, never shrunk: the slots of bodies that record their substeps keep their
+        // allocations from one step to the next, and a slot no recording body holds is never read.
+        if self.substep_vels.len() < aligned_solver_bodies_len {
+            self.substep_vels.resize_with(aligned_solver_bodies_len, Vec::new);
         }
 
         // Assign solver ids to multibodies, and collect the relevant roots.

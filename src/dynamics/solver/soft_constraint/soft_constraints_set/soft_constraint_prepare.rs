@@ -4,8 +4,12 @@
 #[allow(unused_imports)]
 use simba::scalar::{ComplexField as _, RealField as _};
 
+use crate::alloc_prelude::*;
 use crate::dynamics::SoftBody;
-use crate::dynamics::solver::solver_body::{SolverBodies, SolverPose, SolverVel};
+use crate::dynamics::solver::solver_body::{
+    SOLVER_BODY_RECORD_SUBSTEPS, SolverBodies, SolverPose, SolverVel,
+};
+use crate::dynamics::solver::velocity_solver::SubstepRecord;
 use crate::math::{AngVector, Matrix, Real, Vector};
 use crate::utils::{AngularInertiaOps, CrossProduct};
 
@@ -260,11 +264,14 @@ impl SoftConstraintsSet {
 
     /// Fills the solver bodies of the awake soft bodies' particles: a pinned one is kinematic
     /// (zero inverse mass, velocity to its target), a free one gets scaled gravity and user force.
-    /// `group_dt(group)` is the group's substep length, `step_dt` the whole step's.
+    /// `group_dt(group)` is the group's substep length, `step_dt` the whole step's. The slots of
+    /// the particles a body records (`SoftBody::set_recorded_particles`) are flagged to keep
+    /// their substep states, starting from an empty record in `substep_vels`.
     pub fn init_solver_bodies(
         &self,
         bodies: &mut SolverBodies,
         increments: &mut [SolverVel<Real>],
+        substep_vels: &mut [Vec<SubstepRecord>],
         gravity: Vector,
         step_dt: Real,
         group_dt: impl Fn(usize) -> Real,
@@ -301,6 +308,14 @@ impl SoftConstraintsSet {
                 let inc = &mut increments[slot];
                 *inc = SolverVel::zero();
                 inc.linear = incr;
+            }
+            for &particle in &sb.recorded_particles {
+                let Some(&slot) = slots.get(particle as usize) else { continue };
+                let slot = slot as usize;
+                bodies.flags[slot] = SOLVER_BODY_RECORD_SUBSTEPS;
+                if let Some(record) = substep_vels.get_mut(slot) {
+                    record.clear();
+                }
             }
         }
     }

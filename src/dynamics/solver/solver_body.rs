@@ -36,6 +36,9 @@ macro_rules! scatter(
 /// `SolverBodies.flags` byte parallel to `vels`/`poses` so the scalar integrate-positions loop
 /// can read it without disturbing the SIMD-gathered `SolverVel`/`SolverPose` layouts.
 pub(crate) const SOLVER_BODY_ALLOW_FAST_ROTATION: u8 = 1;
+/// Per-solver-body flag: keep the velocity the body ends each substep with
+/// (`RigidBody::set_records_substep_velocities`).
+pub(crate) const SOLVER_BODY_RECORD_SUBSTEPS: u8 = 2;
 
 #[derive(Default)]
 pub struct SolverBodies {
@@ -85,6 +88,10 @@ impl SolverBodies {
 
         self.flags[i] = if rb.ccd.allow_fast_rotation {
             SOLVER_BODY_ALLOW_FAST_ROTATION
+        } else {
+            0
+        } | if rb.records_substeps {
+            SOLVER_BODY_RECORD_SUBSTEPS
         } else {
             0
         };

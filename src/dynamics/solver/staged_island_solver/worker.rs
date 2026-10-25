@@ -11,9 +11,9 @@ use crate::dynamics::solver::contact_constraint::ContactWithCoulombFrictionBuild
 #[cfg(feature = "dim3")]
 use crate::dynamics::solver::contact_constraint::ContactWithTwistFrictionBuilder;
 use crate::dynamics::solver::joint_constraint::GenericJointConstraintBuilder;
-use crate::dynamics::solver::solver_body::SOLVER_BODY_ALLOW_FAST_ROTATION;
+use crate::dynamics::solver::solver_body::{SOLVER_BODY_ALLOW_FAST_ROTATION, SOLVER_BODY_RECORD_SUBSTEPS};
 use crate::dynamics::solver::solver_contact_graph::ContactRef;
-use crate::dynamics::{JointGraphEdge, RigidBodyType, RigidBodyVelocity};
+use crate::dynamics::{JointGraphEdge, RigidBodySubstep, RigidBodyType, RigidBodyVelocity};
 use crate::geometry::ContactManifold;
 use crate::math::Real;
 use parry::math::SIMD_WIDTH;
@@ -63,6 +63,9 @@ pub(super) unsafe fn run_worker(ctx: &SharedCtx, worker_id: usize) {
                 debug_assert_eq!(rb.ids.active_set_id, i as u32);
                 let vs = unsafe { &mut *ctx.velocity_solver };
                 vs.solver_bodies.copy_from(i, rb);
+                if vs.solver_bodies.flags[i] & SOLVER_BODY_RECORD_SUBSTEPS != 0 {
+                    vs.substep_vels[i].clear();
+                }
 
                 // The per-substep external-force increment, baked with the
                 // slot's group substep dt (groups are few; the scan is cheap).
@@ -289,6 +292,17 @@ pub(super) unsafe fn run_worker(ctx: &SharedCtx, worker_id: usize) {
                     let claimed_len = claimed.len();
                     for i in claimed {
                         let i = slot_of(i);
+                        // The velocity and pose the previous substep ended with, kept for a
+                        // body that records its substeps; the last substep's are the ones
+                        // the writeback stage hands the body.
+                        if substep_id > 0
+                            && vs.solver_bodies.flags[i] & SOLVER_BODY_RECORD_SUBSTEPS != 0
+                        {
+                            let ended = vs.solver_bodies.vels[i];
+                            let pose = &vs.solver_bodies.poses[i];
+                            let (translation, rotation) = (pose.translation, pose.rotation);
+                            vs.substep_vels[i].push((ended, translation, rotation));
+                        }
                         let incr = vs.solver_vels_increment[i];
                         {
                             let vels = &mut vs.solver_bodies.vels[i];
@@ -913,7 +927,7 @@ pub(super) unsafe fn run_worker(ctx: &SharedCtx, worker_id: usize) {
                 soft.writeback_constraints(constraints, ctx.base_params.dt);
                 let vs = &*ctx.velocity_solver;
                 for ai in awake {
-                    soft.writeback_particles(ai, &vs.solver_bodies, ctx.base_params.dt);
+                    soft.writeback_particles(ai, &vs.solver_bodies, &vs.substep_vels, ctx.base_params.dt);
                 }
             }
             done += claimed_len;
@@ -973,12 +987,48 @@ pub(super) unsafe fn run_worker(ctx: &SharedCtx, worker_id: usize) {
                 let solver_vels = &vs.solver_bodies.vels[rb.ids.active_set_id as usize];
                 let solver_poses = &vs.solver_bodies.poses[rb.ids.active_set_id as usize];
 
-                let mut new_vels = RigidBodyVelocity {
+                let undamped = RigidBodyVelocity {
                     linvel: solver_vels.linear,
                     angvel: solver_vels.angular,
                 };
-                new_vels = new_vels.apply_damping(base_params.dt, &rb.damping);
+                let new_vels = undamped.apply_damping(base_params.dt, &rb.damping);
                 rb.vels = new_vels;
+
+                let slot = rb.ids.active_set_id as usize;
+                if vs.solver_bodies.flags[slot] & SOLVER_BODY_RECORD_SUBSTEPS != 0 {
+                    // The damping the step applies once, to the velocity it ends with, is
+                    // spread evenly over its substeps: the substep `k` of `n` carries `k / n`
+                    // of it, the last all of it.
+                    let recorded = &vs.substep_vels[slot];
+                    let substeps = (recorded.len() + 1) as Real;
+                    let damped_lin = new_vels.linvel - undamped.linvel;
+                    let damped_ang = new_vels.angvel - undamped.angvel;
+                    rb.substep_vels.clear();
+                    rb.substep_vels.extend(recorded.iter().enumerate().map(
+                        |(k, (v, center_of_mass, rotation))| {
+                            let share = (k + 1) as Real / substeps;
+                            RigidBodySubstep {
+                                vels: RigidBodyVelocity {
+                                    linvel: v.linear + damped_lin * share,
+                                    angvel: v.angular + damped_ang * share,
+                                },
+                                center_of_mass: *center_of_mass,
+                                rotation: *rotation,
+                            }
+                        },
+                    ));
+                    rb.substep_vels.push(RigidBodySubstep {
+                        vels: new_vels,
+                        center_of_mass: solver_poses.translation,
+                        rotation: solver_poses.rotation,
+                    });
+                    rb.substep_dt = ctx
+                        .groups
+                        .iter()
+                        .find(|g| g.bodies.contains(&slot))
+                        .map(|g| g.dt)
+                        .unwrap_or(ctx.groups[0].dt);
+                }
 
                 // NOTE: if it's a position-based kinematic body, don't writeback as we want
                 //       to preserve exactly the value given by the user (it might not be
