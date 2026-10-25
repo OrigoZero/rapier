@@ -272,6 +272,9 @@ impl ContactWithTwistFrictionBuilder<SimdReal> {
 
                 let projected_velocity = (vel1 - vel2).gdot(force_dir1);
                 restitution_seed = is_bouncy * restitution * projected_velocity;
+                // `force_dir1` points from the second body into the first, so the
+                // projection is negative while the two close.
+                out_constraint.closing_speed[k] = -projected_velocity;
 
                 out_constraint.normal_part[k].torque_dir1 = torque_dir1;
                 out_constraint.normal_part[k].torque_dir2 = torque_dir2;
@@ -627,6 +630,9 @@ pub(crate) struct ContactWithTwistFriction<N: ScalarType> {
     pub manifold_id: [ContactRef; SIMD_WIDTH],
     pub num_contacts: u8,
     pub manifold_contact_id: [[u8; SIMD_WIDTH]; MAX_MANIFOLD_POINTS],
+    /// Each point's closing speed at the start of the step (see
+    /// [`crate::geometry::ContactData::closing_speed`]), written back with the impulses.
+    pub closing_speed: [N; MAX_MANIFOLD_POINTS],
 }
 
 impl ContactWithTwistFriction<SimdReal> {
@@ -797,11 +803,33 @@ impl ContactWithTwistFriction<SimdReal> {
         let warmstart_twist_impulses: [_; SIMD_WIDTH] =
             utils::canonicalize_zero(self.twist_part.impulse).into();
 
+        // The manifold's one friction constraint acts at its friction center. Each point
+        // reports the share of its total impulse that point's normal impulse carries of
+        // the manifold's (an equal share when the manifold carried none), so the points'
+        // friction impulses sum to the manifold's.
+        let friction = self.tangent_part.impulse_accumulator + self.tangent_part.impulse;
+        let (friction_x, friction_y): ([Real; SIMD_WIDTH], [Real; SIMD_WIDTH]) = (
+            utils::canonicalize_zero(friction.x).into(),
+            utils::canonicalize_zero(friction.y).into(),
+        );
+        let mut normal_sums = [0.0 as Real; SIMD_WIDTH];
+        let mut active_counts = [0u32; SIMD_WIDTH];
+        for k in 0..self.num_contacts as usize {
+            let impulses: [Real; SIMD_WIDTH] = self.normal_part[k].total_impulse().into();
+            for ii in 0..SIMD_WIDTH {
+                if self.manifold_contact_id[k][ii] != u8::MAX {
+                    normal_sums[ii] += impulses[ii];
+                    active_counts[ii] += 1;
+                }
+            }
+        }
+
         for k in 0..self.num_contacts as usize {
             let warmstart_impulses: [_; SIMD_WIDTH] =
                 utils::canonicalize_zero(self.normal_part[k].impulse).into();
             let impulses: [_; SIMD_WIDTH] =
                 utils::canonicalize_zero(self.normal_part[k].total_impulse()).into();
+            let closing_speeds: [_; SIMD_WIDTH] = utils::canonicalize_zero(self.closing_speed[k]).into();
 
             for ii in 0..SIMD_WIDTH {
                 let contact_id = self.manifold_contact_id[k][ii];
@@ -814,6 +842,14 @@ impl ContactWithTwistFriction<SimdReal> {
                     let active_contact = &mut manifold.points[contact_id as usize];
                     active_contact.data.warmstart_impulse = warmstart_impulses[ii];
                     active_contact.data.impulse = impulses[ii];
+                    active_contact.data.closing_speed = closing_speeds[ii];
+                    let share = if normal_sums[ii] > 0.0 {
+                        impulses[ii] / normal_sums[ii]
+                    } else {
+                        1.0 / active_counts[ii].max(1) as Real
+                    };
+                    active_contact.data.tangent_impulse =
+                        TangentImpulse::new(friction_x[ii] * share, friction_y[ii] * share);
                     active_contact.data.warmstart_tangent_impulse =
                         warmstart_tangent_impulses.extract(ii);
                     {

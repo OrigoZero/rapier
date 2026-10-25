@@ -237,6 +237,9 @@ impl ContactWithCoulombFrictionBuilder {
 
                 let projected_velocity = (vel1 - vel2).gdot(force_dir1);
                 restitution_seed = is_bouncy * restitution * projected_velocity;
+                // `force_dir1` points from the second body into the first, so the
+                // projection is negative while the two close.
+                out_constraint.closing_speed[k] = -projected_velocity;
 
                 out_constraint.normal_part[k].torque_dir1 = torque_dir1;
                 out_constraint.normal_part[k].torque_dir2 = torque_dir2;
@@ -551,6 +554,9 @@ pub(crate) struct ContactWithCoulombFriction<N: ScalarType> {
     pub manifold_id: [ContactRef; SIMD_WIDTH],
     pub num_contacts: u8,
     pub manifold_contact_id: [[u8; SIMD_WIDTH]; MAX_MANIFOLD_POINTS],
+    /// Each point's closing speed at the start of the step (see
+    /// [`crate::geometry::ContactData::closing_speed`]), written back with the impulses.
+    pub closing_speed: [N; MAX_MANIFOLD_POINTS],
 }
 
 impl ContactWithCoulombFriction<SimdReal> {
@@ -709,6 +715,7 @@ impl ContactWithCoulombFriction<SimdReal> {
             let impulses: [_; SIMD_WIDTH] =
                 utils::canonicalize_zero(self.normal_part[k].total_impulse()).into();
             let tangent_impulses = utils::canonicalize_zero(self.tangent_part[k].total_impulse());
+            let closing_speeds: [_; SIMD_WIDTH] = utils::canonicalize_zero(self.closing_speed[k]).into();
 
             for ii in 0..SIMD_WIDTH {
                 let contact_id = self.manifold_contact_id[k][ii];
@@ -729,6 +736,7 @@ impl ContactWithCoulombFriction<SimdReal> {
                     }
                     active_contact.data.impulse = impulses[ii];
                     active_contact.data.tangent_impulse = tangent_impulses.extract(ii);
+                    active_contact.data.closing_speed = closing_speeds[ii];
                 }
             }
         }
