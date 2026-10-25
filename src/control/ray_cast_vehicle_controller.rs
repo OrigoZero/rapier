@@ -177,6 +177,12 @@ pub struct Wheel {
     pub forward_impulse: Real,
     /// The side impulses applied by the wheel on the chassis.
     pub side_impulse: Real,
+    /// The impulse the caller applied to the chassis this step along the wheel's axle at its
+    /// contact point, between [`DynamicRayCastVehicleController::update_suspension`] and
+    /// [`DynamicRayCastVehicleController::update_tyres`]. The wheel's own forward and side
+    /// impulses are held to the share of the tyre's friction circle this one leaves.
+    /// [`DynamicRayCastVehicleController::update_suspension`] sets it to zero.
+    pub held_side_impulse: Real,
 
     /// The steering angle for this wheel.
     pub steering: Real,
@@ -221,6 +227,7 @@ impl Wheel {
             max_suspension_force: info.max_suspension_force,
             skid_info: 0.0,
             side_impulse: 0.0,
+            held_side_impulse: 0.0,
             forward_impulse: 0.0,
             side_friction_stiffness: info.side_friction_stiffness,
         }
@@ -442,9 +449,39 @@ impl DynamicRayCastVehicleController {
     /// ([`Self::take_ground_reactions`]), each at the wheel's contact point, and the caller
     /// applies them ([`Self::apply_ground_reaction`]). The reactions of the previous call are
     /// dropped.
-    #[profiling::function]
+    ///
+    /// It runs [`Self::update_suspension`] and then [`Self::update_tyres`].
     pub fn update_vehicle(&mut self, dt: Real, queries: QueryPipelineMut) {
+        let QueryPipelineMut {
+            dispatcher,
+            bvh,
+            bodies,
+            colliders,
+            filter,
+        } = queries;
+        self.update_suspension(
+            dt,
+            QueryPipelineMut {
+                dispatcher,
+                bvh,
+                bodies: &mut *bodies,
+                colliders: &mut *colliders,
+                filter,
+            },
+        );
+        self.update_tyres(dt, bodies, colliders);
+    }
+
+    /// The first half of [`Self::update_vehicle`]: finds the ground under every wheel and
+    /// applies each wheel's suspension impulse to the chassis at its contact point. It drops
+    /// the ground reactions of the previous call and records the suspension's, and it sets
+    /// every wheel's [`Wheel::held_side_impulse`] to zero.
+    #[profiling::function]
+    pub fn update_suspension(&mut self, dt: Real, queries: QueryPipelineMut) {
         self.ground_reactions.clear();
+        for wheel in &mut self.wheels {
+            wheel.held_side_impulse = 0.0;
+        }
         let num_wheels = self.wheels.len();
         let chassis = &queries.bodies[self.chassis];
 
@@ -469,7 +506,7 @@ impl DynamicRayCastVehicleController {
         }
 
         let chassis_mass = chassis.mass();
-        self.update_suspension(chassis_mass);
+        self.compute_suspension_forces(chassis_mass);
 
         let chassis = queries
             .bodies
@@ -501,11 +538,17 @@ impl DynamicRayCastVehicleController {
                 wheel.raycast_info.contact_point_ws,
             );
         }
+    }
 
-        self.update_friction(queries.bodies, queries.colliders, dt);
+    /// The second half of [`Self::update_vehicle`]: applies each grounded wheel's drive, brake
+    /// and side-friction impulses to the chassis, read from the chassis' velocity as the
+    /// suspension and whatever the caller applied after it left it, records their ground
+    /// reactions, and turns the wheels by the distance they roll.
+    #[profiling::function]
+    pub fn update_tyres(&mut self, dt: Real, bodies: &mut RigidBodySet, colliders: &ColliderSet) {
+        self.update_friction(bodies, colliders, dt);
 
-        let chassis = queries
-            .bodies
+        let chassis = bodies
             .get_mut_internal_with_modification_tracking(self.chassis)
             .unwrap();
 
@@ -545,7 +588,7 @@ impl DynamicRayCastVehicleController {
         &mut self.wheels
     }
 
-    fn update_suspension(&mut self, chassis_mass: Real) {
+    fn compute_suspension_forces(&mut self, chassis_mass: Real) {
         for w_it in 0..self.wheels.len() {
             let wheels = &mut self.wheels[w_it];
 
@@ -697,14 +740,13 @@ impl DynamicRayCastVehicleController {
 
                     let x = wheel.forward_impulse * fwd_factor;
                     let y = wheel.side_impulse * side_factor;
+                    let held = wheel.held_side_impulse * side_factor;
 
-                    let impulse_squared = x * x + y * y;
+                    let impulse_squared = x * x + (y + held) * (y + held);
 
                     if impulse_squared > max_imp_squared {
                         sliding = true;
-
-                        let factor = max_imp * crate::utils::inv(impulse_squared.sqrt());
-                        wheel.skid_info *= factor;
+                        wheel.skid_info *= friction_circle_share(x, y, held, max_imp);
                     }
                 }
             }
@@ -900,6 +942,23 @@ impl<'a> WheelContactPoint<'a> {
         (-vrel * self.jac_diag_ab_inv / (num_wheels_on_ground as Real))
             .clamp(-max_impulse, max_impulse)
     }
+}
+
+/// The largest share `f` in `[0, 1]` of a wheel's own impulses `(x, y)` (forward, side) that
+/// keeps `(f·x, f·y + held)` inside the friction circle of radius `max`, where `held` is the side
+/// impulse already applied along the axle. With nothing held it is `max / |(x, y)|`.
+fn friction_circle_share(x: Real, y: Real, held: Real, max: Real) -> Real {
+    let a = x * x + y * y;
+    if a <= 0.0 {
+        return 1.0;
+    }
+    let b = y * held;
+    let c = held * held - max * max;
+    if c >= 0.0 {
+        return 0.0;
+    }
+    let root = (b * b - a * c).max(0.0).sqrt();
+    ((root - b) / a).clamp(0.0, 1.0)
 }
 
 fn resolve_single_bilateral(
