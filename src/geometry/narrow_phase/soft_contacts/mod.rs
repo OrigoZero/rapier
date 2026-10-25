@@ -6,6 +6,8 @@ mod soft_contacts_classify;
 mod soft_contacts_driver;
 mod soft_contacts_edge_pass;
 mod soft_contacts_pairs;
+#[cfg(feature = "dim3")]
+mod soft_contacts_rigid_parts;
 mod soft_contacts_types;
 mod soft_contacts_vertex_pass;
 mod soft_contacts_volume;
@@ -13,6 +15,8 @@ mod soft_self_contacts;
 
 pub(crate) use soft_contacts_edge_pass::detect_edges;
 pub(crate) use soft_contacts_pairs::{update_pair_soft_rigid, update_pair_soft_soft};
+#[cfg(feature = "dim3")]
+pub(crate) use soft_contacts_rigid_parts::{meets_rigid_parts, soft_surface_part_manifolds};
 use soft_contacts_types::Side;
 pub(crate) use soft_contacts_types::{
     SelfTangles, SoftDetectionCtx, SoftRigidContacts, body_frozen, rest_gap_skins,

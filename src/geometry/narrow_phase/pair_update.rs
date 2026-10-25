@@ -178,6 +178,10 @@ pub(super) fn process_pair(
     let rb_handle1 = co1.parent.map(|p| p.handle);
     let rb_handle2 = co2.parent.map(|p| p.handle);
     let mut outcome = OUTCOME_SKIPPED;
+    // The pair's manifolds were rebuilt from the parts of a composite shape (unstable ordinals,
+    // like a pair with a composite workspace).
+    #[allow(unused_mut)] // Never set in 2D.
+    let mut part_manifolds = false;
 
     'emit_events: {
         if rb_handle1 == rb_handle2 && co1.parent.is_some() {
@@ -435,15 +439,46 @@ pub(super) fn process_pair(
             rigid.workspace = None;
         }
 
-        // Rigid-vs-rigid and soft-vs-rigid collisions.
-        let _ = query_dispatcher.contact_manifolds(
-            &pos12,
-            &*co1.shape,
-            &*co2.shape,
-            effective_prediction_distance,
-            &mut rigid.manifolds,
-            &mut rigid.workspace,
-        );
+        // Soft-vs-rigid against a shape of many parts (a triangle mesh, a heightfield, a
+        // compound): each element of the surface meets the parts that hold it (see
+        // `soft_contacts::soft_surface_part_manifolds`).
+        #[cfg(feature = "dim3")]
+        let soft_meets_parts = soft_surface_pair
+            && !two_soft_surfaces
+            && super::soft_contacts::meets_rigid_parts(
+                &*co1.shape,
+                &*co2.shape,
+                co1.deformable_mesh_ref.is_some(),
+            );
+        #[cfg(not(feature = "dim3"))]
+        let soft_meets_parts = false;
+
+        if soft_meets_parts {
+            #[cfg(feature = "dim3")]
+            {
+                rigid.workspace = None;
+                part_manifolds = true;
+                super::soft_contacts::soft_surface_part_manifolds(
+                    query_dispatcher,
+                    &pos12,
+                    &*co1.shape,
+                    &*co2.shape,
+                    co1.deformable_mesh_ref.is_some(),
+                    effective_prediction_distance,
+                    &mut rigid.manifolds,
+                );
+            }
+        } else {
+            // Rigid-vs-rigid and soft-vs-rigid collisions.
+            let _ = query_dispatcher.contact_manifolds(
+                &pos12,
+                &*co1.shape,
+                &*co2.shape,
+                effective_prediction_distance,
+                &mut rigid.manifolds,
+                &mut rigid.workspace,
+            );
+        }
 
         if let Some(soft) =
             soft.filter(|_| co1.deformable_mesh_ref.is_some() || co2.deformable_mesh_ref.is_some())
@@ -795,7 +830,9 @@ pub(super) fn process_pair(
     // Composite pairs have unstable manifold ordinals (see `OUTCOME_FULL_COMPOSITE`),
     // so signal a full rebuild. Must be checked before the `FULL_CLEAN` shortcut: a
     // surviving manifold can look "clean" while a dropped sibling leaked its graph slot.
-    if outcome == OUTCOME_FULL && pair.rigid().is_some_and(|r| r.workspace.is_some()) {
+    if outcome == OUTCOME_FULL
+        && (part_manifolds || pair.rigid().is_some_and(|r| r.workspace.is_some()))
+    {
         return OUTCOME_FULL_COMPOSITE;
     }
     if outcome == OUTCOME_FULL && !membership_changed {
