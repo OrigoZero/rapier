@@ -371,8 +371,9 @@ impl SoftConstraintsSet {
         constraint.solve(bodies, pool);
     }
 
-    /// Solves the attachment constraints of `group` (serial): updated from the current poses when
-    /// `update`, warm-started with `Some(coefficient)`, without bias in the relax pass.
+    /// Solves the attachment constraints of `group` (serial), block by block (see
+    /// [`Self::plan_attachment_blocks`]): updated from the current poses when `update`,
+    /// warm-started with `Some(coefficient)`, without bias in the relax pass.
     pub fn solve_attachments(
         &mut self,
         group: usize,
@@ -382,14 +383,30 @@ impl SoftConstraintsSet {
         warmstart: Option<Real>,
     ) {
         let pool: &[Vector] = &self.fem_responses;
-        for constraint in &mut self.attachments[self.groups[group].attachments.clone()] {
-            if update {
-                constraint.update(bodies, wo_bias);
+        for block in &self.attachment_blocks[self.groups[group].attachment_blocks.clone()] {
+            let members = &self.attachment_block_members[block.members.clone()];
+            for &m in members {
+                let constraint = &mut self.attachments[m as usize];
+                if update {
+                    constraint.update(bodies, wo_bias);
+                }
+                if let Some(coeff) = warmstart {
+                    constraint.warmstart(bodies, pool, coeff);
+                }
             }
-            if let Some(coeff) = warmstart {
-                constraint.warmstart(bodies, pool, coeff);
+            if block.body == u32::MAX {
+                for &m in members {
+                    self.attachments[m as usize].solve(bodies, pool);
+                }
+            } else {
+                super::super::soft_attachment::solve_attachment_block(
+                    &mut self.attachments,
+                    members,
+                    block.body,
+                    bodies,
+                    pool,
+                );
             }
-            constraint.solve(bodies, pool);
         }
     }
 }

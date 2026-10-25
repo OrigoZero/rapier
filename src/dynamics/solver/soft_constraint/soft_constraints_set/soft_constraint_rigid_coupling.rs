@@ -260,6 +260,66 @@ impl SoftConstraintsSet {
     }
 }
 
+impl SoftConstraintsSet {
+    /// Lays out the attachments of each group as they are solved, once the step's attachments
+    /// exist and the FEM bodies have claimed theirs: one block per simulated rigid body holding
+    /// the attachments of distinct particles that move (see
+    /// [`super::super::soft_attachment::solve_attachment_block`]), then one run of the rest,
+    /// solved one at a time.
+    pub fn plan_attachment_blocks(&mut self) {
+        use super::super::soft_attachment::SoftAttachmentBlock;
+        self.attachment_blocks.clear();
+        self.attachment_block_members.clear();
+        let mut work = core::mem::take(&mut self.attachment_block_workspace);
+        let mut shared = core::mem::take(&mut self.attachment_shared_workspace);
+        // A particle held by more than one attachment of the step is solved one attachment at a
+        // time: a block's impulses each move only their own particle.
+        work.clear();
+        work.extend(
+            self.attachments
+                .iter()
+                .enumerate()
+                .map(|(i, c)| (c.particle, i as u32)),
+        );
+        work.sort_unstable();
+        shared.clear();
+        shared.resize(self.attachments.len(), false);
+        for pair in work.windows(2) {
+            if pair[0].0 == pair[1].0 {
+                shared[pair[0].1 as usize] = true;
+                shared[pair[1].1 as usize] = true;
+            }
+        }
+        for gi in 0..self.groups.len() {
+            let first_block = self.attachment_blocks.len();
+            work.clear();
+            for i in self.groups[gi].attachments.clone() {
+                let c = &self.attachments[i];
+                let blocked =
+                    c.body != u32::MAX && (c.fem.is_some() || c.im_particle > 0.0) && !shared[i];
+                work.push((if blocked { c.body } else { u32::MAX }, i as u32));
+            }
+            work.sort_unstable();
+            let mut k = 0;
+            while k < work.len() {
+                let body = work[k].0;
+                let start = self.attachment_block_members.len();
+                while k < work.len() && work[k].0 == body {
+                    self.attachment_block_members.push(work[k].1);
+                    k += 1;
+                }
+                self.attachment_blocks.push(SoftAttachmentBlock {
+                    body,
+                    members: start..self.attachment_block_members.len(),
+                });
+            }
+            self.groups[gi].attachment_blocks = first_block..self.attachment_blocks.len();
+        }
+        self.attachment_block_workspace = work;
+        self.attachment_shared_workspace = shared;
+    }
+}
+
 /// The impulse `[P; L]` (linear axes first) a FEM cluster's proxy slot took to change its velocity
 /// by `dlin`, `dang` (see [`FemClusterSide`]).
 pub(crate) fn fem_cluster_impulse(

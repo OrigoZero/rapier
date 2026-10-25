@@ -1417,6 +1417,146 @@ fn attached_cloth_follows_its_body() {
     );
 }
 
+/// A corotational soft slab of 20 kg (5 x 2 x 6 particles) simulated by `solver`, held by its
+/// whole bottom layer (30 particles, 10 kg) to a 1 kg dynamic body, in empty space without
+/// gravity, stepped at 30 Hz in `substeps` substeps: the body, the particles held to it and the
+/// slab's top layer all start moving at `velocity`.
+fn slab_held_to_a_light_body(
+    solver: SoftBodySolver,
+    substeps: usize,
+    velocity: Vector,
+) -> (PhysicsWorld, RigidBodyHandle, SoftBodyHandle) {
+    let mut world = PhysicsWorld::new();
+    world.gravity = Vector::ZERO;
+    world.integration_parameters.dt = 1.0 / 30.0;
+    world.integration_parameters.num_solver_iterations = substeps;
+    world.integration_parameters.normalized_max_linear_velocity = Real::MAX;
+    let (body, _) = world.insert(
+        RigidBodyBuilder::dynamic()
+            .translation(Vector::new(0.0, -0.4, 0.0))
+            .linvel(velocity)
+            .can_sleep(false),
+        ColliderBuilder::cuboid(0.9, 0.1, 1.2).mass(1.0),
+    );
+    let slab = SoftBodyBuilder::cuboid(Vector::ZERO, Vector::new(0.85, 0.15, 1.1), 5, 2, 6)
+        .cell_model(SoftBodyCellModel::Corotational)
+        .material(SoftBodyMaterial {
+            edge_softness: SpringCoefficients::new(30.0, 0.5),
+            bend_softness: SpringCoefficients::new(10.0, 0.5),
+            volume_softness: SpringCoefficients::new(30.0, 0.5),
+            young_modulus: 3000.0,
+            poisson_ratio: 0.3,
+            elastic_damping_ratio: 0.5,
+            ..Default::default()
+        })
+        .volume_preservation(true)
+        .no_surface_collider()
+        .can_sleep(false)
+        .solver(solver)
+        .mass(20.0);
+    let slab = world.insert_soft_body(slab);
+    let n = world.soft_bodies[slab].num_particles();
+    let bottom: Vec<usize> = (0..n)
+        .filter(|&i| world.soft_bodies[slab].particle_position(i).y < 0.0)
+        .collect();
+    assert_eq!(bottom.len(), 30);
+    for &i in &bottom {
+        let bodies = &world.bodies;
+        world.soft_bodies[slab].attach_particle(i, body, bodies);
+    }
+    for i in 0..n {
+        world.soft_bodies[slab].set_particle_velocity(i, velocity);
+    }
+    (world, body, slab)
+}
+
+/// The fastest any particle of `slab`, or `body` (its spin included), moves off `velocity`.
+fn largest_departure(
+    world: &PhysicsWorld,
+    body: RigidBodyHandle,
+    slab: SoftBodyHandle,
+    velocity: Vector,
+) -> Real {
+    let rb = &world.bodies[body];
+    world.soft_bodies[slab]
+        .particles()
+        .iter()
+        .map(|p| (p.velocity() - velocity).length())
+        .fold((rb.linvel() - velocity).length(), Real::max)
+        .max(rb.angvel().length())
+}
+
+/// Many particles held to a body lighter than they are (30 particles, 10 kg of a 20 kg slab,
+/// held to a 1 kg body) move with it, at 4, 8 and 16 substeps a step, and on the FEM solver at 4:
+/// sliding through empty space at 50 m/s the slab and the body keep sliding together, and a push
+/// on a corner of the slab sets the slab and the body moving off as one, with the momentum of the
+/// push.
+#[test]
+fn particles_held_to_a_lighter_body_move_with_it() {
+    let mut runs = vec![
+        (SoftBodySolver::Constraints, 4),
+        (SoftBodySolver::Constraints, 8),
+        (SoftBodySolver::Constraints, 16),
+    ];
+    if cfg!(feature = "fem") {
+        runs.push((SoftBodySolver::Fem, 4));
+    }
+    for (solver, substeps) in runs {
+        let velocity = Vector::new(0.0, -50.0, 0.0);
+        let (mut world, body, slab) = slab_held_to_a_light_body(solver, substeps, velocity);
+        let mut worst: Real = 0.0;
+        for _ in 0..150 {
+            world.step();
+            worst = worst.max(largest_departure(&world, body, slab, velocity));
+        }
+        assert_finite(&world, slab);
+        assert!(
+            worst < 0.05,
+            "{solver:?}, {substeps} substeps: the slab and the body sliding together at 50 m/s came apart: something moved {worst} m/s off their common velocity"
+        );
+
+        let (mut world, body, slab) = slab_held_to_a_light_body(solver, substeps, Vector::ZERO);
+        let push = Vector::new(0.0, -0.2, 0.5);
+        let corner: Vec<usize> = (0..world.soft_bodies[slab].num_particles())
+            .filter(|&i| {
+                let p = world.soft_bodies[slab].particle_position(i);
+                p.y > 0.0 && p.z < -1.0 && p.x < -0.8
+            })
+            .collect();
+        assert_eq!(corner.len(), 1);
+        world.soft_bodies[slab].apply_particle_impulse(corner[0], push, true);
+        let mut worst: Real = 0.0;
+        for _ in 0..150 {
+            world.step();
+            worst = worst.max(largest_departure(&world, body, slab, Vector::ZERO));
+        }
+        assert_finite(&world, slab);
+        // The push gives the 21 kg of slab and body 0.026 m/s; the one particle of 0.33 kg it
+        // lands on takes it first at 1.6 m/s.
+        assert!(
+            worst < 2.0,
+            "{solver:?}, {substeps} substeps: a push of 0.54 N·s on a 21 kg slab and body set something moving at {worst} m/s"
+        );
+        let total = world.bodies[body].mass() + world.soft_bodies[slab].mass();
+        let momentum = world.bodies[body].linvel() * world.bodies[body].mass()
+            + world.soft_bodies[slab]
+                .particles()
+                .iter()
+                .map(|p| p.velocity() * p.mass())
+                .sum::<Vector>();
+        assert!(
+            (momentum - push).length() < 0.02,
+            "{solver:?}, {substeps} substeps: the push's momentum {push:?} became {momentum:?}"
+        );
+        assert!(
+            (world.bodies[body].linvel() - push / total).length() < 0.02,
+            "{solver:?}, {substeps} substeps: the body moves at {:?}, against {:?} for the slab and body as one",
+            world.bodies[body].linvel(),
+            push / total
+        );
+    }
+}
+
 /// Plasticity: a jelly block whose top is sheared past the yield keeps part of the lean once
 /// released (its rest shape flowed), while an elastic one springs back.
 #[test]
