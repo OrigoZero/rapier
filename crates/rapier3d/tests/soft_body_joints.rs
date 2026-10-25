@@ -473,3 +473,79 @@ fn violently_dragged_one_particle_cluster_stays_bounded() {
     // roundoff-inertia divergence (it reached 1e13 before the fix).
     assert!(peak < 500.0, "particle speeds diverged: peak {peak}");
 }
+
+/// A stiff bar (2 m long, `thickness` square, Young's modulus `young`, 8 kg) cantilevered from its
+/// `x = 0` face, held there either by pinning that face or by a fixed joint from a static body to
+/// a cluster of that face's particles. Steps `steps` steps of `dt` and returns how far the free end
+/// hangs below where it was built and the fastest particle's speed.
+#[cfg(feature = "fem")]
+fn held_bar(solver: SoftBodySolver, young: Real, thickness: Real, dt: Real, jointed: bool, steps: usize) -> (Real, Real) {
+    let mut world = PhysicsWorld::new();
+    world.integration_parameters.dt = dt;
+    let builder = SoftBodyBuilder::cuboid(
+        Vector::new(1.0, 2.0, 0.0),
+        Vector::new(1.0, thickness * 0.5, thickness * 0.5),
+        16,
+        3,
+        3,
+    )
+    .cell_model(SoftBodyCellModel::Corotational)
+    .material(SoftBodyMaterial {
+        young_modulus: young,
+        poisson_ratio: 0.3,
+        elastic_damping_ratio: 1.0,
+        ..Default::default()
+    })
+    .solver(solver)
+    .mass(8.0)
+    .no_surface_collider()
+    .can_sleep(false);
+    let positions = builder.particle_positions().to_vec();
+    let root: Vec<u32> = (0..positions.len() as u32).filter(|&i| positions[i as usize].x < 1.0e-4).collect();
+    let tip: Vec<usize> = (0..positions.len()).filter(|&i| positions[i].x > 2.0 - 1.0e-4).collect();
+    let builder = if jointed { builder } else { builder.pinned_particles(root.clone()) };
+    let h = world.insert_soft_body(builder);
+    if jointed {
+        let cluster = world.add_soft_body_cluster(h, &root).expect("root cluster");
+        let proxy = world.soft_bodies[h].cluster_proxy(cluster).expect("proxy");
+        let frame = *world.bodies[proxy].position();
+        let hook = world.insert_body(RigidBodyBuilder::fixed().pose(frame));
+        world.insert_impulse_joint(hook, proxy, FixedJointBuilder::new());
+    }
+    for _ in 0..steps {
+        world.step();
+    }
+    let sb = &world.soft_bodies[h];
+    assert!(sb.is_enabled(), "{solver:?} jointed {jointed}: the bar was disabled");
+    assert!(sb.particle_positions().all(|p| p.is_finite()), "{solver:?} jointed {jointed}: the bar blew up");
+    let tip_y = tip.iter().map(|&i| sb.particle_position(i).y).sum::<Real>() / tip.len() as Real;
+    let fastest = sb.particle_velocities().map(|v| v.length()).fold(0.0, Real::max);
+    (2.0 - tip_y, fastest)
+}
+
+/// A fixed joint on a cluster of a FEM body holds it through the whole body's stiffness: a stiff
+/// bar jointed by its root face stands out as it does with that face pinned and holds still, for
+/// a thick bar at 60 steps a second and for a slender, more compliant one at 30.
+#[cfg(feature = "fem")]
+#[test]
+fn a_fixed_joint_on_a_fem_bar_holds_it_like_a_pin() {
+    let cases = [(0.2, 1.0 / 60.0, 300), (0.1, 1.0 / 30.0, 600)];
+    let measured: Vec<(Real, Real, Real, Real)> = cases
+        .iter()
+        .map(|&(thickness, dt, steps)| {
+            let (pinned, pinned_speed) = held_bar(SoftBodySolver::Fem, 1.0e7, thickness, dt, false, steps);
+            let (jointed, speed) = held_bar(SoftBodySolver::Fem, 1.0e7, thickness, dt, true, steps);
+            eprintln!(
+                "thickness {thickness}: FEM pinned sag {pinned} (fastest {pinned_speed}), FEM jointed sag {jointed} (fastest {speed})"
+            );
+            (thickness, pinned, jointed, speed)
+        })
+        .collect();
+    for (thickness, pinned, jointed, speed) in measured {
+        assert!(
+            jointed < 1.25 * pinned + 0.01,
+            "thickness {thickness}: the jointed FEM bar sags {jointed} m, the pinned one {pinned} m"
+        );
+        assert!(speed < 0.05, "thickness {thickness}: the jointed FEM bar is still moving at {speed} m/s");
+    }
+}

@@ -227,7 +227,13 @@ pub(super) unsafe fn run_worker(ctx: &SharedCtx, worker_id: usize) {
             for index in claimed {
                 // SAFETY: one worker per claimed index; the body writes only its own system,
                 // pool ranges and constraint sides.
-                unsafe { soft_fem.compute_responses(index, ctx.soft_constraints) };
+                unsafe {
+                    soft_fem.compute_responses(
+                        index,
+                        ctx.soft_constraints,
+                        core::ptr::addr_of_mut!((*ctx.velocity_solver).solver_bodies),
+                    )
+                };
             }
             done += claimed_len;
         }
