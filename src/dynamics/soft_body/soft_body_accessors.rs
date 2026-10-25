@@ -7,6 +7,7 @@ use super::{
     SoftBody, SoftBodyCell, SoftBodyCellModel, SoftBodyEdge, SoftBodyMaterial, SoftBodyParticle,
     SoftVolumePiece,
 };
+use crate::alloc_prelude::*;
 use crate::dynamics::RigidBodyHandle;
 use crate::math::{DIM, Real, Vector};
 
@@ -118,6 +119,145 @@ impl SoftBody {
     pub fn material_mut(&mut self) -> &mut SoftBodyMaterial {
         self.modified = true;
         &mut self.material
+    }
+
+    /// The materials of this body's regions: an element whose `material` index is `k > 0`
+    /// takes the `k - 1`-th of them, an element with index `0` the body's own [`Self::material`].
+    pub fn region_materials(&self) -> &[SoftBodyMaterial] {
+        &self.region_materials
+    }
+
+    /// Sets the materials of this body's regions (see [`Self::region_materials`]). An element
+    /// whose index names no material takes the body's own.
+    pub fn set_region_materials(&mut self, materials: Vec<SoftBodyMaterial>) {
+        self.region_materials = materials;
+        self.modified = true;
+    }
+
+    /// The material an element whose `material` index is `index` takes: the body's own for `0`
+    /// or an index naming no region material, its region material otherwise.
+    #[inline]
+    pub fn element_material(&self, index: u16) -> &SoftBodyMaterial {
+        if index == 0 {
+            &self.material
+        } else {
+            self.region_materials
+                .get(index as usize - 1)
+                .unwrap_or(&self.material)
+        }
+    }
+
+    /// Whether the body's own material or one of its region materials satisfies `test`.
+    pub fn any_material(&self, test: impl Fn(&SoftBodyMaterial) -> bool) -> bool {
+        test(&self.material) || self.region_materials.iter().any(test)
+    }
+
+    /// Gives every element whose particles all satisfy `selected` the material index `index`
+    /// (see [`Self::region_materials`]): the edges, the cells and the dihedrals. Returns how many
+    /// elements took it.
+    pub fn assign_element_material(&mut self, index: u16, selected: impl Fn(u32) -> bool) -> usize {
+        let mut count = 0;
+        for e in &mut self.edges {
+            if e.vertices.iter().all(|&v| selected(v)) {
+                e.material = index;
+                count += 1;
+            }
+        }
+        for c in &mut self.cells {
+            if c.vertices.iter().all(|&v| selected(v)) {
+                c.material = index;
+                count += 1;
+            }
+        }
+        #[cfg(feature = "dim3")]
+        for d in &mut self.dihedrals {
+            if d.vertices.iter().all(|&v| selected(v)) {
+                d.material = index;
+                count += 1;
+            }
+        }
+        self.modified = true;
+        count
+    }
+
+    /// Sets the material index of the `i`-th edge (see [`Self::region_materials`]).
+    pub fn set_edge_material(&mut self, i: usize, index: u16) {
+        if let Some(e) = self.edges.get_mut(i) {
+            e.material = index;
+            self.modified = true;
+        }
+    }
+
+    /// Sets the material index of the `i`-th dihedral (see [`Self::region_materials`]).
+    #[cfg(feature = "dim3")]
+    pub fn set_dihedral_material(&mut self, i: usize, index: u16) {
+        if let Some(d) = self.dihedrals.get_mut(i) {
+            d.material = index;
+            self.modified = true;
+        }
+    }
+
+    /// Sets the law of the `i`-th edge (see [`super::SoftEdgeLaw`]): its load, spring, bound,
+    /// drive, material, number and break group.
+    pub fn set_edge_law(&mut self, i: usize, law: &super::SoftEdgeLaw) {
+        if let Some(e) = self.edges.get_mut(i) {
+            law.apply(e);
+            self.modified = true;
+        }
+    }
+
+    /// Sets the material index of the `i`-th cell (see [`Self::region_materials`]).
+    pub fn set_cell_material(&mut self, i: usize, index: u16) {
+        if let Some(c) = self.cells.get_mut(i) {
+            c.material = index;
+            self.modified = true;
+        }
+    }
+
+    /// Sets the drive of the `i`-th edge's rest length: toward `target` metres at `speed` metres
+    /// per second, or no drive with `None` (see [`super::SoftEdgeActuator`]).
+    pub fn set_edge_actuator(&mut self, i: usize, actuator: Option<super::SoftEdgeActuator>) {
+        if let Some(e) = self.edges.get_mut(i) {
+            e.actuator = actuator;
+            self.modified = true;
+        }
+    }
+
+    /// Sets the spring of the `i`-th edge in physical units, or the material's softness with
+    /// `None` (see [`super::SoftEdgeSpring`]).
+    pub fn set_edge_spring(&mut self, i: usize, spring: Option<super::SoftEdgeSpring>) {
+        if let Some(e) = self.edges.get_mut(i) {
+            e.spring = spring;
+            self.modified = true;
+        }
+    }
+
+    /// Sets the most force the `i`-th edge pushes or pulls with, in newtons (`Real::INFINITY`:
+    /// no bound).
+    pub fn set_edge_max_force(&mut self, i: usize, max_force: Real) {
+        if let Some(e) = self.edges.get_mut(i) {
+            e.max_force = max_force.max(0.0);
+            self.modified = true;
+        }
+    }
+
+    /// The plane the particles are held to, as its unit normal and offset (see
+    /// [`Self::set_plane`]); `None` when they move freely.
+    pub fn plane(&self) -> Option<(Vector, Real)> {
+        self.plane
+    }
+
+    /// Holds every particle to the plane of unit normal `normal` through the points `x` with
+    /// `normal · x == offset`, or frees them with `None`: each step their velocity across the
+    /// plane is removed and they are put back on it, so the body moves as a flat structure (a
+    /// side-on bridge, a 2D puzzle). A normal of zero length frees them.
+    pub fn set_plane(&mut self, plane: Option<(Vector, Real)>) {
+        self.plane = plane.and_then(|(normal, offset)| {
+            let length = normal.length();
+            (length > Real::EPSILON && length.is_finite() && offset.is_finite())
+                .then(|| (normal / length, offset / length))
+        });
+        self.modified = true;
     }
 
     /// The constitutive model of this soft body's cells.

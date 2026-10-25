@@ -541,6 +541,7 @@ impl SoftBody {
             particles: &remap,
             split: &[],
             inserted: &[],
+            removed: &[],
         };
         self.for_each_mesh_mut(|body, mesh| {
             mesh.remap_topology(body, &remap_tables);

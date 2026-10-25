@@ -84,7 +84,48 @@ impl SoftBodyBuilder {
                 *i += shift;
             }
         }
+        if self.edge_laws.len() > first_bend as usize {
+            let at = first_bend as usize;
+            self.edge_laws.splice(
+                at..at,
+                core::iter::repeat_n(super::SoftEdgeLaw::default(), inserted.len()),
+            );
+        }
         self.edges.extend(inserted);
+        self
+    }
+
+    /// Sets the law of each edge, parallel to the concatenation of the structural then the
+    /// bending edges (see [`super::SoftEdgeLaw`]).
+    pub fn edge_laws(mut self, laws: Vec<super::SoftEdgeLaw>) -> Self {
+        self.edge_laws = laws;
+        self
+    }
+
+    /// Sets the numbers that name the particles, parallel to the positions (see
+    /// [`crate::dynamics::SoftBodyParticle::tag`]).
+    pub fn particle_tags(mut self, tags: Vec<u32>) -> Self {
+        self.particle_tags = tags;
+        self
+    }
+
+    /// Sets the materials of the body's regions (see
+    /// [`crate::dynamics::SoftBody::region_materials`]).
+    pub fn region_materials(mut self, materials: Vec<SoftBodyMaterial>) -> Self {
+        self.region_materials = materials;
+        self
+    }
+
+    /// Sets the material index of each cell, parallel to the cells.
+    pub fn cell_materials(mut self, materials: Vec<u16>) -> Self {
+        self.cell_materials = materials;
+        self
+    }
+
+    /// Holds every particle to the plane of `normal` through the points `x` with
+    /// `normal · x == offset` (see [`crate::dynamics::SoftBody::set_plane`]).
+    pub fn plane(mut self, normal: Vector, offset: Real) -> Self {
+        self.plane = Some((normal, offset));
         self
     }
 
@@ -141,7 +182,52 @@ impl SoftBodyBuilder {
                 .iter()
                 .map(|&(i, r)| (remap_other(i), r)),
         );
-        let _ = other_bends;
+        if !self.edge_laws.is_empty() || !other.edge_laws.is_empty() {
+            let full = |laws: &[super::SoftEdgeLaw], n: usize| {
+                let mut laws = laws.to_vec();
+                laws.resize(n, super::SoftEdgeLaw::default());
+                laws
+            };
+            let mine = full(&self.edge_laws, (self_edges + self_bends) as usize);
+            let theirs: Vec<super::SoftEdgeLaw> =
+                full(&other.edge_laws, (other_edges + other_bends) as usize)
+                    .into_iter()
+                    .map(|mut law| {
+                        if law.material > 0 {
+                            law.material += self.region_materials.len() as u16;
+                        }
+                        law
+                    })
+                    .collect();
+            let (mine_edges, mine_bends) = mine.split_at(self_edges as usize);
+            let (theirs_edges, theirs_bends) = theirs.split_at(other_edges as usize);
+            self.edge_laws = mine_edges
+                .iter()
+                .chain(theirs_edges)
+                .chain(mine_bends)
+                .chain(theirs_bends)
+                .copied()
+                .collect();
+        }
+        if !self.cell_materials.is_empty() || !other.cell_materials.is_empty() {
+            let base = self.region_materials.len() as u16;
+            self.cell_materials.resize(self.cells.len(), 0);
+            let mut theirs = other.cell_materials.clone();
+            theirs.resize(other.cells.len(), 0);
+            self.cell_materials.extend(
+                theirs
+                    .into_iter()
+                    .map(|m| if m > 0 { m + base } else { 0 }),
+            );
+        }
+        if !self.particle_tags.is_empty() || !other.particle_tags.is_empty() {
+            self.particle_tags.resize(self.positions.len(), u32::MAX);
+            let mut theirs = other.particle_tags.clone();
+            theirs.resize(other.positions.len(), u32::MAX);
+            self.particle_tags.extend(theirs);
+        }
+        self.region_materials
+            .extend_from_slice(&other.region_materials);
         let shift = |v: &[u32]| -> Vec<u32> { v.iter().map(|&i| i + offset).collect() };
         self.positions.extend_from_slice(&other.positions);
         self.pinned.extend(shift(&other.pinned));

@@ -6,7 +6,7 @@ mod soft_body_builder_mesh_helpers;
 mod soft_body_builder_settings;
 mod soft_body_builder_shapes;
 
-pub use self::soft_body_builder::{SoftBodyBuilder, SoftBodyParticleSettings};
+pub use self::soft_body_builder::{SoftBodyBuilder, SoftBodyParticleSettings, SoftEdgeLaw};
 #[cfg(feature = "dim3")]
 pub(crate) use self::soft_body_builder_mesh_helpers::surface_edge_table;
 #[cfg(feature = "dim3")]

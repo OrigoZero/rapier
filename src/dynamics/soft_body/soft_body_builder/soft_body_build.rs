@@ -71,6 +71,7 @@ impl SoftBodyBuilder {
                 damaged: false,
                 on_surface: false,
                 split_root: i as u32,
+                tag: self.particle_tags.get(i).copied().unwrap_or(u32::MAX),
             })
             .collect();
         let pos = |i: u32| self.positions[i as usize];
@@ -100,6 +101,7 @@ impl SoftBodyBuilder {
                 rotation: Rotation::IDENTITY,
                 stiffness_scale: 1.0,
                 tear_resistance: 1.0,
+                material: 0,
                 color: 0,
                 torn: false,
                 stress: 0.0,
@@ -145,20 +147,19 @@ impl SoftBodyBuilder {
         edge_list.extend(self.bend_edges.iter().map(|e| (*e, SoftBodyEdgeKind::Bend)));
         let mut edges: Vec<SoftBodyEdge> = edge_list
             .iter()
-            .map(|(vertices, kind)| SoftBodyEdge {
-                vertices: *vertices,
-                rest_length: (pos(vertices[0]) - pos(vertices[1])).length(),
-                kind: *kind,
-                tension_only: false,
-                softness: None,
-                tear_resistance: 1.0,
-                impulse: 0.0,
-                plastic_strain: 0.0,
-                color: 0,
-                torn: false,
-                stress: 0.0,
+            .map(|(vertices, kind)| {
+                SoftBodyEdge::new(
+                    *vertices,
+                    (pos(vertices[0]) - pos(vertices[1])).length(),
+                    *kind,
+                )
             })
             .collect();
+        for (i, law) in self.edge_laws.iter().enumerate() {
+            if let Some(e) = edges.get_mut(i) {
+                law.apply(e);
+            }
+        }
         for &i in &self.tension_only_edges {
             if let Some(e) = edges.get_mut(i as usize) {
                 e.tension_only = true;
@@ -185,6 +186,7 @@ impl SoftBodyBuilder {
                 plastic_set: 0.0,
                 impulse: 0.0,
                 color: 0,
+                material: 0,
             })
             .collect();
 
@@ -207,6 +209,10 @@ impl SoftBodyBuilder {
             }
         }
 
+        for (c, &m) in cells.iter_mut().zip(&self.cell_materials) {
+            c.material = m;
+        }
+
         let mut body = SoftBody {
             particles,
             clusters: vec![],
@@ -226,6 +232,8 @@ impl SoftBodyBuilder {
             boundary_closed,
             boundary_element_cells,
             material: self.material,
+            region_materials: self.region_materials.clone(),
+            plane: None,
             cell_model: self.cell_model,
             #[cfg(feature = "fem")]
             solver: self.solver,
@@ -254,6 +262,8 @@ impl SoftBodyBuilder {
         // From the builder's positions: the particles' rest positions are centered on `rest_com`.
         body.volume_pieces = body.compute_volume_pieces(&[], pos);
         body.volume_preservation &= !body.volume_pieces.is_empty();
+        body.set_plane(self.plane);
+        body.modified = false;
         body
     }
 }
@@ -293,7 +303,9 @@ impl SoftBodyBuilder {
                 has_collider,
             ));
         }
-        if !skin_collides && !wire {
+        // A body holding both a surface and a wire (a deck of triangles over a frame of links)
+        // collides through both.
+        if !skin_collides && (!wire || !body.boundary.is_empty()) {
             meshes.push(SoftCollisionMesh::boundary(
                 body,
                 self.self_contacts,

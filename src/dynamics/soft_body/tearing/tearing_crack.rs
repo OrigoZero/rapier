@@ -8,7 +8,7 @@ use parry::utils::hashmap::HashMap;
 
 use super::super::SoftBody;
 use super::tearing::pair;
-use super::tearing_event::SoftBodyTearEvent;
+use super::tearing_event::{SoftBodyLinkBreak, SoftBodyTearEvent};
 use super::tearing_particle_split::{Fan, MeasureKind, SplitLog};
 
 /// The mean load of the fan elements on the given side of the split plane.
@@ -34,10 +34,15 @@ impl SoftBody {
         torn_cells: &[u32],
         event: &mut SoftBodyTearEvent,
     ) -> bool {
-        let edges: Vec<[u32; 2]> = torn_edges
+        // An authored edge (one with a tag) leaves the body whole; the others open a crack.
+        let (links, cracks): (Vec<u32>, Vec<u32>) = torn_edges
             .iter()
-            .filter_map(|&e| self.edges.get(e as usize))
-            .map(|e| e.vertices)
+            .copied()
+            .filter(|&e| (e as usize) < self.edges.len())
+            .partition(|&e| self.edges[e as usize].tag != u32::MAX);
+        let edges: Vec<[u32; 2]> = cracks
+            .iter()
+            .map(|&e| self.edges[e as usize].vertices)
             .collect();
         let mut cells: Vec<u32> = torn_cells
             .iter()
@@ -46,12 +51,64 @@ impl SoftBody {
             .collect();
         cells.sort_unstable();
         cells.dedup();
+        let mut log = SplitLog::default();
+        let removed = self.remove_links(&links, event, &mut log);
+        let cracked = !(edges.is_empty() && cells.is_empty())
+            && self.open_cracks(&edges, &cells, event, &mut log);
+        if !removed && !cracked {
+            return false;
+        }
+        self.finish_topology_change(&log);
+        true
+    }
+
+    /// Removes the authored edges `links` (indices, each an edge with a tag) from the body,
+    /// recording each in `event.broken_links` and `log.removed_links`. Their particles stay.
+    /// Returns whether any was removed.
+    fn remove_links(
+        &mut self,
+        links: &[u32],
+        event: &mut SoftBodyTearEvent,
+        log: &mut SplitLog,
+    ) -> bool {
+        if links.is_empty() {
+            return false;
+        }
+        let mut gone = vec![false; self.edges.len()];
+        for &i in links {
+            let e = &self.edges[i as usize];
+            gone[i as usize] = true;
+            event.broken_links.push(SoftBodyLinkBreak {
+                tag: e.tag,
+                vertices: e.vertices,
+                force: e.force,
+                stress: e.stress,
+                break_group: e.break_group,
+            });
+            log.removed_links.push(e.vertices);
+        }
+        // The most loaded first: the edge whose own load broke it leads, the edges its break
+        // group took along follow.
+        let first = event.broken_links.len() - links.len();
+        event.broken_links[first..]
+            .sort_by(|x, y| y.stress.total_cmp(&x.stress).then(x.tag.cmp(&y.tag)));
+        let mut keep = gone.iter().map(|g| !g);
+        self.edges.retain(|_| keep.next().unwrap_or(true));
+        true
+    }
+
+    /// Opens a crack across every torn edge (as particle pairs) and cell, then splits the
+    /// particles left joining two pieces alone. Returns whether a particle split.
+    fn open_cracks(
+        &mut self,
+        edges: &[[u32; 2]],
+        cells: &[u32],
+        event: &mut SoftBodyTearEvent,
+        log: &mut SplitLog,
+    ) -> bool {
         let Some(kind) = self.measure_kind() else {
             return false;
         };
-        if edges.is_empty() && cells.is_empty() {
-            return false;
-        }
         // Splits rewire the cells and triangles in place: their indices stay valid through the
         // whole tear. Edge indices do not (straddlers are removed), so segment loads are read at
         // each crack.
@@ -61,14 +118,14 @@ impl SoftBody {
             .map(|&c| self.cells[c as usize].vertices)
             .collect();
 
-        let mut log = SplitLog::default();
-        for &[a, b] in &edges {
+        let split_start = log.split_particles.len();
+        for &[a, b] in edges {
             let first = log.split_particles.len();
             // An edge an earlier split removed (a straddler) is already open.
-            let Some((x, y)) = self.current_pair(a, b, &log) else {
+            let Some((x, y)) = self.current_pair(a, b, log) else {
                 continue;
             };
-            if self.crack_across_edge(x, y, &loads, &mut log) {
+            if self.crack_across_edge(x, y, &loads, log) {
                 event.torn_edges.push([a, b]);
                 self.mark_damaged(&[x, y], &log.split_particles[first..]);
             }
@@ -76,22 +133,21 @@ impl SoftBody {
         for (&c, original) in cells.iter().zip(&cell_vertices) {
             let first = log.split_particles.len();
             let vertices = self.cells[c as usize].vertices;
-            if self.crack_through_cell(c, &mut log) {
+            if self.crack_through_cell(c, log) {
                 event.torn_cells.push(*original);
                 self.mark_damaged(&vertices, &log.split_particles[first..]);
             }
         }
-        if log.split_particles.is_empty() {
+        if log.split_particles.len() == split_start {
             return false;
         }
 
-        self.split_pinched(kind, &mut log);
-        self.remove_straddlers_across_pieces(&mut log);
+        self.split_pinched(kind, log);
+        self.remove_straddlers_across_pieces(log);
         event.removed_edges.extend_from_slice(&log.removed_edges);
         event
             .split_particles
-            .extend_from_slice(&log.split_particles);
-        self.finish_topology_change(&log);
+            .extend_from_slice(&log.split_particles[split_start..]);
         true
     }
 

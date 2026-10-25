@@ -32,6 +32,11 @@ impl SoftBodyBuilder {
             tension_only_edges: Vec::new(),
             edge_softness: Vec::new(),
             edge_tear_resistance: Vec::new(),
+            edge_laws: Vec::new(),
+            particle_tags: Vec::new(),
+            region_materials: Vec::new(),
+            cell_materials: Vec::new(),
+            plane: None,
             #[cfg(feature = "dim3")]
             dihedrals: Vec::new(),
             cells: Vec::new(),

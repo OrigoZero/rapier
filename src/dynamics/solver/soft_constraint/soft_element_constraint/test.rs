@@ -48,7 +48,11 @@ fn gradients_match_finite_differences() {
         rhs: 0.0,
         impulse: 0.0,
         peak_impulse: 0.0,
+        trough_impulse: 0.0,
         impulse_bounds: [-Real::MAX, Real::MAX],
+        load_bounds: [Real::MAX, Real::MAX],
+        yield_bounds: [Real::MAX, Real::MAX],
+        rest_range: [0.0, Real::MAX],
     };
     #[cfg(feature = "dim2")]
     let kinds = [

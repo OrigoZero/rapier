@@ -116,6 +116,7 @@ mod tests {
             rotation: Rotation::IDENTITY,
             stiffness_scale: 1.0,
             tear_resistance: 1.0,
+            material: 0,
             color: 0,
             torn: false,
             stress: 0.0,

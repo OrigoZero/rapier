@@ -1,10 +1,10 @@
 //! The element types of a soft body: particles, edges, dihedrals, cells, and the per-body solver and cell-model choices.
-#[cfg(doc)]
 use super::SoftBodyMaterial;
 #[cfg(feature = "serde-serialize")]
 use super::soft_body_material::one;
 use crate::dynamics::SpringCoefficients;
 use crate::math::{DIM, Matrix, Real, Rotation, Vector};
+use na::SimdRealField as _;
 #[cfg(not(feature = "std"))]
 #[allow(unused_imports)]
 use simba::scalar::{ComplexField as _, RealField as _};
@@ -49,6 +49,19 @@ pub struct SoftBodyParticle {
     /// [`Self::split_root`]).
     #[cfg_attr(feature = "serde-serialize", serde(default = "no_split_root"))]
     pub(crate) split_root: u32,
+    /// A number the body's author gave this particle (see [`Self::tag`]); `u32::MAX` when none.
+    #[cfg_attr(feature = "serde-serialize", serde(default = "no_tag"))]
+    pub(crate) tag: u32,
+}
+
+#[cfg(feature = "serde-serialize")]
+fn no_tag() -> u32 {
+    u32::MAX
+}
+
+#[cfg(feature = "serde-serialize")]
+fn infinite() -> Real {
+    Real::INFINITY
 }
 
 #[cfg(feature = "serde-serialize")]
@@ -65,6 +78,13 @@ impl SoftBodyParticle {
         } else {
             self.split_root
         }
+    }
+
+    /// The number the body's author gave this particle ([`crate::dynamics::SoftBodyBuilder::particle_tags`]),
+    /// `u32::MAX` when none. A particle a tear splits keeps it in every copy, and a piece split
+    /// off keeps the tags of its particles, so it names the authored particle wherever it went.
+    pub fn tag(&self) -> u32 {
+        self.tag
     }
 
     /// The world-space position of this particle.
@@ -143,6 +163,49 @@ pub enum SoftBodyEdgeKind {
     Bend,
 }
 
+/// A spring an edge is held by in physical units, in place of the material's softness: its
+/// stiffness in newtons per metre of stretch and its damping in newton-seconds per metre of
+/// stretching speed. The constraint takes the natural frequency and damping ratio these give over
+/// the edge's effective mass at each step, so the spring holds whatever its particles weigh.
+#[derive(Copy, Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
+pub struct SoftEdgeSpring {
+    /// Stiffness, in newtons per metre (force per metre of stretch or squeeze).
+    pub stiffness: Real,
+    /// Damping, in newton-seconds per metre (force per metre per second of stretching speed).
+    pub damping: Real,
+}
+
+impl SoftEdgeSpring {
+    /// The softness of this spring between particles of inverse masses summing to `inv_mass`
+    /// (`None` when they are both pinned or the spring has no stiffness).
+    pub fn softness(&self, inv_mass: Real) -> Option<SpringCoefficients<Real>> {
+        if inv_mass <= 0.0 || self.stiffness <= 0.0 || !self.stiffness.is_finite() {
+            return None;
+        }
+        // ω² = k / m with m = 1 / w the effective mass; ζ = c / (2 √(k m)).
+        let omega = (self.stiffness * inv_mass).sqrt();
+        let zeta = self.damping.max(0.0) * inv_mass / (2.0 * omega);
+        Some(SpringCoefficients::new(
+            omega / Real::simd_two_pi(),
+            zeta,
+        ))
+    }
+}
+
+/// An edge whose rest length is driven: each step it moves toward `target` at `speed`, the way a
+/// hydraulic ram or a muscle extends and retracts. With [`SoftBodyEdge::max_force`] the edge
+/// pushes and pulls no harder than that, so a blocked actuator stalls instead of tearing the body.
+#[derive(Copy, Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
+pub struct SoftEdgeActuator {
+    /// The length the edge is driven to, in metres.
+    pub target: Real,
+    /// How fast the rest length moves toward the target, in metres per second; `Real::INFINITY`
+    /// sets it at once.
+    pub speed: Real,
+}
+
 /// A distance constraint between two particles of a soft body.
 #[derive(Copy, Clone, Debug)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
@@ -155,6 +218,33 @@ pub struct SoftBodyEdge {
     pub kind: SoftBodyEdgeKind,
     /// If `true`, the edge only resists stretching (a rope segment), never compression.
     pub tension_only: bool,
+    /// If `true`, the edge only resists squeezing (a strut resting on a stop), never stretching.
+    #[cfg_attr(feature = "serde-serialize", serde(default))]
+    pub compression_only: bool,
+    /// A spring in physical units holding this edge, overriding [`Self::softness`] and the
+    /// material's softness when set.
+    #[cfg_attr(feature = "serde-serialize", serde(default))]
+    pub spring: Option<SoftEdgeSpring>,
+    /// The most force the edge pushes or pulls with, in newtons (default: `Real::INFINITY`, no
+    /// bound): past it the edge gives way at that force and springs back once the load drops.
+    #[cfg_attr(feature = "serde-serialize", serde(default = "infinite"))]
+    pub max_force: Real,
+    /// The drive of the edge's rest length, when it is an actuator.
+    #[cfg_attr(feature = "serde-serialize", serde(default))]
+    pub actuator: Option<SoftEdgeActuator>,
+    /// Which material of the body the edge takes: `0` the body's own, `k` its `k`-th region
+    /// material (see [`crate::dynamics::SoftBody::region_materials`]).
+    #[cfg_attr(feature = "serde-serialize", serde(default))]
+    pub material: u16,
+    /// A number the body's author gave this edge (`u32::MAX` when none). An edge with a tag is an
+    /// element of its own: tearing it removes it rather than opening a crack through its
+    /// particles, and the tear event lists it by its tag.
+    #[cfg_attr(feature = "serde-serialize", serde(default = "no_tag"))]
+    pub tag: u32,
+    /// The break group of the edge (`0`: none): when one edge of a group tears, every edge of the
+    /// group tears with it in the same step.
+    #[cfg_attr(feature = "serde-serialize", serde(default))]
+    pub break_group: u32,
     /// Softness of this edge, overriding the material's (`edge_softness` / `bend_softness`)
     /// when set: anisotropic cloth (warp, weft and shear stiffness), stiffer seams...
     pub softness: Option<SpringCoefficients<Real>>,
@@ -179,13 +269,88 @@ pub struct SoftBodyEdge {
     /// `tear_smoothing` (see [`Self::stress`]).
     #[cfg_attr(feature = "serde-serialize", serde(default))]
     pub(crate) stress: Real,
+    /// The force the edge carried over the last step, along its direction: positive pulling its
+    /// particles together (resisting a stretch), negative pushing them apart.
+    #[cfg_attr(feature = "serde-serialize", serde(default))]
+    pub(crate) force: Real,
 }
 
 impl SoftBodyEdge {
+    /// An edge between `vertices` at rest length `rest_length`, of `kind`, with every per-edge
+    /// setting at its default (the material's softness, no bound, no tag).
+    pub(crate) fn new(vertices: [u32; 2], rest_length: Real, kind: SoftBodyEdgeKind) -> Self {
+        Self {
+            vertices,
+            rest_length,
+            kind,
+            tension_only: false,
+            compression_only: false,
+            spring: None,
+            max_force: Real::INFINITY,
+            actuator: None,
+            material: 0,
+            tag: u32::MAX,
+            break_group: 0,
+            softness: None,
+            tear_resistance: 1.0,
+            impulse: 0.0,
+            plastic_strain: 0.0,
+            color: 0,
+            torn: false,
+            stress: 0.0,
+            force: 0.0,
+        }
+    }
+
     /// The impulse this edge applied during the last substep, along the edge direction
     /// (positive when the edge was resisting stretching).
     pub fn impulse(&self) -> Real {
         self.impulse
+    }
+
+    /// The force this edge carried over the last step, in newtons along its direction: positive
+    /// when it pulled its particles together (it was stretched), negative when it pushed them
+    /// apart (it was squeezed).
+    pub fn force(&self) -> Real {
+        self.force
+    }
+
+    /// The bounds the edge's kind and [`Self::max_force`] put on its force, as `(push, pull)`,
+    /// without its yield: a tension-only edge pushes with nothing, a compression-only one pulls
+    /// with nothing.
+    pub(crate) fn load_bounds(&self) -> (Real, Real) {
+        let cap = self.max_force.max(0.0);
+        let push = if self.tension_only { 0.0 } else { cap };
+        let pull = if self.compression_only { 0.0 } else { cap };
+        (push, pull)
+    }
+
+    /// The forces past which the edge yields, as `(push, pull)`: the material's
+    /// [`SoftBodyMaterial::edge_yield_force`] in each direction the edge may still take a
+    /// permanent set in, `Real::INFINITY` in the others.
+    pub(crate) fn yield_limits(&self, material: &SoftBodyMaterial) -> (Real, Real) {
+        let (mut push, mut pull) = (Real::INFINITY, Real::INFINITY);
+        if let Some(yield_force) = material.edge_yield_force {
+            let yield_force = yield_force.max(0.0);
+            let flows_in = |strain: Real| {
+                use super::SoftEdgePlasticFlow as Flow;
+                let allowed = match material.edge_plastic_flow {
+                    Flow::Both => true,
+                    Flow::Compression => strain < 0.0,
+                    Flow::Tension => strain > 0.0,
+                };
+                // Up to its bound, short of the rounding the flow's clamp leaves.
+                let bound = material.edge_plastic_bound(strain) * (1.0 - PLASTIC_BOUND_TOLERANCE);
+                allowed && self.plastic_strain * strain.signum() < bound
+            };
+            if flows_in(-1.0) {
+                push = yield_force;
+            }
+            if flows_in(1.0) {
+                pull = yield_force;
+            }
+        }
+        (push, pull)
     }
 
     /// Load of this edge as a fraction of its tear threshold, smoothed over
@@ -195,6 +360,10 @@ impl SoftBodyEdge {
         self.stress
     }
 }
+
+/// The share of its plastic bound an edge's set may fall short of and still count as at the
+/// bound: the flow clamps the rest length to the bound, and the set read back from it rounds.
+const PLASTIC_BOUND_TOLERANCE: Real = 1.0e-4;
 
 /// A dihedral bending constraint between two triangles sharing an edge (3D only).
 ///
@@ -216,6 +385,9 @@ pub struct SoftBodyDihedral {
     pub(crate) plastic_set: Real,
     /// Parallel solve color.
     pub(crate) color: u8,
+    /// Which material of the body the dihedral takes (see [`SoftBodyEdge::material`]).
+    #[cfg_attr(feature = "serde-serialize", serde(default))]
+    pub material: u16,
 }
 
 #[cfg(feature = "dim3")]
@@ -302,6 +474,10 @@ pub struct SoftBodyCell {
     /// [`crate::dynamics::SoftBody::set_cell_tear_resistance`].
     #[cfg_attr(feature = "serde-serialize", serde(default = "one"))]
     pub tear_resistance: Real,
+    /// Which material of the body the cell takes (see [`SoftBodyEdge::material`]): its Young
+    /// modulus, Poisson's ratio, damping, plastic and tear values.
+    #[cfg_attr(feature = "serde-serialize", serde(default))]
+    pub material: u16,
     /// Parallel solve color.
     pub(crate) color: u8,
     /// Set when the cell was strained past the material's `tear_strain` during the last step

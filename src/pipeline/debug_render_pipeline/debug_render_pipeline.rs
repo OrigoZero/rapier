@@ -170,7 +170,7 @@ impl DebugRenderPipeline {
             // The load an element is drawn with: its smoothed tear load when the material tears,
             // its stretch (full at 50%) otherwise, so the picture stays meaningful for a body
             // that never tears.
-            let tears = sb.material().tears();
+            let tears = sb.any_material(|m| m.tears());
             let stretch = |a: u32, b: u32| -> f32 {
                 let (pa, pb) = (&sb.particles()[a as usize], &sb.particles()[b as usize]);
                 let rest = (pa.rest_position() - pb.rest_position()).length();

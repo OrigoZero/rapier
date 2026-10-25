@@ -294,6 +294,7 @@ impl SoftConstraintsSet {
             if update {
                 // A new substep begins: the impulse is the previous one's total.
                 constraint.peak_impulse = constraint.peak_impulse.max(constraint.impulse);
+                constraint.trough_impulse = constraint.trough_impulse.min(constraint.impulse);
                 constraint.update(bodies);
                 self.strained[i] = constraint.is_strained(min_strain);
             }

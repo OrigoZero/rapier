@@ -26,32 +26,48 @@ impl SoftConstraintsSet {
                 let constraint = &self.scalar_constraints[idx];
                 let awake = &self.awake[constraint.soft_body as usize];
                 let sb = unsafe { &mut *awake.ptr };
-                let material = sb.material;
                 let impulse = crate::utils::canonicalize_zero(constraint.impulse);
                 match constraint.writeback {
                     SoftScalarConstraintWriteback::Edge => {
-                        let resistance = if material.tears() {
-                            let e = &sb.edges[constraint.element as usize];
+                        let ei = constraint.element as usize;
+                        let material = *sb.element_material(sb.edges[ei].material);
+                        let tears = material.tears();
+                        let resistance = if tears {
+                            let e = &sb.edges[ei];
                             sb.effective_tear_resistance(e.tear_resistance, &e.vertices)
                         } else {
                             1.0
                         };
-                        let edge = &mut sb.edges[constraint.element as usize];
+                        let edge = &mut sb.edges[ei];
                         edge.impulse = impulse;
+                        edge.force = impulse * crate::utils::inv(awake.substep_dt);
+                        // The rest length the substeps' flow at the yield force left.
+                        if constraint.rest != edge.rest_length {
+                            let initial = edge.initial_rest_length();
+                            if (constraint.rest - edge.rest_length).abs() > 1.0e-4 * initial {
+                                awake.plastic_flow.store(true, Ordering::Relaxed);
+                            }
+                            edge.rest_length = constraint.rest;
+                            edge.plastic_strain = constraint.rest / initial - 1.0;
+                        }
                         // Length as seen at the last substep's update.
                         let len = (constraint.pos[1] - constraint.pos[0]).length();
                         if edge.plastic_flow(len, &material, dt) {
                             awake.plastic_flow.store(true, Ordering::Relaxed);
                         }
-                        if material.tears() {
+                        if tears {
                             // The force is the step's peak substep impulse over the substep length
-                            // (a spike must not hide behind the last substep); the stretch is
+                            // (a spike must not hide behind the last substep), the pull's for the
+                            // tear force and the push's for the crush force; the stretch is
                             // measured against the initial rest length, so plastic flow counts.
-                            let peak = constraint.peak_impulse.max(constraint.impulse);
-                            let force = peak * crate::utils::inv(awake.substep_dt);
-                            let load =
-                                material.edge_tear_load(len, edge.initial_rest_length(), force)
-                                    * crate::utils::inv(resistance);
+                            let pull = constraint.peak_impulse.max(constraint.impulse);
+                            let push = constraint.trough_impulse.min(constraint.impulse);
+                            let inv_dt = crate::utils::inv(awake.substep_dt);
+                            let initial = edge.initial_rest_length();
+                            let load = material
+                                .edge_tear_load(len, initial, pull * inv_dt)
+                                .max(material.edge_tear_load(len, initial, push * inv_dt))
+                                * crate::utils::inv(resistance);
                             edge.stress = material.smooth_stress(edge.stress, load, dt);
                             if edge.stress > 1.0 {
                                 edge.torn = true;
@@ -61,6 +77,8 @@ impl SoftConstraintsSet {
                     }
                     #[cfg(feature = "dim3")]
                     SoftScalarConstraintWriteback::Dihedral => {
+                        let material =
+                            *sb.element_material(sb.dihedrals[constraint.element as usize].material);
                         let dihedral = &mut sb.dihedrals[constraint.element as usize];
                         dihedral.impulse = impulse;
                         // Angle as seen at the last substep's update.
@@ -79,7 +97,7 @@ impl SoftConstraintsSet {
                 let constraint = &self.elastic_constraints[idx - num_scalar_constraints];
                 let awake = &self.awake[constraint.soft_body as usize];
                 let sb = unsafe { &mut *awake.ptr };
-                let material = sb.material;
+                let material = *sb.element_material(sb.cells[constraint.element as usize].material);
                 let resistance = if material.tear_strain.is_some() {
                     let c = &sb.cells[constraint.element as usize];
                     sb.effective_tear_resistance(c.tear_resistance, &c.vertices)
@@ -149,6 +167,13 @@ impl SoftConstraintsSet {
             } else {
                 p.velocity = vel * damping;
                 p.position = bodies.get_pose(slot).translation;
+            }
+        }
+        // A body held to a plane leaves the step on it, moving along it.
+        if let Some((normal, offset)) = sb.plane {
+            for p in &mut sb.particles {
+                p.velocity -= normal * normal.dot(p.velocity);
+                p.position -= normal * (normal.dot(p.position) - offset);
             }
         }
     }

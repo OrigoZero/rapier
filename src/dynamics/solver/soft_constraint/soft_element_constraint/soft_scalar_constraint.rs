@@ -65,8 +65,24 @@ pub(crate) struct SoftScalarConstraint {
     /// The largest impulse the constraint had accumulated at the end of a substep of this step (the
     /// force tear criterion reads the step's peak, not its last substep).
     pub peak_impulse: Real,
+    /// The most negative impulse the constraint had accumulated at the end of a substep of this
+    /// step (a push: the crush criterion reads it).
+    pub trough_impulse: Real,
     pub impulse_bounds: [Real; 2],
+    /// The impulses per substep a distance constraint's kind and force bound hold it to, as
+    /// `[push, pull]` (`Real::MAX`: no bound).
+    pub load_bounds: [Real; 2],
+    /// The impulses per substep past which a distance constraint gives way, as `[push, pull]`
+    /// (`Real::MAX`: it does not), see [`Self::return_map`].
+    pub yield_bounds: [Real; 2],
+    /// The shortest and the longest rest length a yielding distance constraint's plastic bounds
+    /// allow: reaching one, it hardens.
+    pub rest_range: [Real; 2],
 }
+
+/// How close to its yield bound a constraint's impulse must come for the element to count as
+/// giving way: the solve holds a yielding element at its bound up to rounding.
+const YIELD_TOLERANCE: Real = 1.0e-3;
 
 /// Gradients of the dihedral angle between the triangles `(p0, p1, p2)` and `(p0, p1, p3)`
 /// (Müller et al., 2007); returns the angle minus `rest`.
@@ -129,7 +145,10 @@ impl SoftScalarConstraint {
             }
         }
 
-        let c = self.compute_gradients();
+        let mut c = self.compute_gradients();
+        if self.kind == SoftScalarConstraintKind::Distance {
+            c = self.return_map(c);
+        }
 
         // Effective mass and softness.
         let mut w = 0.0;
@@ -143,6 +162,38 @@ impl SoftScalarConstraint {
         // No corrective-velocity cap: the bias is the spring force itself, and capping it would
         // make the material's response depend on the substep count.
         self.rhs = c * self.erp_inv_dt;
+    }
+
+    /// Flows a yielding distance constraint's rest length at the start of a substep, given its
+    /// length error `c`: an element that carried its yield force through the substep just ended
+    /// gave way, so its rest length takes the length the load put it at, and one whose length
+    /// reached the end of its plastic range there hardens, its yield in that direction lifted.
+    /// It hardens where it stands, so the solve stops it there and never springs it back to the
+    /// end of the range (a hit carrying it past that end within one substep sets it that much
+    /// further). Returns the length error against the rest length it leaves.
+    #[inline]
+    fn return_map(&mut self, c: Real) -> Real {
+        let [push, pull] = self.yield_bounds;
+        let length = c + self.rest;
+        let gave_way = |bound: Real| bound * (1.0 - YIELD_TOLERANCE);
+        if push != Real::MAX && c < 0.0 && self.impulse <= -gave_way(push) {
+            self.rest = length;
+            if length <= self.rest_range[0] {
+                self.yield_bounds[0] = Real::MAX;
+            }
+        } else if pull != Real::MAX && c > 0.0 && self.impulse >= gave_way(pull) {
+            self.rest = length;
+            if length >= self.rest_range[1] {
+                self.yield_bounds[1] = Real::MAX;
+            }
+        } else {
+            return c;
+        }
+        self.impulse_bounds = [
+            -self.load_bounds[0].min(self.yield_bounds[0]),
+            self.load_bounds[1].min(self.yield_bounds[1]),
+        ];
+        0.0
     }
 
     /// Recomputes the gradients from `self.pos`; returns the constraint value.

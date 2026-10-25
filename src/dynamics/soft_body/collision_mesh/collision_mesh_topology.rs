@@ -335,6 +335,7 @@ impl SoftCollisionMesh {
     /// re-derived, a direct mesh follows its particles ([`follow_insertions`], [`follow_splits`]),
     /// a skinned mesh follows its cells and comes apart along the cracks ([`follow_pieces`]).
     pub(crate) fn remap_topology(&mut self, body: &SoftBody, remap: &SoftTopologyRemap) {
+        let wire = self.is_wire();
         match &mut self.binding {
             SoftMeshMapping::Skinned { bindings } => {
                 if !remap.cells.is_empty() {
@@ -395,6 +396,18 @@ impl SoftCollisionMesh {
                             *v = vertex_remap[*v as usize];
                         }
                     }
+                }
+                if !remap.removed.is_empty() && wire {
+                    // The segments of the removed edges leave the wire with them.
+                    let pairs: Vec<[u32; 2]> = remap
+                        .removed
+                        .iter()
+                        .map(|&[a, b]| [a.min(b), a.max(b)])
+                        .collect();
+                    self.indices.retain(|element| {
+                        let (a, b) = (particles[element[0] as usize], particles[element[1] as usize]);
+                        !pairs.contains(&[a.min(b), a.max(b)])
+                    });
                 }
                 if !remap.inserted.is_empty() {
                     follow_insertions(particles, &mut self.indices, remap.inserted);
