@@ -35,6 +35,10 @@ bitflags::bitflags! {
         /// following its particles): BF & NF updates, no NF pair workspace invalidation, never
         /// recycled.
         const DEFORMED = 1 << 9;
+        /// Flag indicating that the collider's friction, restitution, either combine rule or its
+        /// active hooks were changed: NF update, never recycled, so every pair it is in takes the
+        /// new material from the next step.
+        const MATERIAL = 1 << 10;
     }
 }
 
