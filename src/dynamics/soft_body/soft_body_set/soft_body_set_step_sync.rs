@@ -111,6 +111,18 @@ impl SoftBodySet {
         bodies: &mut RigidBodySet,
         colliders: &mut ColliderSet,
     ) {
+        Self::fit_cluster_proxies(sb, bodies, colliders, true);
+    }
+
+    /// [`Self::update_cluster_proxies`], with `dead_zone` saying whether a pose within the fit's
+    /// rest noise of the proxy's previous pose keeps that pose: off, every proxy takes exactly the
+    /// frame its particles give.
+    fn fit_cluster_proxies(
+        sb: &mut SoftBody,
+        bodies: &mut RigidBodySet,
+        colliders: &mut ColliderSet,
+        dead_zone: bool,
+    ) {
         let _ = colliders;
         for ci in 0..sb.clusters.len() {
             let Some(mut frame) = sb.cluster_frame(ci) else {
@@ -134,7 +146,7 @@ impl SoftBodySet {
             let dr = frame.pose.rotation.angle_between(&prev.rotation).abs();
             #[cfg(feature = "dim3")]
             let dr = frame.pose.rotation.angle_between(prev.rotation);
-            if dt < 1.0e-6 && dr < 1.0e-6 {
+            if dead_zone && dt < 1.0e-6 && dr < 1.0e-6 {
                 frame.pose = prev;
             }
             sb.clusters[ci].rotation = frame.pose.rotation;
@@ -482,6 +494,32 @@ impl SoftBodySet {
         for (_, sb) in self.bodies.iter_mut() {
             sb.refresh_vertex_caches();
         }
+    }
+
+    /// Fits soft body `handle` to its particles as they stand, the way the end of a step does:
+    /// each cell takes the rotation its shape gives, and each live cluster's proxy body takes
+    /// exactly the frame, velocity and reduced mass its particles give, however close that frame
+    /// stands to the proxy's previous pose. A body whose particles or rest shape
+    /// were set between steps ([`SoftBody::set_particle_position`],
+    /// [`SoftBody::set_particle_velocity`], [`SoftBody::set_rest_shape`]) then has its frame where
+    /// its particles stand, so a read of it answers for them and the next step's joints and
+    /// contacts on its clusters start from there. The body's sleep state is left as it is.
+    /// Returns `false`, changing nothing, when `handle` names no body.
+    #[cfg(feature = "dim3")]
+    pub fn refit_to_particles(
+        &mut self,
+        handle: SoftBodyHandle,
+        bodies: &mut RigidBodySet,
+        colliders: &mut ColliderSet,
+    ) -> bool {
+        let Some(sb) = self.bodies.get_mut(handle.0) else {
+            return false;
+        };
+        sb.refresh_cell_rotations();
+        Self::fit_cluster_proxies(sb, bodies, colliders, false);
+        // The next step's maintenance moves the colliders into the refitted frames.
+        sb.positions_modified = true;
+        true
     }
 
     /// Puts soft body `handle` at rest with each listed particle at the given position: the
