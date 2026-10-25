@@ -26,7 +26,7 @@ pub(crate) use self::solver::StagedIslandSolver;
 pub use parry::mass_properties::MassProperties;
 
 #[cfg(feature = "alloc")]
-pub use self::rigid_body::{RigidBody, RigidBodyBuilder};
+pub use self::rigid_body::{RigidBody, RigidBodyBuilder, RigidBodySubstep};
 #[cfg(feature = "alloc")]
 pub use self::rigid_body_set::{BodyPair, RigidBodySet};
 #[cfg(feature = "alloc")]

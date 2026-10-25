@@ -230,6 +230,7 @@ pub(super) fn sync_soft_body(
         for p in &mut sb.particles {
             p.velocity = Vector::ZERO;
         }
+        sb.clear_impulse_particles();
     }
     sb.sleeping = sleeping;
     // Creep keeps the body awake: the sleep rule sees an infinite speed until the flow stops.

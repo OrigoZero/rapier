@@ -2,8 +2,8 @@ use crate::alloc_prelude::*;
 use crate::dynamics::solver::solver_body::SolverBodies;
 use crate::dynamics::{MultibodyLinkId, solver::SolverVel};
 #[cfg(feature = "dim3")]
-use crate::math::{AngVector, Rotation};
-use crate::math::{DVector, Real};
+use crate::math::AngVector;
+use crate::math::{DVector, Real, Rotation, Vector};
 
 /// Per-solver-body data for the staged solver's per-substep gyroscopic pass (3D
 /// only). `enabled` is false for bodies whose gyroscopic forces are off (the
@@ -48,7 +48,17 @@ pub(crate) struct VelocitySolver {
     /// gyro-free scenes (the common case) skip the pass entirely.
     #[cfg(feature = "dim3")]
     pub solver_gyro: Vec<GyroParams>,
+    /// The velocity and centre-of-mass pose each recording solver body
+    /// (`SOLVER_BODY_RECORD_SUBSTEPS`: a rigid body that records its substeps, or a recorded
+    /// soft-body particle) ended each substep but the last with, indexed like `solver_bodies`.
+    /// Only the slots of recording bodies are written, each by the worker that claims the slot;
+    /// the list only grows, so a step that records nothing allocates nothing.
+    pub substep_vels: Vec<Vec<SubstepRecord>>,
 }
+
+/// The velocity, position and orientation one solver body ended one substep with, as
+/// `VelocitySolver::substep_vels` keeps it for a recording body.
+pub(crate) type SubstepRecord = (SolverVel<Real>, Vector, Rotation);
 
 impl VelocitySolver {
     pub fn new() -> Self {
@@ -60,6 +70,7 @@ impl VelocitySolver {
             multibody_roots: Vec::new(),
             #[cfg(feature = "dim3")]
             solver_gyro: Vec::new(),
+            substep_vels: Vec::new(),
         }
     }
 }

@@ -40,6 +40,7 @@ impl SoftBody {
             particle.inv_mass = 0.0;
             particle.velocity = Vector::ZERO;
             particle.next_position = Some(particle.position);
+            self.forget_particle_push(i);
         } else {
             particle.inv_mass = crate::utils::inv(particle.mass);
             particle.next_position = None;
@@ -117,9 +118,11 @@ impl SoftBody {
     /// Applies a linear velocity change (`impulse` per unit of mass) to every free particle of
     /// this soft body: the whole body is kicked at the same velocity.
     pub fn apply_impulse(&mut self, impulse: Vector, wake_up: bool) {
-        for p in &mut self.particles {
+        let Self { particles, recorded_particles, impulse_particles, .. } = self;
+        for (i, p) in particles.iter_mut().enumerate() {
             if p.inv_mass > 0.0 {
                 p.velocity += impulse;
+                Self::note_particle_push(recorded_particles, impulse_particles, i, impulse);
             }
         }
         if wake_up {
@@ -131,7 +134,9 @@ impl SoftBody {
     /// pinned particles ignore it).
     pub fn apply_particle_impulse(&mut self, i: usize, impulse: Vector, wake_up: bool) {
         let p = &mut self.particles[i];
-        p.velocity += impulse * p.inv_mass;
+        let dv = impulse * p.inv_mass;
+        p.velocity += dv;
+        Self::note_particle_push(&self.recorded_particles, &mut self.impulse_particles, i, dv);
         if wake_up {
             self.wake_up();
         }
@@ -147,7 +152,8 @@ impl SoftBody {
         falloff_radius: Real,
         wake_up: bool,
     ) {
-        for p in &mut self.particles {
+        let Self { particles, recorded_particles, impulse_particles, .. } = self;
+        for (i, p) in particles.iter_mut().enumerate() {
             if p.inv_mass == 0.0 {
                 continue;
             }
@@ -157,7 +163,9 @@ impl SoftBody {
                 1.0
             };
             if scale > 0.0 {
-                p.velocity += impulse * (scale * p.inv_mass);
+                let dv = impulse * (scale * p.inv_mass);
+                p.velocity += dv;
+                Self::note_particle_push(recorded_particles, impulse_particles, i, dv);
             }
         }
         if wake_up {
@@ -175,7 +183,8 @@ impl SoftBody {
         falloff_radius: Real,
         wake_up: bool,
     ) {
-        for p in &mut self.particles {
+        let Self { particles, recorded_particles, impulse_particles, .. } = self;
+        for (i, p) in particles.iter_mut().enumerate() {
             if p.inv_mass == 0.0 {
                 continue;
             }
@@ -190,7 +199,9 @@ impl SoftBody {
                 1.0
             };
             if scale > 0.0 {
-                p.velocity += offset * (magnitude * scale * p.inv_mass / distance);
+                let dv = offset * (magnitude * scale * p.inv_mass / distance);
+                p.velocity += dv;
+                Self::note_particle_push(recorded_particles, impulse_particles, i, dv);
             }
         }
         if wake_up {
