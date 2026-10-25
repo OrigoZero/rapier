@@ -9,7 +9,9 @@ pub use self::character_controller::{
 pub use self::pid_controller::{PdController, PdErrors, PidController};
 
 #[cfg(all(feature = "dim3", feature = "alloc"))]
-pub use self::ray_cast_vehicle_controller::{DynamicRayCastVehicleController, Wheel, WheelTuning};
+pub use self::ray_cast_vehicle_controller::{
+    DynamicRayCastVehicleController, GroundReaction, Wheel, WheelTuning,
+};
 
 #[cfg(feature = "alloc")]
 mod character_controller;
