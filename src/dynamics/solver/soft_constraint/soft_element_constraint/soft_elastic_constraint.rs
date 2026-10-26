@@ -2,13 +2,29 @@
 
 use super::*;
 use crate::dynamics::SoftBody;
-use crate::dynamics::soft_body::soft_body_shape_matching::extract_rotation;
+use crate::dynamics::soft_body::soft_body_shape_matching::extract_rotation_within;
 use crate::dynamics::solver::solver_body::SolverBodies;
 use crate::math::{DIM, Matrix, Real, Rotation, Vector};
 use crate::utils::{DotProduct, RotationOps};
 #[cfg(not(feature = "std"))]
 #[allow(unused_imports)]
 use simba::scalar::{ComplexField as _, RealField as _};
+
+/// How closely, in radians, a cell's rotation is extracted at each substep. The extraction starts
+/// from the last substep's rotation, so the error never accumulates, and the corotated strain it
+/// leaves is off by this fraction of the strain itself.
+pub(crate) const CELL_ROTATION_TOLERANCE: Real = 1.0e-5;
+
+/// An elastic cell as a step left it, for its write-back: its rotation, strain and whether it
+/// was inverted at the last update, and the impulses it accumulated (strain rows in the cell
+/// frame, then the volumetric row).
+pub(crate) struct ElasticEndState {
+    pub rotation: Rotation,
+    pub strain: StrainVector,
+    pub inverted: bool,
+    pub strain_impulse: StrainVector,
+    pub vol_impulse: Real,
+}
 
 /// Number of strain rows of an elastic cell: the independent components of the symmetric
 /// strain tensor.
@@ -129,6 +145,77 @@ pub(crate) fn outer_sum(
         *m.col_mut(j) = col;
     }
     m
+}
+
+/// The number of values that decide a cell's [`SoftCellBlock`]: its inverse rest matrix, its
+/// particles' inverse masses, its Lamé parameters, rest volume, damping ratio, the substep length
+/// and its model.
+const CELL_BLOCK_KEY: usize = DIM * DIM + MAX_CONSTRAINT_PARTICLES + 6;
+
+/// What an elastic cell's constraint takes from its rest shape, its particles' masses, its
+/// material and the substep length alone: the diagonal of its strain effective-mass block and
+/// the inverse of the softened block. A cell keeps it from one step to the next, so a cell none
+/// of those changed for (most of a body, most steps) skips the block and its inverse.
+#[derive(Copy, Clone, Debug)]
+pub(crate) struct SoftCellBlock {
+    key: [Real; CELL_BLOCK_KEY],
+    /// The block's diagonal: each strain row's effective mass.
+    pub diagonal: StrainVector,
+    /// The softened block's inverse (corotational cells; a Neo-Hookean cell inverts its own at
+    /// every update).
+    pub inv_a: StrainMatrix,
+}
+
+impl SoftCellBlock {
+    /// A block no cell matches.
+    pub const EMPTY: Self = Self {
+        key: [Real::NAN; CELL_BLOCK_KEY],
+        diagonal: StrainVector::from_array_storage(na::ArrayStorage([[0.0; STRAIN_ROWS]; 1])),
+        inv_a: StrainMatrix::from_array_storage(na::ArrayStorage(
+            [[0.0; STRAIN_ROWS]; STRAIN_ROWS],
+        )),
+    };
+
+    /// The values a cell's block is decided by.
+    #[allow(clippy::too_many_arguments)]
+    pub fn key(
+        inv_rest_matrix: &Matrix,
+        im: &[Real; MAX_CONSTRAINT_PARTICLES],
+        mu: Real,
+        lambda: Real,
+        rest_volume: Real,
+        damping_ratio: Real,
+        dt: Real,
+        neo_hookean: bool,
+    ) -> [Real; CELL_BLOCK_KEY] {
+        let mut key = [0.0; CELL_BLOCK_KEY];
+        let matrix = inv_rest_matrix.to_cols_array();
+        key[..DIM * DIM].copy_from_slice(&matrix);
+        key[DIM * DIM..DIM * DIM + MAX_CONSTRAINT_PARTICLES].copy_from_slice(im);
+        let tail = DIM * DIM + MAX_CONSTRAINT_PARTICLES;
+        key[tail] = mu;
+        key[tail + 1] = lambda;
+        key[tail + 2] = rest_volume;
+        key[tail + 3] = damping_ratio;
+        key[tail + 4] = dt;
+        key[tail + 5] = if neo_hookean { 1.0 } else { 0.0 };
+        key
+    }
+
+    /// The block, if it was made from `key`.
+    #[inline]
+    pub fn matching(&self, key: &[Real; CELL_BLOCK_KEY]) -> Option<&Self> {
+        (self.key == *key).then_some(self)
+    }
+
+    /// A block made from `key`.
+    pub fn new(key: [Real; CELL_BLOCK_KEY], diagonal: StrainVector, inv_a: StrainMatrix) -> Self {
+        Self {
+            key,
+            diagonal,
+            inv_a,
+        }
+    }
 }
 
 /// The elastic constraints of a cell, solved together as one block: the independent components of
@@ -295,7 +382,7 @@ impl SoftElasticConstraint {
             }
         }
         let f = self.deformation_gradient();
-        self.rotation = extract_rotation(f, self.rotation);
+        self.rotation = extract_rotation_within(f, self.rotation, CELL_ROTATION_TOLERANCE);
         self.rot_mat = self.rotation.to_mat();
         let inv_rot = self.rot_mat.transpose();
         let s = inv_rot * f;

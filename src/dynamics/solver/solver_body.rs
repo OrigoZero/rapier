@@ -159,6 +159,50 @@ impl SolverBodies {
         vels.scatter(&mut self.vels, idx);
     }
 
+    /// The linear velocities of the bodies `idx` names, lane by lane (`x`, `y`, `z`), and the
+    /// word that shares their block (the angular velocity's first component), which
+    /// [`Self::scatter_linear_vels`] writes back untouched. A lane past the bodies reads zero.
+    #[cfg(feature = "dim3")]
+    #[inline]
+    pub fn gather_linear_vels(&self, idx: [u32; SIMD_WIDTH]) -> [SimdReal; 4] {
+        let zero = SolverVelRepr::zero();
+        // SAFETY: `SolverVel<Real>` and `SolverVelRepr` have the same layout (see `SolverVel::gather`).
+        let data_repr: &[SolverVelRepr] = unsafe { core::mem::transmute(self.vels.as_slice()) };
+        let aos = aos!(data_repr[idx].data0, zero);
+        transpose_wide(aos)
+    }
+
+    /// The positions of the bodies `idx` names, lane by lane (`x`, `y`, `z`). A lane past the
+    /// bodies reads zero.
+    #[cfg(feature = "dim3")]
+    #[inline]
+    pub fn gather_translations(&self, idx: [u32; SIMD_WIDTH]) -> [SimdReal; 3] {
+        let identity = SolverPoseRepr::identity();
+        // SAFETY: `SolverPose<Real>` and `SolverPoseRepr` have the same layout (see
+        // `SolverTransform::gather`); in 3D the translation leads the second block.
+        let data_repr: &[SolverPoseRepr] = unsafe { core::mem::transmute(self.poses.as_slice()) };
+        let aos = aos!(data_repr[idx].data1, identity);
+        let [x, y, z, _] = transpose_wide(aos);
+        [x, y, z]
+    }
+
+    /// Writes back the blocks [`Self::gather_linear_vels`] read, lane by lane: the linear
+    /// velocities `x`, `y`, `z` and the word that shares their block. A lane past the bodies is
+    /// left alone.
+    #[cfg(feature = "dim3")]
+    #[inline]
+    pub fn scatter_linear_vels(&mut self, idx: [u32; SIMD_WIDTH], soa: [SimdReal; 4]) {
+        let aos = transpose_wide_inv(soa);
+        // SAFETY: `SolverVel<Real>` and `SolverVelRepr` have the same layout (see `SolverVel::gather`).
+        let data_repr: &mut [SolverVelRepr] =
+            unsafe { core::mem::transmute(self.vels.as_mut_slice()) };
+        for (lane, block) in aos.into_iter().enumerate() {
+            if let Some(repr) = data_repr.get_mut(idx[lane] as usize) {
+                repr.data0.0 = block;
+            }
+        }
+    }
+
     #[inline]
     pub fn set_vel(&mut self, i: u32, vel: SolverVel<Real>) {
         if (i as usize) < self.vels.len() {

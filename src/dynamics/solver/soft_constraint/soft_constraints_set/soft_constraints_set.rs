@@ -20,6 +20,8 @@ pub(crate) struct AwakeSoftBody {
     /// Raw access to the soft body for the solve scope (the set is not mutated meanwhile);
     /// constraints write their impulses back through it, to disjoint elements.
     pub ptr: *mut SoftBody,
+    /// The body's `cell_blocks`, one per cell: the fill reads and refreshes each cell's own.
+    pub cell_blocks: *mut crate::dynamics::solver::SoftCellBlock,
     pub handle: SoftBodyHandle,
     /// Substep solve-group of the body's particles.
     pub group: u16,
@@ -80,18 +82,23 @@ pub(crate) struct AwakeCluster {
 }
 
 /// The constraints of one parallel color: a range of scalar constraints and a range of
-/// elastic-cell block constraints, addressed by one virtual index range
-/// `0..scalar_constraints.len() + elastic_constraints.len()`.
+/// elastic-cell block constraints. The solve addresses them by one virtual index range
+/// `0..len()`: the scalar constraints, then the batches the corotational cells are packed into
+/// (see `SoftElasticBatch`), then the elastic cells solved one at a time.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct SoftColorRange {
     pub scalar_constraints: Range<usize>,
     pub elastic_constraints: Range<usize>,
+    /// Range into `elastic_batches`.
+    pub batches: Range<usize>,
+    /// Range into `elastic_singles`.
+    pub singles: Range<usize>,
 }
 
 impl SoftColorRange {
     #[inline]
     pub fn len(&self) -> usize {
-        self.scalar_constraints.len() + self.elastic_constraints.len()
+        self.scalar_constraints.len() + self.batches.len() + self.singles.len()
     }
 }
 
@@ -185,6 +192,16 @@ pub(crate) struct SoftConstraintsSet {
     pub slots: Vec<u32>,
     pub scalar_constraints: Vec<SoftScalarConstraint>,
     pub elastic_constraints: Vec<SoftElasticConstraint>,
+    /// The corotational cells of the parallel colors, packed `SIMD_WIDTH` to a batch, color by
+    /// color (see `SoftColorRange::batches`).
+    #[cfg(feature = "dim3")]
+    pub elastic_batches: Vec<super::super::soft_element_constraint::SoftElasticBatch>,
+    /// The elastic cells solved one at a time, color by color: indices into
+    /// `elastic_constraints` (see `SoftColorRange::singles`).
+    pub elastic_singles: Vec<u32>,
+    /// Where each elastic cell's impulses are accumulated: its batch times `SIMD_WIDTH` plus its
+    /// lane, `u32::MAX` for a cell solved on its own.
+    pub elastic_lanes: Vec<u32>,
     /// Whether each element constraint (the scalar ones, then the elastic ones) was strained
     /// past the re-sweep threshold at its last update: the re-sweep reads these flags instead
     /// of every constraint.

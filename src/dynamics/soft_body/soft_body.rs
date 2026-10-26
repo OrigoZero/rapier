@@ -59,6 +59,11 @@ pub struct SoftBody {
     #[cfg(feature = "dim3")]
     pub(crate) dihedrals: Vec<SoftBodyDihedral>,
     pub(crate) cells: Vec<SoftBodyCell>,
+    /// Each cell's block as the solver last built it (see `SoftCellBlock`), indexed like
+    /// `cells`: a cell whose rest shape, masses, material and substep length stayed the same
+    /// takes it again.
+    #[cfg_attr(feature = "serde-serialize", serde(skip))]
+    pub(crate) cell_blocks: Vec<crate::dynamics::solver::SoftCellBlock>,
     /// The computational mesh's boundary: segments (2D) or triangles (3D), oriented outward.
     /// Used by the volume constraints, and as the geometry of the default collision mesh.
     pub(crate) boundary: Vec<[u32; DIM]>,
