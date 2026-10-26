@@ -685,13 +685,12 @@ impl JointConstraintHelper<Real> {
         writeback_id: WritebackId,
     ) -> GenericJointConstraint {
         // See `AngularLimitParams`: the row measures the wrapped angle from the middle of
-        // the allowed range; the measure's gradient is the plain joint axis (like the
-        // angular motor row).
+        // the allowed range, and `angle_gradient` is that measure's jacobian.
         let limit = AngularLimitParams::new(limits[0], limits[1]);
         #[cfg(feature = "dim2")]
         let ang_jac: AngVector = 1.0;
         #[cfg(feature = "dim3")]
-        let ang_jac = self.basis.col(_limited_axis);
+        let ang_jac = self.angle_gradient(_limited_axis);
 
         let mut constraint = self.lock_jacobians_generic(
             jacobians,
