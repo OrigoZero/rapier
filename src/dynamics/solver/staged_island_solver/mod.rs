@@ -224,6 +224,11 @@ struct SharedCtx<'a> {
     /// restitution seed (approaching bouncy contact); gates the end-of-step restitution
     /// pass. Published before the first substep barrier, read after it.
     any_bouncy: *const AtomicBool,
+    /// Answers the gravity of the solver bodies flagged `SOLVER_BODY_GRAVITY_FIELD`, at every
+    /// substep (`PhysicsHooks::gravity`).
+    hooks: &'a dyn crate::pipeline::PhysicsHooks,
+    /// The step's gravity vector, handed to `hooks` with each question.
+    gravity: crate::math::Vector,
 }
 
 unsafe impl Sync for SharedCtx<'_> {}

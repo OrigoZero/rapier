@@ -605,6 +605,7 @@ impl PhysicsPipeline {
                 impulse_joints,
                 multibody_joints,
                 soft_bodies,
+                hooks,
                 events,
             );
 

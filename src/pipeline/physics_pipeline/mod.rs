@@ -20,6 +20,8 @@ mod solve;
 mod substep;
 #[cfg(test)]
 mod test;
+#[cfg(all(test, feature = "dim3"))]
+mod test_gravity_field;
 #[cfg(test)]
 mod test_staged;
 

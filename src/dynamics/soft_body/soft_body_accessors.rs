@@ -505,6 +505,20 @@ impl SoftBody {
         &self.particle_settings
     }
 
+    /// Whether the particles' gravity comes from [`crate::pipeline::PhysicsHooks::gravity`]
+    /// ([`Self::set_gravity_field`]).
+    pub fn gravity_field(&self) -> bool {
+        self.particle_settings.gravity_field
+    }
+
+    /// Take the particles' gravity from [`crate::pipeline::PhysicsHooks::gravity`] in place of
+    /// the step's gravity vector: the solver asks the hooks at every substep where each free
+    /// particle stands, and applies the answer times the particles' gravity scale. Takes effect at
+    /// the next step; a sleeping body stays asleep until something wakes it.
+    pub fn set_gravity_field(&mut self, enabled: bool) {
+        self.particle_settings.gravity_field = enabled;
+    }
+
     /// Sets the extra internal PGS iterations per substep requested for this body's island
     /// component (see [`super::SoftBodyParticleSettings::additional_pgs_iterations`]); takes
     /// effect at the next step.

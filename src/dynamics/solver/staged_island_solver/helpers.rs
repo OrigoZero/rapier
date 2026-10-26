@@ -83,6 +83,12 @@ impl VelocitySolver {
                 .resize(aligned_solver_bodies_len, GyroParams::default());
         }
 
+        // Grown, never shrunk: a slot is read only once the stage owning it flagged and wrote it.
+        if self.solver_gravity.len() < aligned_solver_bodies_len {
+            self.solver_gravity
+                .resize(aligned_solver_bodies_len, Default::default());
+        }
+
         // Grown, never shrunk: the slots of bodies that record their substeps keep their
         // allocations from one step to the next, and a slot no recording body holds is never read.
         if self.substep_vels.len() < aligned_solver_bodies_len {

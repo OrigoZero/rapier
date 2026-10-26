@@ -12,9 +12,11 @@ use crate::dynamics::solver::contact_constraint::ContactWithCoulombFrictionBuild
 use crate::dynamics::solver::contact_constraint::ContactWithTwistFrictionBuilder;
 use crate::dynamics::solver::joint_constraint::GenericJointConstraintBuilder;
 use crate::dynamics::solver::solver_body::{
-    SOLVER_BODY_ALLOW_FAST_ROTATION, SOLVER_BODY_PLANE_HOLD, SOLVER_BODY_RECORD_SUBSTEPS,
+    SOLVER_BODY_ALLOW_FAST_ROTATION, SOLVER_BODY_GRAVITY_FIELD, SOLVER_BODY_PLANE_HOLD,
+    SOLVER_BODY_RECORD_SUBSTEPS,
 };
 use crate::dynamics::solver::solver_contact_graph::ContactRef;
+use crate::dynamics::solver::velocity_solver::SolverGravity;
 use crate::dynamics::{JointGraphEdge, RigidBodySubstep, RigidBodyType, RigidBodyVelocity};
 use crate::geometry::ContactManifold;
 use crate::math::Real;
@@ -79,7 +81,26 @@ pub(super) unsafe fn run_worker(ctx: &SharedCtx, worker_id: usize) {
                     .unwrap_or(ctx.groups[0].dt);
                 let incr = &mut vs.solver_vels_increment[i];
                 incr.angular = rb.mprops.effective_world_inv_inertia * rb.forces.torque * slot_dt;
-                incr.linear = rb.forces.force * rb.mprops.effective_inv_mass * slot_dt;
+                if rb.forces.gravity_field
+                    && rb.is_dynamic()
+                    && !rb.is_soft_frame()
+                    && !rb.is_sleeping()
+                {
+                    // The gravity is asked of the hooks at every substep (the increment stage),
+                    // so the per-substep increment carries the user's force alone.
+                    incr.linear = rb.forces.user_force * rb.mprops.effective_inv_mass * slot_dt;
+                    vs.solver_bodies.flags[i] |= SOLVER_BODY_GRAVITY_FIELD;
+                    vs.solver_gravity[i] = SolverGravity {
+                        subject: crate::pipeline::GravitySubject::RigidBody(handle),
+                        // One on every axis the body's translation is free on, zero on a
+                        // locked one: the way the step's gravity reaches the body.
+                        scale: rb.mprops.effective_mass()
+                            * rb.mprops.effective_inv_mass
+                            * rb.forces.gravity_scale,
+                    };
+                } else {
+                    incr.linear = rb.forces.force * rb.mprops.effective_inv_mass * slot_dt;
+                }
 
                 // Gyroscopic forces (3D) are applied per-substep by the increment
                 // stage; record the body's diagonal local inertia here.
@@ -310,6 +331,14 @@ pub(super) unsafe fn run_worker(ctx: &SharedCtx, worker_id: usize) {
                             let vels = &mut vs.solver_bodies.vels[i];
                             vels.linear += incr.linear;
                             vels.angular += incr.angular;
+                        }
+                        // A body whose gravity comes from the hooks takes it where the previous
+                        // substep left its centre of mass (a particle: its position).
+                        if vs.solver_bodies.flags[i] & SOLVER_BODY_GRAVITY_FIELD != 0 {
+                            let sample = vs.solver_gravity[i];
+                            let point = vs.solver_bodies.poses[i].translation;
+                            let g = ctx.hooks.gravity(sample.subject, point, ctx.gravity);
+                            vs.solver_bodies.vels[i].linear += g * sample.scale * params.dt;
                         }
 
                         // Per-substep gyroscopic correction (applied every substep

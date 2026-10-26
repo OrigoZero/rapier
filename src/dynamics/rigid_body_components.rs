@@ -1020,6 +1020,11 @@ pub struct RigidBodyForces {
     /// Are gyroscopic forces enabled for this rigid-body?
     #[cfg(feature = "dim3")]
     pub gyroscopic_forces_enabled: bool,
+    /// Whether this body's gravity comes from [`crate::pipeline::PhysicsHooks::gravity`],
+    /// asked at every substep where its centre of mass stands, in place of the step's gravity
+    /// vector (see [`crate::dynamics::RigidBody::set_gravity_field`]).
+    #[cfg_attr(feature = "serde-serialize", serde(default))]
+    pub gravity_field: bool,
 }
 
 impl Default for RigidBodyForces {
@@ -1031,6 +1036,7 @@ impl Default for RigidBodyForces {
             gravity_scale: 1.0,
             user_force: Vector::ZERO,
             user_torque: 0.0,
+            gravity_field: false,
         };
 
         #[cfg(feature = "dim3")]
@@ -1041,6 +1047,7 @@ impl Default for RigidBodyForces {
             user_force: Vector::ZERO,
             user_torque: AngVector::ZERO,
             gyroscopic_forces_enabled: true,
+            gravity_field: false,
         };
     }
 }

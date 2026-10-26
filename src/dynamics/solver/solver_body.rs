@@ -42,6 +42,10 @@ pub(crate) const SOLVER_BODY_RECORD_SUBSTEPS: u8 = 2;
 /// Per-solver-body flag: the body is held to a plane (`RigidBody::set_plane_hold`), whose unit
 /// normal is `SolverBodies::planes` at its slot.
 pub(crate) const SOLVER_BODY_PLANE_HOLD: u8 = 4;
+/// Per-solver-body flag: the body's gravity comes from `PhysicsHooks::gravity`, asked at every
+/// substep where the body stands (`RigidBody::set_gravity_field`, `SoftBody::set_gravity_field`),
+/// about the subject and with the scale `VelocitySolver::solver_gravity` holds at its slot.
+pub(crate) const SOLVER_BODY_GRAVITY_FIELD: u8 = 8;
 
 #[derive(Default)]
 pub struct SolverBodies {

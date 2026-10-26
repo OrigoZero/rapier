@@ -11,8 +11,8 @@ pub use event_handler::EventHandler;
 pub use physics_hooks::ActiveHooks;
 #[cfg(feature = "alloc")]
 pub use physics_hooks::{
-    ContactModificationContext, ModifiableContacts, ModifiableManifold, PairFilterContext,
-    PhysicsHooks,
+    ContactModificationContext, GravitySubject, ModifiableContacts, ModifiableManifold,
+    PairFilterContext, PhysicsHooks,
 };
 #[cfg(feature = "alloc")]
 pub use physics_pipeline::{PhysicsPipeline, Quarantine};

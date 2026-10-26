@@ -171,6 +171,7 @@ impl PhysicsPipeline {
         impulse_joints: &mut ImpulseJointSet,
         multibody_joints: &mut MultibodyJointSet,
         soft_bodies: &mut SoftBodySet,
+        hooks: &dyn PhysicsHooks,
         events: &dyn EventHandler,
     ) {
         // Persistent islands, two tiers: a bounded local dual search settles each removal (proves
@@ -402,6 +403,7 @@ impl PhysicsPipeline {
                 narrow_phase,
                 colliders,
                 unsafe { contact_color_masks.as_slice() },
+                hooks,
             );
             // The soft-body surface contacts live outside the solver contact graph: write their
             // impulses back to the manifolds (contact-force events, warm start) here.

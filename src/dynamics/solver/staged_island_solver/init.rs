@@ -52,6 +52,8 @@ impl StagedIslandSolver {
         // The narrow-phase's per-body masks of persistent contact solver colors,
         // used to color the joints in the same color space as the contacts.
         contact_color_masks: &[u128],
+        // Asked for the gravity of the bodies and soft bodies whose gravity comes from the hooks.
+        hooks: &dyn crate::pipeline::PhysicsHooks,
     ) {
         counters.solver.velocity_assembly_time.resume();
         // Substep solve-groups: each group (contiguous constraint-closed awake-body range, keyed
@@ -168,6 +170,7 @@ impl StagedIslandSolver {
             self.soft_constraints.init_solver_bodies(
                 &mut vs.solver_bodies,
                 &mut vs.solver_vels_increment,
+                &mut vs.solver_gravity,
                 &mut vs.substep_vels,
                 gravity,
                 base_params.dt,
@@ -654,6 +657,8 @@ impl StagedIslandSolver {
             any_gyroscopic: &self.any_gyroscopic as *const _,
             any_ccd_active: &self.any_ccd_active as *const _,
             any_bouncy: &self.any_bouncy as *const _,
+            hooks,
+            gravity,
         };
 
         let ctx_ref = &ctx;
