@@ -33,6 +33,7 @@ impl SoftConstraintsSet {
         let AssemblyCtx {
             island_id,
             params,
+            step_dt,
             narrow_phase,
             colliders,
             bodies,
@@ -291,6 +292,32 @@ impl SoftConstraintsSet {
                             (v_other - v_surface).gdot(dir).max(0.0)
                         };
 
+                    // The speculative reach: the motion margin pads the pair by the farthest any
+                    // of the body's particles moves over the step, in every direction, so a
+                    // surface sliding fast past a rigid one holds manifold points across the gap
+                    // between them. Beyond the prediction distance, a point is a constraint only
+                    // when the two close on each other fast enough to meet within the step (the
+                    // rule of the vertex and edge passes between two soft surfaces).
+                    let prediction = params.prediction_distance();
+                    let within_reach = |element: &[u32],
+                                        weights: &[Real; DIM],
+                                        anchor: Vector,
+                                        dir: Vector,
+                                        dist: Real| {
+                        if dist < prediction {
+                            return true;
+                        }
+                        let v_other = other_rb.map_or(Vector::ZERO, |rb| {
+                            rb.linvel() + rb.angvel().gcross(anchor - rb.center_of_mass())
+                        });
+                        let mut v_surface = Vector::ZERO;
+                        for (k, v) in element.iter().enumerate() {
+                            v_surface += mesh.vertex_velocity(sb, *v as usize) * weights[k];
+                        }
+                        let closing = (v_other - v_surface).gdot(dir);
+                        dist - closing * step_dt < prediction
+                    };
+
                     // A solid surface's reversed interior contacts (an intruder seen from inside,
                     // a fold's far layer) are dropped: the volume constraints and the elasticity
                     // resolve them. The rule reads the cells' winding, so a skin collides plainly,
@@ -449,6 +476,9 @@ impl SoftConstraintsSet {
                                 (None, Some(_)) if is_interior(element, &weights) => continue,
                                 _ => (dir, sc_dist, false),
                             };
+                            if !within_reach(element, &weights, other_anchor, dir, dist) {
+                                continue;
+                            }
                             // The point the constraint tracks, expressed in the particles it acts through.
                             let (anchors, anchor_weights, tracked) =
                                 mesh.contact_anchors(sb, element, &weights, surface_point0);
@@ -651,6 +681,12 @@ impl SoftConstraintsSet {
                             continue;
                         }
                         let other_anchor = other_pose * vc.local_point;
+                        let mut vertex_weights = [0.0; DIM];
+                        vertex_weights[0] = 1.0;
+                        if !within_reach(&[vc.vertex], &vertex_weights, other_anchor, dir, vc.dist)
+                        {
+                            continue;
+                        }
                         let vertex_pos = mesh.vertex(sb, vc.vertex as usize);
                         let (anchors, anchor_weights, surface_point0) =
                             mesh.contact_anchors(sb, &[vc.vertex], &[1.0], vertex_pos);
