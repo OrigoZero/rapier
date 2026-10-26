@@ -363,33 +363,45 @@ impl SoftBody {
         let tolerance = size.max(Real::EPSILON) * REST_FIT_TOLERANCE;
         let mut sum = vec![Vector::ZERO; n];
         let mut count: Vec<Real> = vec![0.0; n];
+        // Each cell's rest shape about its centroid, the same over every sweep: the plastic
+        // stretch of its created shape.
+        let shapes: Vec<Option<[Vector; DIM + 1]>> = if cells_flow {
+            self.cells
+                .iter()
+                .map(|c| {
+                    (c.rest_volume != 0.0).then(|| {
+                        let rest0: [Vector; DIM + 1] = core::array::from_fn(|k| {
+                            self.particles[c.vertices[k] as usize].initial_rest_position
+                        });
+                        let dm = c.plastic_stretch * Self::cell_edge_matrix(rest0);
+                        let mut offsets = [Vector::ZERO; DIM + 1];
+                        for k in 0..DIM {
+                            offsets[k + 1] = dm.col(k);
+                        }
+                        let mean = offsets.iter().sum::<Vector>() / (DIM + 1) as Real;
+                        offsets.map(|o| o - mean)
+                    })
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         let mut settled = false;
         for _ in 0..REST_FIT_SWEEPS {
             sum.fill(Vector::ZERO);
             count.fill(0.0);
-            if cells_flow {
-                for c in &self.cells {
-                    if c.rest_volume == 0.0 {
-                        continue;
-                    }
-                    let rest0: [Vector; DIM + 1] = core::array::from_fn(|k| {
-                        self.particles[c.vertices[k] as usize].initial_rest_position
-                    });
-                    let dm = c.plastic_stretch * Self::cell_edge_matrix(rest0);
-                    let mut offsets = [Vector::ZERO; DIM + 1];
-                    let mut centroid = Vector::ZERO;
-                    for k in 0..DIM {
-                        offsets[k + 1] = dm.col(k);
-                    }
-                    let mean = offsets.iter().sum::<Vector>() / (DIM + 1) as Real;
-                    for &v in &c.vertices {
-                        centroid += self.particles[v as usize].rest_position;
-                    }
-                    centroid /= (DIM + 1) as Real;
-                    for (k, &v) in c.vertices.iter().enumerate() {
-                        sum[v as usize] += centroid + offsets[k] - mean;
-                        count[v as usize] += 1.0;
-                    }
+            for (c, shape) in self.cells.iter().zip(&shapes) {
+                let Some(shape) = shape else {
+                    continue;
+                };
+                let mut centroid = Vector::ZERO;
+                for &v in &c.vertices {
+                    centroid += self.particles[v as usize].rest_position;
+                }
+                centroid /= (DIM + 1) as Real;
+                for (k, &v) in c.vertices.iter().enumerate() {
+                    sum[v as usize] += centroid + shape[k];
+                    count[v as usize] += 1.0;
                 }
             }
             if edges_flow {
