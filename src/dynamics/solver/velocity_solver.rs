@@ -54,6 +54,31 @@ pub(crate) struct VelocitySolver {
     /// Only the slots of recording bodies are written, each by the worker that claims the slot;
     /// the list only grows, so a step that records nothing allocates nothing.
     pub substep_vels: Vec<Vec<SubstepRecord>>,
+    /// What each solver body flagged `SOLVER_BODY_GRAVITY_FIELD` asks the hooks about, and the
+    /// scale the answer is applied with, indexed like `solver_bodies`. Only flagged slots are
+    /// written and read, each by the stage that owns the slot.
+    pub solver_gravity: Vec<SolverGravity>,
+}
+
+/// What a solver body whose gravity comes from the hooks asks them about, and how the answer is
+/// applied: the subject handed to `PhysicsHooks::gravity`, and the per-axis factor the acceleration
+/// it answers is multiplied by (the gravity scale on each axis the body is free to move along,
+/// zero on a locked one).
+#[derive(Copy, Clone, Debug)]
+pub(crate) struct SolverGravity {
+    pub subject: crate::pipeline::GravitySubject,
+    pub scale: Vector,
+}
+
+impl Default for SolverGravity {
+    fn default() -> Self {
+        Self {
+            subject: crate::pipeline::GravitySubject::RigidBody(
+                crate::dynamics::RigidBodyHandle::invalid(),
+            ),
+            scale: Vector::ZERO,
+        }
+    }
 }
 
 /// The velocity, position and orientation one solver body ended one substep with, as
@@ -71,6 +96,7 @@ impl VelocitySolver {
             #[cfg(feature = "dim3")]
             solver_gyro: Vec::new(),
             substep_vels: Vec::new(),
+            solver_gravity: Vec::new(),
         }
     }
 }

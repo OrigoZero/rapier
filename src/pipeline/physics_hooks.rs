@@ -1,5 +1,5 @@
 #[cfg(feature = "alloc")]
-use crate::dynamics::{RigidBodyHandle, RigidBodySet};
+use crate::dynamics::{RigidBodyHandle, RigidBodySet, SoftBodyHandle};
 #[cfg(feature = "alloc")]
 use crate::geometry::SoftPairContacts;
 use crate::geometry::{ColliderHandle, ColliderSet, ContactManifold, SolverContacts, SolverFlags};
@@ -7,6 +7,18 @@ use crate::geometry::{ColliderHandle, ColliderSet, ContactManifold, SolverContac
 use crate::math::{Real, Vector};
 #[cfg(feature = "alloc")]
 use na::ComplexField;
+
+/// What [`PhysicsHooks::gravity`] is asked about: a rigid body or a particle of a soft body
+/// whose gravity comes from the hooks (see [`crate::dynamics::RigidBody::set_gravity_field`] and
+/// [`crate::dynamics::SoftBody::set_gravity_field`]).
+#[cfg(feature = "alloc")]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum GravitySubject {
+    /// A rigid body, asked about where its centre of mass stands.
+    RigidBody(RigidBodyHandle),
+    /// One particle of a soft body, asked about where the particle stands.
+    SoftBody(SoftBodyHandle),
+}
 
 /// Context given to custom collision filters to filter-out collisions.
 #[cfg(feature = "alloc")]
@@ -319,6 +331,24 @@ pub trait PhysicsHooks: crate::utils::MaybeSync {
     /// manifold; two soft surfaces' contacts arrive as candidates ([`ModifiableContacts::Soft`])
     /// whose direction and distance may be edited, or disabled; self contacts never reach the hook.
     fn modify_solver_contacts(&self, _context: &mut ContactModificationContext) {}
+
+    /// The gravitational acceleration on `subject` with it standing at `point` (a rigid body's
+    /// centre of mass, a soft body particle's position), in world space.
+    ///
+    /// Asked for every rigid body and soft body whose gravity comes from the hooks
+    /// ([`crate::dynamics::RigidBody::set_gravity_field`],
+    /// [`crate::dynamics::SoftBody::set_gravity_field`]) at every substep of the step, from
+    /// where the substep before left it, so an acceleration that changes from place to place
+    /// (a pull toward a point, an axis or a surface) is integrated the way the solver integrates
+    /// the step's own gravity: the velocity first, then the position from it. The answer is
+    /// scaled by the body's gravity scale (a particle's: its body's particle gravity scale) and
+    /// takes the place of `gravity`, the step's gravity vector, for that body. Called from the
+    /// solver's workers concurrently.
+    ///
+    /// The default answers `gravity`.
+    fn gravity(&self, _subject: GravitySubject, _point: Vector, gravity: Vector) -> Vector {
+        gravity
+    }
 }
 
 #[cfg(feature = "alloc")]

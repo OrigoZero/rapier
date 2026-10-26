@@ -7,7 +7,7 @@ use simba::scalar::{ComplexField as _, RealField as _};
 use crate::alloc_prelude::*;
 use crate::dynamics::SoftBody;
 use crate::dynamics::solver::solver_body::{
-    SOLVER_BODY_RECORD_SUBSTEPS, SolverBodies, SolverPose, SolverVel,
+    SOLVER_BODY_GRAVITY_FIELD, SOLVER_BODY_RECORD_SUBSTEPS, SolverBodies, SolverPose, SolverVel,
 };
 use crate::dynamics::solver::velocity_solver::SubstepRecord;
 use crate::math::{AngVector, Matrix, Real, Vector};
@@ -264,6 +264,10 @@ impl SoftConstraintsSet {
 
     /// Fills the solver bodies of the awake soft bodies' particles: a pinned one is kinematic
     /// (zero inverse mass, velocity to its target), a free one gets scaled gravity and user force.
+    /// A free particle of a body whose gravity comes from the hooks
+    /// (`SoftBody::set_gravity_field`) gets its user force alone here, and is flagged to have its
+    /// gravity asked at every substep, about the body, scaled by the particle gravity scale (its
+    /// `gravity` slot).
     /// `group_dt(group)` is the group's substep length, `step_dt` the whole step's. The slots of
     /// the particles a body records (`SoftBody::set_recorded_particles`) are flagged to keep
     /// their substep states, starting from an empty record in `substep_vels`.
@@ -271,6 +275,7 @@ impl SoftConstraintsSet {
         &self,
         bodies: &mut SolverBodies,
         increments: &mut [SolverVel<Real>],
+        gravity_samples: &mut [crate::dynamics::solver::velocity_solver::SolverGravity],
         substep_vels: &mut [Vec<SubstepRecord>],
         gravity: Vector,
         step_dt: Real,
@@ -283,6 +288,7 @@ impl SoftConstraintsSet {
             let slots = &self.slots[awake.slot_start..awake.slot_start + awake.num_particles];
             let dt = group_dt(awake.group as usize);
             let settings = &sb.particle_settings;
+            let field = settings.gravity_field;
             for (p, &slot) in sb.particles.iter().zip(slots) {
                 let slot = slot as usize;
                 let (vel, incr) = if p.inv_mass == 0.0 {
@@ -291,6 +297,8 @@ impl SoftConstraintsSet {
                         None => p.velocity,
                     };
                     (vel, Vector::ZERO)
+                } else if field {
+                    (p.velocity, p.force * p.inv_mass * dt)
                 } else {
                     (
                         p.velocity,
@@ -305,6 +313,14 @@ impl SoftConstraintsSet {
                 *v = SolverVel::zero();
                 v.linear = vel;
                 bodies.flags[slot] = 0;
+                if field && p.inv_mass != 0.0 {
+                    bodies.flags[slot] = SOLVER_BODY_GRAVITY_FIELD;
+                    gravity_samples[slot] =
+                        crate::dynamics::solver::velocity_solver::SolverGravity {
+                            subject: crate::pipeline::GravitySubject::SoftBody(awake.handle),
+                            scale: Vector::splat(settings.gravity_scale),
+                        };
+                }
                 let inc = &mut increments[slot];
                 *inc = SolverVel::zero();
                 inc.linear = incr;
@@ -312,7 +328,7 @@ impl SoftConstraintsSet {
             for &particle in &sb.recorded_particles {
                 let Some(&slot) = slots.get(particle as usize) else { continue };
                 let slot = slot as usize;
-                bodies.flags[slot] = SOLVER_BODY_RECORD_SUBSTEPS;
+                bodies.flags[slot] |= SOLVER_BODY_RECORD_SUBSTEPS;
                 if let Some(record) = substep_vels.get_mut(slot) {
                     record.clear();
                 }

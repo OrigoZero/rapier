@@ -28,6 +28,11 @@ pub struct SoftBodyParticleSettings {
     pub can_sleep: bool,
     /// Dominance group of the soft body (see [`crate::dynamics::RigidBody::dominance_group`]).
     pub dominance_group: i8,
+    /// Whether the particles' gravity comes from [`crate::pipeline::PhysicsHooks::gravity`],
+    /// asked at every substep where each particle stands, in place of the step's gravity vector
+    /// (see [`crate::dynamics::SoftBody::set_gravity_field`]).
+    #[cfg_attr(feature = "serde-serialize", serde(default))]
+    pub gravity_field: bool,
 }
 
 impl Default for SoftBodyParticleSettings {
@@ -39,6 +44,7 @@ impl Default for SoftBodyParticleSettings {
             additional_pgs_iterations: 3,
             can_sleep: true,
             dominance_group: 0,
+            gravity_field: false,
         }
     }
 }

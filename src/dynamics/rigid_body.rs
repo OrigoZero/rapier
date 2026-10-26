@@ -1058,6 +1058,29 @@ impl RigidBody {
         }
     }
 
+    /// Whether this body's gravity comes from [`crate::pipeline::PhysicsHooks::gravity`]
+    /// ([`Self::set_gravity_field`]).
+    pub fn gravity_field(&self) -> bool {
+        self.forces.gravity_field
+    }
+
+    /// Take this body's gravity from [`crate::pipeline::PhysicsHooks::gravity`] in place of the
+    /// step's gravity vector. The solver asks the hooks at every substep, with the body's centre
+    /// of mass where the substep before left it, and applies the answer times the body's gravity
+    /// scale along every axis its translation is free on, the way it applies the step's gravity.
+    /// So a pull that changes from place to place (toward a point, an axis or a surface) is
+    /// integrated at the substep rate, and a force held against it balances it the way it balances
+    /// the step's gravity. A body that is a link of a multibody takes the step's gravity vector.
+    pub fn set_gravity_field(&mut self, enabled: bool, wake_up: bool) {
+        if self.forces.gravity_field != enabled {
+            if wake_up && self.activation.sleeping {
+                self.changes.insert(RigidBodyChanges::SLEEP);
+                self.activation.sleeping = false;
+            }
+            self.forces.gravity_field = enabled;
+        }
+    }
+
     /// The dominance group of this rigid-body.
     pub fn dominance_group(&self) -> i8 {
         self.dominance.0
