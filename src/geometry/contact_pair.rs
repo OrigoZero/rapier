@@ -76,6 +76,13 @@ pub struct ContactData {
     #[cfg(feature = "dim3")]
     #[cfg_attr(feature = "serde-serialize", serde(default))]
     pub warmstart_tangent_world: Vector,
+    /// The friction impulse this contact applied to the first collider's rigid-body over the
+    /// step, as a **world-space** vector: [`Self::tangent_impulse`] in the tangent basis the
+    /// solver built for the step. With `-normal * impulse` it is the whole impulse the contact
+    /// put on that body; the second collider's rigid-body took its opposite. Written for the
+    /// contacts the solver solved, beside [`Self::impulse`].
+    #[cfg_attr(feature = "serde-serialize", serde(default))]
+    pub tangent_impulse_world: Vector,
     /// The solver's lever arm for the first body: contact point relative to the body's CoM,
     /// in **world space**, frozen at the pair's last full narrow-phase update (anchor
     /// freezing) and used verbatim while recycled. Load-bearing for tall-stack stability:
@@ -106,6 +113,7 @@ impl Default for ContactData {
             warmstart_twist_impulse: 0.0,
             #[cfg(feature = "dim3")]
             warmstart_tangent_world: Vector::ZERO,
+            tangent_impulse_world: Vector::ZERO,
             solver_dp1: Vector::ZERO,
             solver_dp2: Vector::ZERO,
             closing_speed: 0.0,

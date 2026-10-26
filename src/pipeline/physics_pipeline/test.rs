@@ -738,3 +738,118 @@ fn contact_force_events_follow_runtime_active_events_flips() {
     }
     assert_eq!(events.0.load(Ordering::Relaxed), after_enable);
 }
+
+/// Each contact's `tangent_impulse_world` is the friction impulse it put on the first
+/// collider's body over the step: a box sliding along fixed ground loses exactly the
+/// momentum along the ground its contacts' friction impulses add up to, under either
+/// friction model.
+#[test]
+fn contact_friction_impulses_in_world_space_account_for_the_sliding_momentum() {
+    #[cfg(feature = "dim3")]
+    let models = [
+        Some(crate::dynamics::FrictionModel::Simplified),
+        Some(crate::dynamics::FrictionModel::Coulomb),
+    ];
+    #[cfg(feature = "dim2")]
+    let models: [Option<()>; 1] = [None];
+    for model in models {
+        let (lost, friction) = slide_one_step(model);
+        assert!(lost < -0.05, "{model:?}: the ground slowed the box: {lost}");
+        assert!(
+            (friction - lost).abs() < 1.0e-3 * lost.abs(),
+            "{model:?}: the contacts' friction impulses ({friction}) are the momentum the box lost ({lost})"
+        );
+    }
+}
+
+/// A box resting on fixed ground set sliding along X for one step under `model` (the
+/// default where it is none): the momentum along X it lost, and the X friction impulse its
+/// contacts report on it.
+#[cfg(feature = "dim3")]
+fn slide_one_step(
+    model: Option<crate::dynamics::FrictionModel>,
+) -> (crate::math::Real, crate::math::Real) {
+    let mut params = IntegrationParameters::default();
+    if let Some(model) = model {
+        params.friction_model = model;
+    }
+    slide_one_step_with(params)
+}
+
+/// The 2D solver has one friction model.
+#[cfg(feature = "dim2")]
+fn slide_one_step(_: Option<()>) -> (crate::math::Real, crate::math::Real) {
+    slide_one_step_with(IntegrationParameters::default())
+}
+
+fn slide_one_step_with(params: IntegrationParameters) -> (crate::math::Real, crate::math::Real) {
+    let mut colliders = ColliderSet::new();
+    let mut impulse_joints = ImpulseJointSet::new();
+    let mut multibody_joints = MultibodyJointSet::new();
+    let mut soft_bodies = SoftBodySet::new();
+    let mut pipeline = PhysicsPipeline::new();
+    let mut bf = BroadPhaseBvh::new();
+    let mut nf = NarrowPhase::new();
+    let mut bodies = RigidBodySet::new();
+    let mut islands = IslandManager::new();
+    let mut ccd = CCDSolver::new();
+    let gravity = Vector::Y * -9.81;
+
+    let ground = bodies.insert(RigidBodyBuilder::fixed().translation(Vector::Y * -0.5));
+    #[cfg(feature = "dim2")]
+    let (floor, block) = (
+        ColliderBuilder::cuboid(20.0, 0.5),
+        ColliderBuilder::cuboid(0.5, 0.5),
+    );
+    #[cfg(feature = "dim3")]
+    let (floor, block) = (
+        ColliderBuilder::cuboid(20.0, 0.5, 20.0),
+        ColliderBuilder::cuboid(0.5, 0.5, 0.5),
+    );
+    colliders.insert_with_parent(floor.friction(0.6), ground, &mut bodies);
+    let body = bodies.insert(RigidBodyBuilder::dynamic().translation(Vector::Y * 0.5));
+    let collider =
+        colliders.insert_with_parent(block.friction(0.6).density(1.0), body, &mut bodies);
+
+    let mut step =
+        |bodies: &mut RigidBodySet, colliders: &mut ColliderSet, nf: &mut NarrowPhase| {
+            pipeline.step(
+                gravity,
+                &params,
+                &mut islands,
+                &mut bf,
+                nf,
+                bodies,
+                colliders,
+                &mut impulse_joints,
+                &mut multibody_joints,
+                &mut soft_bodies,
+                &mut ccd,
+                &(),
+                &(),
+            );
+        };
+    for _ in 0..20 {
+        step(&mut bodies, &mut colliders, &mut nf);
+    }
+    bodies[body].set_linvel(Vector::X * 4.0, true);
+    let before = bodies[body].linvel().x;
+    step(&mut bodies, &mut colliders, &mut nf);
+    let lost = bodies[body].mass() * (bodies[body].linvel().x - before);
+
+    let mut friction = 0.0;
+    for pair in nf.contact_pairs_with(collider) {
+        let sign = if pair.collider1 == collider {
+            1.0
+        } else {
+            -1.0
+        };
+        for manifold in pair.solver_manifolds() {
+            for contact in manifold.data.solver_contacts.iter() {
+                let point = &manifold.points[contact.contact_indices()[0] as usize];
+                friction += sign * point.data.tangent_impulse_world.x;
+            }
+        }
+    }
+    (lost, friction)
+}

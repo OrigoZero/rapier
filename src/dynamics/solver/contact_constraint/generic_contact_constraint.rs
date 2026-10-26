@@ -734,6 +734,18 @@ impl GenericContactConstraint {
                 utils::canonicalize_zero(self.normal_part[k].total_impulse());
             active_contact.data.tangent_impulse =
                 utils::canonicalize_zero(self.tangent_part[k].total_impulse());
+            // The step's friction impulse in world space, in the basis it was solved in.
+            let total = active_contact.data.tangent_impulse;
+            #[cfg(feature = "dim3")]
+            {
+                active_contact.data.tangent_impulse_world =
+                    utils::canonicalize_zero(self.tangent1 * total.x + tangent2 * total.y);
+            }
+            #[cfg(feature = "dim2")]
+            {
+                active_contact.data.tangent_impulse_world =
+                    utils::canonicalize_zero(self.dir1.orthonormal_basis()[0] * total.x);
+            }
             active_contact.data.closing_speed = utils::canonicalize_zero(self.closing_speed[k]);
         }
     }
