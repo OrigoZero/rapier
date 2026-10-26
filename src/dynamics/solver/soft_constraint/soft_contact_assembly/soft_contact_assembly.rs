@@ -14,12 +14,14 @@ use crate::math::{Real, Vector};
 impl SoftConstraintsSet {
     /// Builds the contact constraints of the awake soft bodies' surface colliders from the
     /// narrow-phase pairs and the vertex-vs-surface and edge-vs-edge candidates. Group-major: runs
-    /// after [`Self::assemble`], appending to each group's `contacts` range (`group_dt`: softness).
+    /// after [`Self::assemble`], appending to each group's `contacts` range (`group_dt`: softness,
+    /// `step_dt`: the whole step's length).
     #[allow(clippy::too_many_arguments)]
     pub fn assemble_contacts(
         &mut self,
         island_id: usize,
         params: &IntegrationParameters,
+        step_dt: Real,
         narrow_phase: &NarrowPhase,
         colliders: &ColliderSet,
         bodies: &RigidBodySet,
@@ -42,6 +44,7 @@ impl SoftConstraintsSet {
         let ctx = AssemblyCtx {
             island_id,
             params,
+            step_dt,
             narrow_phase,
             colliders,
             bodies,

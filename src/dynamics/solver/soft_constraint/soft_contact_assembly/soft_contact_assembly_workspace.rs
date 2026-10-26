@@ -204,6 +204,9 @@ pub(super) struct AssemblyCtx<'a> {
     pub(super) island_id: usize,
     /// The first group's substep parameters (the constraints' softness).
     pub(super) params: &'a IntegrationParameters,
+    /// The whole step's length: the reach of a speculative contact is the travel closing it
+    /// over the step.
+    pub(super) step_dt: Real,
     pub(super) narrow_phase: &'a NarrowPhase,
     pub(super) colliders: &'a ColliderSet,
     pub(super) bodies: &'a RigidBodySet,
