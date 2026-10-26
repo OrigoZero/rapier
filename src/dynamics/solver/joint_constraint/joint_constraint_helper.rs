@@ -83,6 +83,11 @@ impl AngularLimitParams<Real> {
 /// bodies are built to move along.
 const DEPENDENT_ROW_TOLERANCE: Real = 1.0e-10;
 
+/// The least `cos²(θ / 2)` [`JointConstraintHelper::angle_gradient`] divides by, for a swing `θ`
+/// away from the limited axis: `cos²(89.5°)`, a swing within half a degree of a half turn.
+#[cfg(feature = "dim3")]
+const ANGLE_GRADIENT_MIN_PLANE: Real = 7.6e-5;
+
 impl<N: ScalarType, const LANES: usize> JointConstraint<N, LANES> {
     /// Records this row's inverse-mass scale: its jacobian against the traces of the bodies'
     /// effective (lock-projected) inverse masses and inertias. It bounds the inverse mass the row
@@ -501,9 +506,9 @@ impl<N: ScalarType> JointConstraintHelper<N> {
     /// [`AngularLimitParams::half_range`].
     ///
     /// Measuring the angle itself (rather than a sine of it) keeps the row's gradient with
-    /// respect to the joint angle equal to one everywhere on the circle, so the plain joint
-    /// axis is an exact jacobian for the row: a sine-space measure has a vanishing gradient
-    /// at the antipode of the range's center, where a limit row would degenerate.
+    /// respect to the joint angle equal to one everywhere on the circle: a sine-space measure
+    /// has a vanishing gradient at the antipode of the range's center, where a limit row would
+    /// degenerate. [`Self::angle_gradient`] is the row's jacobian.
     pub fn recentered_angle(&self, _limited_axis: usize, limit: &AngularLimitParams<N>) -> N {
         let [c_cos, c_sin] = limit.center;
 
@@ -537,6 +542,34 @@ impl<N: ScalarType> JointConstraintHelper<N> {
         }
     }
 
+    /// The gradient, in world space, of the angle [`Self::recentered_angle`] measures about
+    /// `axis` with respect to the relative angular velocity of the two bodies: the jacobian of
+    /// an angular limit row.
+    ///
+    /// The angle is `2 atan2(q_axis, q_w)` of the relative rotation `q`. While the two other
+    /// angles are locked (a hinge) `q` turns about `axis` alone and the gradient is that axis
+    /// of the first frame. While they are free (a ball joint's twist beside its swing cone),
+    /// turning about either of the other axes changes the angle as well, by an amount that
+    /// grows with the swing: at a swing `θ` the gradient lies halfway between the two frames'
+    /// `axis` directions, `(a1 + a2) / (1 + a1·a2)`. A row along `a1` alone reads the twist's
+    /// rate wrong by up to `tan(θ / 2)` of the swing's sweep, and the joint twists past its
+    /// range while it slides along its cone.
+    #[cfg(feature = "dim3")]
+    pub fn angle_gradient(&self, axis: usize) -> N::Vector {
+        let q = self.ang_err.imag();
+        let w = self.ang_err.real();
+        let j = (axis + 1) % 3;
+        let k = (axis + 2) % 3;
+        // `w² + q_axis²` is `cos²(θ / 2)` of the swing `θ` away from `axis`; it vanishes only
+        // with the two frames' axes opposite, where the angle about `axis` is undefined. The
+        // floor holds the gradient finite there (a swing within half a degree of a half turn).
+        let plane = (w * w + q[axis] * q[axis]).simd_max(N::splat(ANGLE_GRADIENT_MIN_PLANE));
+        let inv_plane = N::one() / plane;
+        let along_j = (w * q[k] + q[axis] * q[j]) * inv_plane;
+        let along_k = (q[axis] * q[k] - w * q[j]) * inv_plane;
+        self.basis.column(axis) + self.basis.column(j) * along_j + self.basis.column(k) * along_k
+    }
+
     /// The limit is measured as the wrapped joint angle relative to the middle of the
     /// allowed range (see [`AngularLimitParams`]).
     pub fn limit_angular<const LANES: usize>(
@@ -562,11 +595,10 @@ impl<N: ScalarType> JointConstraintHelper<N> {
             N::splat(Real::INFINITY).select(max_enabled, zero),
         ];
 
-        // The angle measure's gradient is the plain joint axis (like the angular motor row).
         #[cfg(feature = "dim2")]
         let ang_jac = N::AngVector::one();
         #[cfg(feature = "dim3")]
-        let ang_jac = self.basis.column(_limited_axis).into();
+        let ang_jac = self.angle_gradient(_limited_axis).into();
         let rhs_wo_bias = N::zero();
         // Like the contact solver, cap the bias so a deep limit violation recovers over a
         // few steps instead of catapulting the bodies (the erp gain is ~1/dt and the wrapped
@@ -903,6 +935,45 @@ mod test {
                     (slope - 1.0).abs() < 1.0e-2,
                     "center {center_deg} theta {theta_deg}: slope {slope}"
                 );
+            }
+        }
+    }
+
+    /// An angular limit row's jacobian is the gradient of the angle it measures: turning
+    /// the second frame by a small angle about any world axis changes the measured angle
+    /// by the jacobian's component along that axis, whatever the swing between the frames.
+    #[cfg(feature = "dim3")]
+    #[test]
+    fn angle_gradient_is_the_measured_angles_derivative() {
+        let limit = AngularLimitParams::<Real>::new(-1.0, 1.0);
+        let eps: Real = 1.0e-3;
+        let turns = [
+            Rotation::IDENTITY,
+            Rotation::from_axis_angle(Vector::Y, 0.7),
+            Rotation::from_axis_angle(Vector::new(0.3, 0.8, -0.5).normalize(), 1.2),
+            Rotation::from_axis_angle(Vector::new(-0.6, 0.2, 0.77).normalize(), 2.4),
+            Rotation::from_axis_angle(Vector::Z, 0.5) * Rotation::from_axis_angle(Vector::X, 0.4),
+        ];
+        let frame1_turn = Rotation::from_axis_angle(Vector::new(1.0, -2.0, 0.5).normalize(), 0.9);
+        for turn in turns {
+            let frame1 = Pose::from_rotation(frame1_turn);
+            let frame2 = Pose::from_rotation(frame1_turn * turn);
+            let helper = JointConstraintHelper::<Real>::new(&frame1, &frame2, &Vector::ZERO, &Vector::ZERO, 0);
+            for axis in 0..3 {
+                let gradient = helper.angle_gradient(axis);
+                for world_axis in [Vector::X, Vector::Y, Vector::Z] {
+                    let angle_at = |delta: Real| {
+                        let moved = Pose::from_rotation(Rotation::from_axis_angle(world_axis, delta) * frame2.rotation);
+                        JointConstraintHelper::<Real>::new(&frame1, &moved, &Vector::ZERO, &Vector::ZERO, 0)
+                            .recentered_angle(axis, &limit)
+                    };
+                    let slope = (angle_at(eps) - angle_at(-eps)) / (2.0 * eps);
+                    let expected = gradient.dot(world_axis);
+                    assert!(
+                        (slope - expected).abs() < 2.0e-2 * (1.0 + expected.abs()),
+                        "turn {turn:?} axis {axis} about {world_axis:?}: measured {slope}, jacobian {expected}"
+                    );
+                }
             }
         }
     }
