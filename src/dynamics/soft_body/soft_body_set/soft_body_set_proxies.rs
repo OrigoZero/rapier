@@ -200,6 +200,9 @@ pub(super) struct SyncOutcome {
     /// The speculative margin of the body's deformable colliders for the coming step (`None`:
     /// asleep, left alone).
     pub(super) margin: Option<Real>,
+    /// The range of the particles' travel over the coming step along each axis (see
+    /// `RigidBody::soft_motion_sweep`).
+    pub(super) sweep: [Vector; 2],
     /// The substep request written on the body's root body.
     pub(super) additional_solver_iterations: usize,
     /// Whether every particle is finite (`false`: the body is quarantined).
@@ -245,6 +248,7 @@ pub(super) fn sync_soft_body(
     }
     let mut outcome = SyncOutcome {
         margin: None,
+        sweep: [Vector::ZERO; 2],
         additional_solver_iterations: 0,
         finite: true,
     };
@@ -298,6 +302,7 @@ pub(super) fn sync_soft_body(
         sb.sleep_speed = Real::MAX;
     }
     outcome.margin = Some(max_speed * dt);
+    outcome.sweep = particle_travel(sb, dt);
 
     // Impact-adaptive substeps: while something moves faster than one particle radius per
     // substep at this body's contacts, its island component runs enough substeps to bound that
@@ -332,4 +337,17 @@ pub(super) fn sync_soft_body(
     outcome.additional_solver_iterations =
         sb.particle_settings.additional_solver_iterations.max(extra);
     outcome
+}
+
+/// The range of `sb`'s particles' travel over a step of `dt` at their velocities, along each
+/// axis: the least and the most, both reaching zero.
+pub(super) fn particle_travel(sb: &SoftBody, dt: Real) -> [Vector; 2] {
+    let mut least = Vector::ZERO;
+    let mut most = Vector::ZERO;
+    for p in &sb.particles {
+        let travel = p.velocity * dt;
+        least = least.min(travel);
+        most = most.max(travel);
+    }
+    [least, most]
 }

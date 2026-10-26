@@ -107,7 +107,7 @@ impl PhysicsPipeline {
         let collider_aabb = |co: &crate::geometry::Collider,
                              rb: &crate::dynamics::RigidBody|
          -> crate::geometry::Aabb {
-            let mut aabb = co.compute_collision_aabb(prediction / 2.0 + co.soft_motion_margin(rb));
+            let mut aabb = co.soft_swept_collision_aabb(rb, prediction / 2.0);
             if rb.soft_ccd_prediction() > 0.0 {
                 let next_pose = rb.predict_position_using_velocity_and_forces_with_max_dist(
                     dt,

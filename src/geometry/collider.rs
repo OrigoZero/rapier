@@ -92,6 +92,23 @@ impl Collider {
         }
     }
 
+    /// The broad-phase box of a collider padded by `prediction`, swept by its soft-body
+    /// motion: a soft body's deformable collider reaches as far as its particles travel over the
+    /// coming step along each axis, and in no other direction.
+    pub(crate) fn soft_swept_collision_aabb(
+        &self,
+        parent: &crate::dynamics::RigidBody,
+        prediction: Real,
+    ) -> Aabb {
+        let mut aabb = self.compute_collision_aabb(prediction);
+        if self.is_deformable_collider() {
+            let [least, most] = parent.soft_motion_sweep;
+            aabb.mins += least;
+            aabb.maxs += most;
+        }
+        aabb
+    }
+
     /// Deforms the shape of a soft-body surface collider in place through `f` without
     /// invalidating the narrow-phase pair workspaces (its topology and identity are unchanged).
     pub(crate) fn deform_shape(&mut self, f: impl FnOnce(&mut dyn Shape)) {
@@ -650,10 +667,11 @@ impl Collider {
                 ) * p.pos_wrt_parent
             })
         });
-        let soft_motion_margin = parent.map_or(0.0, |(_, parent)| self.soft_motion_margin(parent));
-
         let prediction_distance = params.prediction_distance();
-        let mut aabb = self.compute_collision_aabb(prediction_distance / 2.0 + soft_motion_margin);
+        let mut aabb = match parent {
+            Some((_, parent)) => self.soft_swept_collision_aabb(parent, prediction_distance / 2.0),
+            None => self.compute_collision_aabb(prediction_distance / 2.0),
+        };
         if let Some(next_pose) = next_pose {
             let next_aabb = self
                 .shape
