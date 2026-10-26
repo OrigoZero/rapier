@@ -15,10 +15,12 @@ use super::soft_constraints_set::{
     AwakeSoftBody, SoftColorRange, SoftConstraintsSet, SoftGroupLayout, SoftShapeConstraint,
     SoftVolumeConstraint,
 };
+#[cfg(feature = "dim3")]
+use super::soft_element_constraint::SoftElasticBatch;
 use super::soft_element_constraint::{
     CorotationalConstraint, MAX_CONSTRAINT_PARTICLES, NeoHookeanConstraint, STRAIN_ROWS,
-    SoftElasticConstraint, SoftElasticModel, SoftScalarConstraint, SoftScalarConstraintKind,
-    SoftScalarConstraintWriteback, StrainMatrix, StrainVector,
+    SoftCellBlock, SoftElasticConstraint, SoftElasticModel, SoftScalarConstraint,
+    SoftScalarConstraintKind, SoftScalarConstraintWriteback, StrainMatrix, StrainVector,
 };
 use crate::dynamics::soft_body::SOFT_BODY_OVERFLOW_COLOR;
 use crate::dynamics::solver::reset_buffer_reusing;
@@ -245,10 +247,13 @@ impl SoftConstraintsSet {
                 let range = SoftColorRange {
                     scalar_constraints: start..cursor,
                     elastic_constraints: elastic_start..elastic_cursor,
+                    ..Default::default()
                 };
                 if color == SOFT_BODY_OVERFLOW_COLOR as usize {
                     self.groups[gi].serial = range;
-                } else if range.len() > 0 {
+                } else if !range.scalar_constraints.is_empty()
+                    || !range.elastic_constraints.is_empty()
+                {
                     self.color_ranges.push(range);
                 }
             }
@@ -386,6 +391,7 @@ impl SoftConstraintsSet {
             (0..num_awake).for_each(fill);
         }
         self.element_constraint_workspace = workspace;
+        self.batch_elastic_constraints();
 
         // Every parallel color must be particle-disjoint: two constraints of a color sharing a solver
         // body would race on its velocity.
@@ -408,6 +414,68 @@ impl SoftConstraintsSet {
                     );
                 }
             }
+        }
+    }
+
+    /// Packs the corotational cells of each parallel color into batches of `SIMD_WIDTH` (the
+    /// last one padded with empty lanes) and lists the other elastic cells, the overflow color's
+    /// included, to be solved one at a time.
+    fn batch_elastic_constraints(&mut self) {
+        #[cfg(feature = "dim3")]
+        self.elastic_batches.clear();
+        self.elastic_singles.clear();
+        self.elastic_lanes.clear();
+        self.elastic_lanes
+            .resize(self.elastic_constraints.len(), u32::MAX);
+        for ri in 0..self.color_ranges.len() {
+            let elastic = self.color_ranges[ri].elastic_constraints.clone();
+            #[cfg(feature = "dim3")]
+            {
+                use crate::math::SIMD_WIDTH;
+                let batches_start = self.elastic_batches.len();
+                let singles_start = self.elastic_singles.len();
+                let mut lanes = [u32::MAX; SIMD_WIDTH];
+                let mut filled = 0;
+                for i in elastic {
+                    if matches!(
+                        self.elastic_constraints[i].model,
+                        SoftElasticModel::Corotational(_)
+                    ) {
+                        self.elastic_lanes[i] =
+                            (self.elastic_batches.len() * SIMD_WIDTH + filled) as u32;
+                        lanes[filled] = i as u32;
+                        filled += 1;
+                        if filled == SIMD_WIDTH {
+                            self.elastic_batches
+                                .push(SoftElasticBatch::new(&self.elastic_constraints, lanes));
+                            lanes = [u32::MAX; SIMD_WIDTH];
+                            filled = 0;
+                        }
+                    } else {
+                        self.elastic_singles.push(i as u32);
+                    }
+                }
+                if filled > 0 {
+                    self.elastic_batches
+                        .push(SoftElasticBatch::new(&self.elastic_constraints, lanes));
+                }
+                let range = &mut self.color_ranges[ri];
+                range.batches = batches_start..self.elastic_batches.len();
+                range.singles = singles_start..self.elastic_singles.len();
+            }
+            #[cfg(feature = "dim2")]
+            {
+                let singles_start = self.elastic_singles.len();
+                self.elastic_singles.extend(elastic.map(|i| i as u32));
+                self.color_ranges[ri].singles = singles_start..self.elastic_singles.len();
+            }
+        }
+        // The overflow color's constraints share particles: solved one at a time, in order.
+        for gi in 0..self.groups.len() {
+            let elastic = self.groups[gi].serial.elastic_constraints.clone();
+            let singles_start = self.elastic_singles.len();
+            self.elastic_singles.extend(elastic.map(|i| i as u32));
+            self.groups[gi].serial.singles = singles_start..self.elastic_singles.len();
         }
     }
 
@@ -486,8 +554,14 @@ impl SoftConstraintsSet {
                 })
                 .collect();
 
+            if sb.cell_blocks.len() != sb.cells.len() {
+                sb.cell_blocks.clear();
+                sb.cell_blocks.resize(sb.cells.len(), SoftCellBlock::EMPTY);
+            }
+            let cell_blocks = sb.cell_blocks.as_mut_ptr();
             self.awake.push(AwakeSoftBody {
                 ptr: sb as *mut SoftBody,
+                cell_blocks,
                 handle,
                 group,
                 substep_dt: step_dt,
@@ -789,7 +863,28 @@ impl SoftConstraintsSet {
                         solver_ids[k] = slots[v as usize];
                         pos[k] = pos_of(v);
                     }
-                    let block = SoftElasticConstraint::strain_block(&coeffs, &im);
+                    // The block's diagonal and the softened block's inverse, from the
+                    // cell's last step when nothing they depend on changed.
+                    let key = SoftCellBlock::key(
+                        &c.inv_rest_matrix,
+                        &im,
+                        mu,
+                        lambda,
+                        vol,
+                        elastic_zeta,
+                        dt,
+                        neo_hookean,
+                    );
+                    // SAFETY: `cell_blocks` holds one block per cell of the body, and each cell
+                    // is filled by exactly one worker.
+                    let cached = unsafe { &mut *awake.cell_blocks.add(ci) };
+                    let (diagonal, fresh_block) = match cached.matching(&key) {
+                        Some(block) => (block.diagonal, None),
+                        None => {
+                            let block = SoftElasticConstraint::strain_block(&coeffs, &im);
+                            (block.diagonal(), Some(block))
+                        }
+                    };
                     let two_pi = Real::simd_two_pi();
                     // Snap-back caps: a strain error moves the particles at about
                     // `erp * strain * cell size` per second.
@@ -803,12 +898,11 @@ impl SoftConstraintsSet {
                     };
                     let mut erp_strain = StrainVector::zeros();
                     let mut cfm_strain = StrainVector::zeros();
-                    let mut softened = block;
                     let mut inert = [false; STRAIN_ROWS];
                     let mut damping = StrainVector::zeros();
                     let mut strain_per_impulse = StrainVector::zeros();
                     for r in 0..STRAIN_ROWS {
-                        let w = block[(r, r)];
+                        let w = diagonal[r];
                         // The row's deviatoric stiffness: the stress-based strain of both models
                         // reads through it (an isotropic material's deviatoric response is `2μ`).
                         let k_dev = if r < DIM {
@@ -828,7 +922,6 @@ impl SoftConstraintsSet {
                                 coeffs_of(&SpringCoefficients::new(omega / two_pi, elastic_zeta));
                             erp_strain[r] = erp;
                             cfm_strain[r] = w * cfm;
-                            softened[(r, r)] += cfm_strain[r];
                             // Damping c = 2ζω/w (the constraint as a spring of mass 1/w).
                             damping[r] = 2.0 * elastic_zeta * omega / w;
                         } else {
@@ -847,6 +940,9 @@ impl SoftConstraintsSet {
                             m: StrainMatrix::zeros(),
                             dt_grad: StrainVector::zeros(),
                         });
+                        if fresh_block.is_some() {
+                            *cached = SoftCellBlock::new(key, diagonal, StrainMatrix::zeros());
+                        }
                         (StrainMatrix::zeros(), model, 0.0)
                     } else {
                         let omega_vol = (lambda * vol * w_vol).sqrt();
@@ -857,7 +953,17 @@ impl SoftConstraintsSet {
                         } else {
                             (0.0, 0.0)
                         };
-                        let inv_a = SoftElasticConstraint::invert_block(softened, inert);
+                        let inv_a = match fresh_block {
+                            None => cached.inv_a,
+                            Some(mut softened) => {
+                                for r in 0..STRAIN_ROWS {
+                                    softened[(r, r)] += cfm_strain[r];
+                                }
+                                let inv_a = SoftElasticConstraint::invert_block(softened, inert);
+                                *cached = SoftCellBlock::new(key, diagonal, inv_a);
+                                inv_a
+                            }
+                        };
                         let model = SoftElasticModel::Corotational(CorotationalConstraint {
                             erp_strain,
                             cfm_strain,

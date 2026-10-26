@@ -3,7 +3,12 @@
 #[cfg(not(feature = "std"))]
 #[allow(unused_imports)]
 use simba::scalar::{ComplexField as _, RealField as _};
+#[cfg(feature = "dim3")]
+use simba::simd::SimdValue as _;
 
+#[cfg(feature = "dim3")]
+use super::super::soft_element_constraint::CELL_ROTATION_TOLERANCE;
+use super::super::soft_element_constraint::ElasticEndState;
 use crate::dynamics::solver::solver_body::SolverBodies;
 use crate::math::{Real, Vector};
 use crate::utils::{AngularInertiaOps, ComponentMul, DotProduct};
@@ -303,21 +308,43 @@ impl SoftConstraintsSet {
                 constraint.warmstart(bodies);
             }
             constraint.solve(bodies);
-        } else {
-            let i = range.elastic_constraints.start + idx - range.scalar_constraints.len();
-            let constraint = &mut self.elastic_constraints[i];
+            return;
+        }
+        let idx = idx - range.scalar_constraints.len();
+        let num_scalar = self.scalar_constraints.len();
+        #[cfg(feature = "dim3")]
+        if idx < range.batches.len() {
+            let bi = range.batches.start + idx;
+            let batch = &mut self.elastic_batches[bi];
             if update {
-                constraint.update(bodies);
-                self.strained[self.scalar_constraints.len() + i] =
-                    constraint.is_strained(min_strain);
+                let strained = batch.update(bodies, CELL_ROTATION_TOLERANCE, min_strain);
+                for l in 0..crate::math::SIMD_WIDTH {
+                    let ci = batch.constraints[l];
+                    if ci != u32::MAX {
+                        self.strained[num_scalar + ci as usize] = strained.extract(l);
+                    }
+                }
             }
             if let Some(coeff) = warmstart {
-                constraint.strain_impulse *= coeff;
-                constraint.vol_impulse *= coeff;
-                constraint.warmstart(bodies);
+                batch.warmstart(bodies, coeff);
             }
-            constraint.solve(bodies);
+            batch.solve(bodies, None);
+            return;
         }
+        #[cfg(feature = "dim3")]
+        let idx = idx - range.batches.len();
+        let i = self.elastic_singles[range.singles.start + idx] as usize;
+        let constraint = &mut self.elastic_constraints[i];
+        if update {
+            constraint.update(bodies);
+            self.strained[num_scalar + i] = constraint.is_strained(min_strain);
+        }
+        if let Some(coeff) = warmstart {
+            constraint.strain_impulse *= coeff;
+            constraint.vol_impulse *= coeff;
+            constraint.warmstart(bodies);
+        }
+        constraint.solve(bodies);
     }
 
     /// Re-solves, serially, every constraint of the group flagged strained at its last update
@@ -325,28 +352,52 @@ impl SoftConstraintsSet {
     /// the contacts touches only the few constraints being torn.
     pub fn resweep_strained_constraints(&mut self, group: usize, bodies: &mut SolverBodies) {
         let colors = self.groups[group].colors.clone();
-        let serial = self.groups[group].serial.clone();
         let num_scalar = self.scalar_constraints.len();
         for ci in colors.chain(core::iter::once(usize::MAX)) {
-            let (constraints, elastic_constraints) = if ci == usize::MAX {
-                (
-                    serial.scalar_constraints.clone(),
-                    serial.elastic_constraints.clone(),
-                )
+            let range = if ci == usize::MAX {
+                self.groups[group].serial.clone()
             } else {
-                let r = &self.color_ranges[ci];
-                (r.scalar_constraints.clone(), r.elastic_constraints.clone())
+                self.color_ranges[ci].clone()
             };
-            for i in constraints {
+            for i in range.scalar_constraints {
                 if self.strained[i] {
                     self.scalar_constraints[i].solve(bodies);
                 }
             }
-            for i in elastic_constraints {
+            #[cfg(feature = "dim3")]
+            for bi in range.batches {
+                let strained = &self.strained;
+                let batch = &mut self.elastic_batches[bi];
+                if let Some(mask) = batch.mask(|c| strained[num_scalar + c as usize]) {
+                    batch.solve(bodies, Some(mask));
+                }
+            }
+            for k in range.singles {
+                let i = self.elastic_singles[k] as usize;
                 if self.strained[num_scalar + i] {
                     self.elastic_constraints[i].solve(bodies);
                 }
             }
+        }
+    }
+
+    /// Elastic cell `i` as the step left it: its rotation, strain and whether it was inverted at
+    /// the last update, and the impulses it accumulated (strain rows in the cell frame, then the
+    /// volumetric row).
+    #[inline]
+    pub fn elastic_end_state(&self, i: usize) -> ElasticEndState {
+        #[cfg(feature = "dim3")]
+        if let Some(&lane) = self.elastic_lanes.get(i).filter(|l| **l != u32::MAX) {
+            let width = crate::math::SIMD_WIDTH;
+            return self.elastic_batches[lane as usize / width].lane(lane as usize % width);
+        }
+        let c = &self.elastic_constraints[i];
+        ElasticEndState {
+            rotation: c.rotation,
+            strain: c.strain,
+            inverted: c.inverted,
+            strain_impulse: c.strain_impulse,
+            vol_impulse: c.vol_impulse,
         }
     }
 

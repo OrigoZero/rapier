@@ -97,6 +97,8 @@ impl SoftConstraintsSet {
                 }
             } else {
                 let constraint = &self.elastic_constraints[idx - num_scalar_constraints];
+                let end = self.elastic_end_state(idx - num_scalar_constraints);
+                let (strain_impulse, vol_impulse) = (end.strain_impulse, end.vol_impulse);
                 let awake = &self.awake[constraint.soft_body as usize];
                 let sb = unsafe { &mut *awake.ptr };
                 let material = *sb.element_material(sb.cells[constraint.element as usize].material);
@@ -107,14 +109,16 @@ impl SoftConstraintsSet {
                     1.0
                 };
                 let cell = &mut sb.cells[constraint.element as usize];
-                let impulses = (constraint.strain_impulse.iter())
-                    .chain(core::iter::once(&constraint.vol_impulse));
+                let impulses = (strain_impulse.iter()).chain(core::iter::once(&vol_impulse));
                 for (dst, src) in cell.impulses.iter_mut().zip(impulses) {
                     *dst = crate::utils::canonicalize_zero(*src);
                 }
-                cell.rotation = constraint.rotation;
+                cell.rotation = end.rotation;
                 // The tear strain counts the plastic stretch, as it stood before this step's flow.
-                let tensile = total_tensile_strain(&constraint.strain, &cell.plastic_stretch);
+                let tensile = material
+                    .tear_strain
+                    .is_some()
+                    .then(|| total_tensile_strain(&end.strain, &cell.plastic_stretch));
                 if material.plastic_yield > 0.0 && material.plastic_creep > 0.0 {
                     let rest0: [Vector; DIM + 1] = core::array::from_fn(|k| {
                         sb.particles[cell.vertices[k] as usize].initial_rest_position
@@ -122,21 +126,13 @@ impl SoftConstraintsSet {
                     // The flow reads the strain the cell carries as stress (its last substep's
                     // impulses over the row stiffness), not the geometric strain: the sweep's
                     // unconverged residual is geometric but transmits no load.
-                    let stress_strain = constraint
-                        .strain_impulse
-                        .component_mul(&constraint.strain_per_impulse);
-                    if plastic_flow(
-                        cell,
-                        &stress_strain,
-                        constraint.inverted,
-                        &rest0,
-                        &material,
-                        dt,
-                    ) {
+                    let stress_strain =
+                        strain_impulse.component_mul(&constraint.strain_per_impulse);
+                    if plastic_flow(cell, &stress_strain, end.inverted, &rest0, &material, dt) {
                         awake.plastic_flow.store(true, Ordering::Relaxed);
                     }
                 }
-                if material.tear_strain.is_some() {
+                if let Some(tensile) = tensile {
                     let load = material.cell_tear_load(tensile) * crate::utils::inv(resistance);
                     cell.stress = material.smooth_stress(cell.stress, load, dt);
                     if cell.stress > 1.0 {

@@ -227,6 +227,7 @@ impl SoftBodyBuilder {
             #[cfg(feature = "dim3")]
             dihedrals,
             cells,
+            cell_blocks: Vec::new(),
             volume_preservation: self.volume_preservation,
             boundary: surface,
             boundary_closed,
