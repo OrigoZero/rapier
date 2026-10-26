@@ -1,5 +1,5 @@
 //! Per-step maintenance of the set: applying user changes, updating proxies and colliders, syncing particle positions, tearing and cutting.
-use super::soft_body_set_proxies::{rebuilt_surface_shape, sync_soft_body};
+use super::soft_body_set_proxies::{particle_travel, rebuilt_surface_shape, sync_soft_body};
 use super::soft_body_set_split::{ProxyPoses, rebase_proxy_attachments};
 use super::{SoftBodyIslandEvent, SoftBodySet};
 use crate::alloc_prelude::*;
@@ -72,9 +72,12 @@ impl SoftBodySet {
                 }
                 let margin = max_speed * params.dt;
                 if margin > 0.0 {
+                    let [least, most] = particle_travel(sb, params.dt);
                     for cluster in sb.clusters.iter().filter(|cluster| cluster.is_live()) {
                         if let Some(rb) = bodies.get_mut_internal(cluster.proxy()) {
                             rb.soft_motion_margin = rb.soft_motion_margin.max(margin);
+                            let [low, high] = rb.soft_motion_sweep;
+                            rb.soft_motion_sweep = [low.min(least), high.max(most)];
                         }
                         // The margin only pads the deformable colliders: flagged as modified so
                         // the broad phase updates their AABBs with it.
@@ -263,6 +266,7 @@ impl SoftBodySet {
             let Some(margin) = outcome.margin else {
                 continue;
             };
+            let outcome_sweep = outcome.sweep;
             if !outcome.finite {
                 // Non-finite state: contained here, before it reaches the colliders.
                 sb.sanitize_dynamics();
@@ -301,6 +305,7 @@ impl SoftBodySet {
                     continue;
                 };
                 rb.soft_motion_margin = margin;
+                rb.soft_motion_sweep = outcome_sweep;
                 let proxy_pose = rb.pos.position;
                 // Flagged as modified: the meshes were deformed and the rigid ones move below.
                 for handle in rb.colliders() {

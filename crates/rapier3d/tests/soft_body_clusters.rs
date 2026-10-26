@@ -992,8 +992,9 @@ fn points_past_aabb(world: &PhysicsWorld, co: ColliderHandle, dist: Real) -> Vec
         .collect()
 }
 
-/// The soft-body motion margin pads the deformable colliders of a fast jelly only: the rigid
-/// colliders on its proxies get the broad-phase AABB of a collider on a dynamic body.
+/// The soft-body motion margin pads the deformable colliders of a fast jelly only, along the way
+/// its particles travel: the rigid colliders on its proxies get the broad-phase AABB of a collider
+/// on a dynamic body.
 #[test]
 fn only_deformable_colliders_are_padded_by_the_soft_motion_margin() {
     let mut world = PhysicsWorld::new();
@@ -1055,10 +1056,18 @@ fn only_deformable_colliders_are_padded_by_the_soft_motion_margin() {
             }
         }
         for co in &surfaces {
-            for p in points_past_aabb(&world, *co, 0.2) {
+            // The jelly travels along +x: its surfaces reach ahead of it, and no farther than the
+            // prediction distance to its sides or behind it.
+            let points = points_past_aabb(&world, *co, 0.2);
+            let (behind, ahead) = (points[0], points[1]);
+            assert!(
+                leaf_reaches(&world, *co, ahead),
+                "step {step}: the broad-phase leaf of the surface {co:?} misses {ahead:?}, ahead of it"
+            );
+            for p in points[2..].iter().chain([&behind]) {
                 assert!(
-                    leaf_reaches(&world, *co, p),
-                    "step {step}: the broad-phase leaf of the surface {co:?} misses {p:?}"
+                    !leaf_reaches(&world, *co, *p),
+                    "step {step}: the broad-phase leaf of the surface {co:?} reaches {p:?}, off its way"
                 );
             }
         }
@@ -1130,13 +1139,13 @@ fn rigid_collider_on_a_fast_proxy_does_not_let_a_ball_through() {
     }
 }
 
-/// The motion margin a collider's broad-phase AABB is padded with, past the prediction distance.
+/// How far ahead along +x a collider's broad-phase AABB reaches, past the prediction distance.
 fn motion_margin(world: &PhysicsWorld, co: ColliderHandle) -> Real {
     let params = world.integration_parameters;
     let collider = &world.colliders[co];
     let padded = collider.compute_broad_phase_aabb(&params, &world.bodies);
     let unpadded = collider.compute_collision_aabb(params.prediction_distance() / 2.0);
-    padded.half_extents().x - unpadded.half_extents().x
+    padded.maxs.x - unpadded.maxs.x
 }
 
 /// A step split by the CCD sizes the soft-body motion margin with the full step's `dt`, not with
@@ -1189,11 +1198,11 @@ fn soft_motion_margin_spans_the_full_step_when_the_ccd_splits_it() {
             (margin - expected).abs() < 1.0e-3,
             "surface {co:?}: margin {margin}, expected {expected}"
         );
-        for p in points_past_aabb(&world, *co, 0.9 * expected) {
-            assert!(
-                leaf_reaches(&world, *co, p),
-                "the broad-phase leaf of the surface {co:?} misses {p:?}"
-            );
-        }
+        // The point ahead of the surface, along the jelly's travel.
+        let ahead = points_past_aabb(&world, *co, 0.9 * expected)[1];
+        assert!(
+            leaf_reaches(&world, *co, ahead),
+            "the broad-phase leaf of the surface {co:?} misses {ahead:?}"
+        );
     }
 }

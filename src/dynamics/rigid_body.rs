@@ -93,6 +93,11 @@ pub struct RigidBody {
     /// step: the farthest particle travel of its soft body over the coming step (zero for
     /// regular bodies).
     pub(crate) soft_motion_margin: Real,
+    /// The range of a soft-frame proxy's particle travel over the coming step along each axis,
+    /// from the least to the most (both reaching zero): its deformable colliders' broad-phase
+    /// boxes are swept by it (zero for regular bodies).
+    #[cfg_attr(feature = "serde-serialize", serde(default))]
+    pub(crate) soft_motion_sweep: [Vector; 2],
     /// The unit normal of the plane this body moves along and turns about
     /// ([`Self::set_plane_hold`]), or `None` when it moves freely.
     #[cfg_attr(feature = "serde-serialize", serde(default))]
@@ -149,6 +154,7 @@ impl RigidBody {
             soft_body: crate::dynamics::SoftBodyHandle::invalid(),
             soft_cluster: u32::MAX,
             soft_motion_margin: 0.0,
+            soft_motion_sweep: [Vector::ZERO; 2],
             plane_normal: None,
             records_substeps: false,
             substep_vels: Vec::new(),
@@ -203,6 +209,7 @@ impl RigidBody {
             soft_body: _soft_body, // The soft-body markers belong to the proxy, not to its state.
             soft_cluster: _soft_cluster,
             soft_motion_margin: _soft_motion_margin, // Engine-managed, like the markers.
+            soft_motion_sweep: _soft_motion_sweep,
             plane_normal,
             records_substeps,
             substep_vels: _substep_vels, // What the last step recorded belongs to this body's own run.

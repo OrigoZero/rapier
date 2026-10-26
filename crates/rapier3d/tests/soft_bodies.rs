@@ -4928,3 +4928,75 @@ fn cut_halves_rest_as_cut_and_collide_when_shoved() {
         "the shoved halves stayed interlocked: {pushed_back}"
     );
 }
+
+/// A soft box carried fast along the ground with clear air under it holds no contact with the
+/// ground and asks for no extra substeps: its broad-phase reach is where its particles travel, so
+/// the two never pair, and the box keeps its height and its speed.
+#[test]
+fn a_box_carried_fast_past_the_ground_holds_no_contact_with_it() {
+    let mut world = PhysicsWorld::new();
+    world.gravity = Vector::ZERO;
+    let (ground, _) = world.insert(
+        RigidBodyBuilder::fixed().translation(Vector::new(0.0, -0.5, 0.0)),
+        ColliderBuilder::cuboid(3.0, 0.5, 40.0),
+    );
+    // A 1.8 x 0.8 x 4.4 m box whose underside stands 0.3 m over the ground, at 50 km/h along it:
+    // its particles travel 0.46 m a step, past the gap.
+    let speed = 13.9;
+    let handle = world.insert_soft_body(
+        SoftBodyBuilder::cuboid(
+            Vector::new(0.0, 0.7, -20.0),
+            Vector::new(0.9, 0.4, 2.2),
+            6,
+            3,
+            12,
+        )
+        .material(SoftBodyMaterial {
+            young_modulus: 2.0e4,
+            poisson_ratio: 0.3,
+            ..Default::default()
+        })
+        .can_sleep(false)
+        .mass(40.0),
+    );
+    let sb = &mut world.soft_bodies[handle];
+    for i in 0..sb.num_particles() {
+        sb.set_particle_velocity(i, Vector::new(0.0, 0.0, speed));
+    }
+    let surfaces: Vec<ColliderHandle> = world.soft_bodies[handle]
+        .meshes()
+        .map(|m| m.collider())
+        .collect();
+    let root = world.soft_bodies[handle].root_body();
+    for step in 0..15 {
+        world.step();
+        for surface in &surfaces {
+            let paired = world.narrow_phase.contact_pairs_with(*surface).any(|pair| {
+                [pair.collider1, pair.collider2]
+                    .iter()
+                    .any(|c| world.colliders[*c].parent() == Some(ground))
+            });
+            assert!(
+                !paired,
+                "step {step}: the box's surface pairs with the ground it passes over"
+            );
+        }
+        assert_eq!(
+            world.bodies[root].additional_solver_iterations(),
+            0,
+            "step {step}: the box asks for substeps past the world's"
+        );
+    }
+    let sb = &world.soft_bodies[handle];
+    let lowest = sb
+        .particle_positions()
+        .map(|p| p.y)
+        .fold(Real::MAX, Real::min);
+    assert!(lowest > 0.25, "the box came down to {lowest}");
+    let travelled = sb.center_of_mass().z + 20.0;
+    let expected = speed * 15.0 * world.integration_parameters.dt;
+    assert!(
+        (travelled - expected).abs() < 0.1,
+        "the box travelled {travelled}, not {expected}"
+    );
+}
