@@ -20,6 +20,11 @@ use crate::math::{AngVector, DIM, Vector};
 fn report_impulses(data: &mut crate::geometry::ContactData, c: &SoftContact) {
     data.impulse =
         crate::utils::canonicalize_zero(data.impulse + c.impulse_normal_acc + c.impulse_normal);
+    let mut tangent_world = data.tangent_impulse_world;
+    for k in 0..DIM - 1 {
+        tangent_world += c.tangents[k] * (c.impulse_tangent_acc[k] + c.impulse_tangent[k]);
+    }
+    data.tangent_impulse_world = crate::utils::canonicalize_zero(tangent_world);
     data.warmstart_impulse =
         crate::utils::canonicalize_zero(data.warmstart_impulse + c.impulse_normal);
     #[cfg(feature = "dim2")]
@@ -198,6 +203,7 @@ impl SoftConstraintsSet {
                     for point in &mut manifold.points {
                         point.data.impulse = 0.0;
                         point.data.tangent_impulse = Default::default();
+                        point.data.tangent_impulse_world = Vector::ZERO;
                         point.data.warmstart_impulse = 0.0;
                         point.data.warmstart_tangent_impulse = Default::default();
                         #[cfg(feature = "dim3")]

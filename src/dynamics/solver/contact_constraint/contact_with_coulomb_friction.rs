@@ -715,7 +715,29 @@ impl ContactWithCoulombFriction<SimdReal> {
             let impulses: [_; SIMD_WIDTH] =
                 utils::canonicalize_zero(self.normal_part[k].total_impulse()).into();
             let tangent_impulses = utils::canonicalize_zero(self.tangent_part[k].total_impulse());
-            let closing_speeds: [_; SIMD_WIDTH] = utils::canonicalize_zero(self.closing_speed[k]).into();
+            // The step's friction impulse in world space, in the basis it was solved in.
+            #[cfg(feature = "dim3")]
+            let tangent_world = utils::canonicalize_zero(
+                self.tangent1 * tangent_impulses.x + tangent2 * tangent_impulses.y,
+            );
+            #[cfg(feature = "dim2")]
+            let tangent_world =
+                utils::canonicalize_zero(self.dir1.orthonormal_vector() * tangent_impulses.x);
+            #[cfg(feature = "dim3")]
+            let (tx, ty, tz): (
+                [Real; SIMD_WIDTH],
+                [Real; SIMD_WIDTH],
+                [Real; SIMD_WIDTH],
+            ) = (
+                tangent_world.x.into(),
+                tangent_world.y.into(),
+                tangent_world.z.into(),
+            );
+            #[cfg(feature = "dim2")]
+            let (tx, ty): ([Real; SIMD_WIDTH], [Real; SIMD_WIDTH]) =
+                (tangent_world.x.into(), tangent_world.y.into());
+            let closing_speeds: [_; SIMD_WIDTH] =
+                utils::canonicalize_zero(self.closing_speed[k]).into();
 
             for ii in 0..SIMD_WIDTH {
                 let contact_id = self.manifold_contact_id[k][ii];
@@ -736,6 +758,16 @@ impl ContactWithCoulombFriction<SimdReal> {
                     }
                     active_contact.data.impulse = impulses[ii];
                     active_contact.data.tangent_impulse = tangent_impulses.extract(ii);
+                    #[cfg(feature = "dim3")]
+                    {
+                        active_contact.data.tangent_impulse_world =
+                            crate::math::Vector::new(tx[ii], ty[ii], tz[ii]);
+                    }
+                    #[cfg(feature = "dim2")]
+                    {
+                        active_contact.data.tangent_impulse_world =
+                            crate::math::Vector::new(tx[ii], ty[ii]);
+                    }
                     active_contact.data.closing_speed = closing_speeds[ii];
                 }
             }

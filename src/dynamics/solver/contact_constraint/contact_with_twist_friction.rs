@@ -812,6 +812,14 @@ impl ContactWithTwistFriction<SimdReal> {
             utils::canonicalize_zero(friction.x).into(),
             utils::canonicalize_zero(friction.y).into(),
         );
+        // The manifold's friction impulse in world space, in the basis it was solved in.
+        let friction_world =
+            utils::canonicalize_zero(self.tangent1 * friction.x + tangent2 * friction.y);
+        let (fx, fy, fz): ([Real; SIMD_WIDTH], [Real; SIMD_WIDTH], [Real; SIMD_WIDTH]) = (
+            friction_world.x.into(),
+            friction_world.y.into(),
+            friction_world.z.into(),
+        );
         let mut normal_sums = [0.0 as Real; SIMD_WIDTH];
         let mut active_counts = [0u32; SIMD_WIDTH];
         for k in 0..self.num_contacts as usize {
@@ -829,7 +837,8 @@ impl ContactWithTwistFriction<SimdReal> {
                 utils::canonicalize_zero(self.normal_part[k].impulse).into();
             let impulses: [_; SIMD_WIDTH] =
                 utils::canonicalize_zero(self.normal_part[k].total_impulse()).into();
-            let closing_speeds: [_; SIMD_WIDTH] = utils::canonicalize_zero(self.closing_speed[k]).into();
+            let closing_speeds: [_; SIMD_WIDTH] =
+                utils::canonicalize_zero(self.closing_speed[k]).into();
 
             for ii in 0..SIMD_WIDTH {
                 let contact_id = self.manifold_contact_id[k][ii];
@@ -850,6 +859,8 @@ impl ContactWithTwistFriction<SimdReal> {
                     };
                     active_contact.data.tangent_impulse =
                         TangentImpulse::new(friction_x[ii] * share, friction_y[ii] * share);
+                    active_contact.data.tangent_impulse_world =
+                        crate::math::Vector::new(fx[ii] * share, fy[ii] * share, fz[ii] * share);
                     active_contact.data.warmstart_tangent_impulse =
                         warmstart_tangent_impulses.extract(ii);
                     {
