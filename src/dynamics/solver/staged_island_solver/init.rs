@@ -223,7 +223,6 @@ impl StagedIslandSolver {
             self.soft_constraints.assemble_contacts(
                 island_id,
                 &params,
-                base_params.dt,
                 narrow_phase,
                 colliders,
                 bodies,
