@@ -547,6 +547,7 @@ impl PhysicsPipeline {
                         islands,
                         bodies,
                         colliders,
+                        soft_bodies,
                         broad_phase,
                         narrow_phase,
                         hooks,

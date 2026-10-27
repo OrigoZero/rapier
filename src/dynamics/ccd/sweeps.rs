@@ -176,6 +176,18 @@ pub(super) fn collect_fixed_targets(
     Some(fixed)
 }
 
+/// Whether `co` is the collision mesh of a soft body with a particle attached to the rigid body
+/// `body` (`SoftBody::attach_particle`). The sweep holds a soft mesh where the step began, while
+/// the attachment carries the particles tied to the body along with it through the step: the
+/// body would strike the place its own rope or cloth left and be stopped there, short of where
+/// the solver moved it, with the attachment then pulling the two back together from that gap.
+/// The narrow phase keeps their contacts, and the attachment keeps them together.
+fn soft_target_tied_to(soft_bodies: &SoftBodySet, co: &Collider, body: RigidBodyHandle) -> bool {
+    co.deformable_mesh_ref
+        .and_then(|mesh| soft_bodies.get(mesh.body))
+        .is_some_and(|sb| sb.particle_attachments().iter().any(|a| a.body == body))
+}
+
 /// Collects the enabled soft-body collision meshes and their AABBs, fattened by the prediction
 /// (speculative) distance. Rebuilt every step: unlike the fixed targets, a mesh deforms with its
 /// particles without any scene change.
@@ -539,12 +551,14 @@ pub(super) enum PseudoHitMode {
 /// and records sensor crossings in [`PseudoHitMode::Record`] mode. Shared by the continuous
 /// pass (end pose = solved `next_position`) and the substep splitter (end pose = the
 /// forces/velocities integration, pseudo pairs ignored). Targets in `kinematic_pairs` with this
-/// body are left out: the kinematic sweeps of the pass resolved those contacts.
+/// body are left out: the kinematic sweeps of the pass resolved those contacts. So is the
+/// collision mesh of a soft body tied to this body (see [`soft_target_tied_to`]).
 #[allow(clippy::too_many_arguments)]
 pub(super) fn sweep_fast_body(
     handle: RigidBodyHandle,
     bodies: &RigidBodySet,
     colliders: &ColliderSet,
+    soft_bodies: &SoftBodySet,
     end_body_pose: Pose,
     targets: CcdTargets,
     dispatcher: &dyn QueryDispatcher,
@@ -592,6 +606,9 @@ pub(super) fn sweep_fast_body(
             }
             if kinematic_pairs.is_some_and(|pairs| pairs.contains(*ch1, ch2)) {
                 return; // The kinematic sweeps of this pass resolved this pair.
+            }
+            if soft_target_tied_to(soft_bodies, co2, handle) {
+                return;
             }
             let rb2 = bh2.and_then(|h| bodies.get(h));
             if !tier_allows(rb1, rb2, co2) {

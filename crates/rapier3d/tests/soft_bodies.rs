@@ -5000,3 +5000,75 @@ fn a_box_carried_fast_past_the_ground_holds_no_contact_with_it() {
         "the box travelled {travelled}, not {expected}"
     );
 }
+
+/// A 6 m rope of 0.6 kg in 40 segments, a 3 cm thick wire, laid out level from a pinned end, a
+/// 1 kg box of 0.3 m tied by the rope's free end at the middle of its top face, let go and left
+/// to swing for ten seconds at 30 steps a second, on each solver: the box swings fast enough for
+/// the continuous pass to sweep it, and the rope's end stays within a few centimetres of the
+/// point of the box it is tied to on every step.
+#[test]
+fn a_box_swinging_on_a_rope_tied_to_it_stays_tied() {
+    let mut solvers = vec![SoftBodySolver::Constraints];
+    if cfg!(feature = "fem") {
+        solvers.push(SoftBodySolver::Fem);
+    }
+    for solver in solvers {
+        let mut world = world_with_ground();
+        world.integration_parameters.dt = 1.0 / 30.0;
+        let hook = Vector::new(0.0, 12.0, 0.0);
+        let n = 40u32;
+        let (length, mass, half) = (6.0, 0.6, 0.15);
+        let share = mass / n as Real;
+        let positions: Vec<Vector> = (0..=n)
+            .map(|i| hook + Vector::X * (length * i as Real / n as Real))
+            .collect();
+        let masses: Vec<Real> = (0..=n)
+            .map(|i| if i == 0 || i == n { share / 2.0 } else { share })
+            .collect();
+        let segments: Vec<[u32; 2]> = (0..n).map(|i| [i, i + 1]).collect();
+        let stiffness = 1.0e6 / (length / n as Real);
+        let spring = SoftEdgeSpring {
+            stiffness,
+            damping: 2.0 * 0.5 * (stiffness * share / 2.0).sqrt(),
+        };
+        let laws = (0..n)
+            .map(|_| SoftEdgeLaw {
+                spring: Some(spring),
+                ..SoftEdgeLaw::default()
+            })
+            .collect();
+        let rope = SoftBodyBuilder::new(positions)
+            .masses(masses)
+            .edges(segments.clone())
+            .edge_laws(laws)
+            .wire(segments)
+            .particle_radius(0.015)
+            .pinned_particles([0])
+            .solver(solver);
+        let rope = world.insert_soft_body(rope);
+        let top = hook + Vector::X * length;
+        let (box_body, _) = world.insert(
+            RigidBodyBuilder::dynamic().translation(top - Vector::Y * half),
+            ColliderBuilder::cuboid(half, half, half).mass(1.0),
+        );
+        world.soft_bodies[rope].attach_particle(n as usize, box_body, &world.bodies);
+        let mut fastest: Real = 0.0;
+        for step in 0..300 {
+            world.step();
+            let rb = &world.bodies[box_body];
+            let anchor = rb.position() * Vector::new(0.0, half, 0.0);
+            let gap = (world.soft_bodies[rope].particle_position(n as usize) - anchor).length();
+            fastest = fastest.max(rb.linvel().length());
+            assert!(
+                gap < 0.08,
+                "{solver:?}, step {step}: the rope's end stands {gap} m off the point of the box it is tied to"
+            );
+        }
+        assert_finite(&world, rope);
+        // Fast enough that a step carries the box farther than half its width: it is swept.
+        assert!(
+            fastest * world.integration_parameters.dt > half,
+            "{solver:?}: the box swung at {fastest} m/s"
+        );
+    }
+}
