@@ -23,7 +23,8 @@ use super::sweeps::{
 /// and `next_position` is clamped to the earliest impact — velocities untouched, no re-solve; the
 /// residual approach resolves next step via speculative contacts.
 ///
-/// Fast dynamic bodies sweep against fixed colliders and soft-body meshes; `ccd_enabled` makes a
+/// Fast dynamic bodies sweep against fixed colliders and soft-body meshes (all but the meshes of a
+/// soft body with particles attached to the body itself); `ccd_enabled` makes a
 /// bullet that also sweeps kinematic/dynamic bodies (never other bullets); mesh-like colliders are
 /// never the moving shape; compounds sweep per convex child; `max_ccd_substeps = 0` disables CCD.
 ///
@@ -183,6 +184,7 @@ impl CCDSolver {
         islands: &IslandManager,
         bodies: &RigidBodySet,
         colliders: &ColliderSet,
+        soft_bodies: &SoftBodySet,
         broad_phase: &mut BroadPhaseBvh,
         narrow_phase: &NarrowPhase,
         hooks: &dyn PhysicsHooks,
@@ -214,6 +216,7 @@ impl CCDSolver {
                 handle,
                 bodies,
                 colliders,
+                soft_bodies,
                 predicted_body_pos,
                 CcdTargets::FullBvh(bvh),
                 dispatcher,
@@ -299,6 +302,7 @@ impl CCDSolver {
                     handle,
                     bodies,
                     colliders,
+                    soft_bodies,
                     bodies[handle].pos.next_position,
                     targets,
                     dispatcher,
@@ -330,6 +334,7 @@ impl CCDSolver {
                         handle,
                         bodies,
                         colliders,
+                        soft_bodies,
                         bodies[handle].pos.next_position,
                         CcdTargets::FullBvh(bvh),
                         dispatcher,
