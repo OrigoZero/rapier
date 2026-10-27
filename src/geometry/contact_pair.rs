@@ -802,15 +802,15 @@ pub struct SolverContactGeneric<N: ScalarType, const LANES: usize> {
     /// The contact point on the first body's surface (contact skin baked in), in that
     /// body's CoM-centered local frame so it rides rigidly with the body — what lets
     /// contact recycling skip the per-frame world update. World-space instead for a side
-    /// without a solver body (none, or world-attached by dominance — fixed bodies included).
+    /// with no body, or a fixed one.
     /// Inside [`PhysicsHooks::modify_solver_contacts`] this always holds the fresh
     /// **world-space** point (hooks run before localization).
     ///
     /// [`PhysicsHooks::modify_solver_contacts`]: crate::pipeline::PhysicsHooks::modify_solver_contacts
     pub anchor1: N::Vector, // 2/3
     /// The contact point on the second body's surface, expressed like
-    /// [`Self::anchor1`] (world-space when the second side is world-attached, i.e.
-    /// `relative_dominance < 0`, or inside the contact-modification hook).
+    /// [`Self::anchor1`] (world-space when the second side is a fixed body, or inside
+    /// the contact-modification hook).
     pub anchor2: N::Vector, // 2/3
     /// Distance between the contact points along the normal at the last full contact
     /// update (negative = penetration), minus the contact skins. Writable from
@@ -997,10 +997,12 @@ impl ContactManifoldData {
         contact: &SolverContact,
         bodies: &crate::dynamics::RigidBodySet,
     ) -> (Vector, Vector) {
+        // A side keeps a world anchor when it is fixed and dominant over the other (every
+        // fixed body is); a dominant dynamic or kinematic side rides its own body.
         let resolve =
-            |anchor: Vector, handle: Option<RigidBodyHandle>, world_attached: bool| match handle
-                .filter(|_| !world_attached)
+            |anchor: Vector, handle: Option<RigidBodyHandle>, dominant: bool| match handle
                 .and_then(|h| bodies.get(h))
+                .filter(|rb| !dominant || rb.is_dynamic_or_kinematic())
             {
                 Some(rb) => rb.pos.position * (rb.mprops.local_mprops.local_com + anchor),
                 None => anchor,

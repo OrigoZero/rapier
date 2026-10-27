@@ -68,20 +68,25 @@ impl ContactWithTwistFrictionBuilder<SimdReal> {
         // frontier pair's sleeping body acting as a world-attached wall), so the rigid-body
         // set is never read here.
         let _ = bodies;
-        let ids1: [u32; SIMD_WIDTH] = array![|ii| if manifolds[ii].data.relative_dominance <= 0
-            && !manifold_id[ii].is_padding()
-        {
+        // A side dominated over in the pair keeps its solver body: the dominant body
+        // moves at its own velocity and its contact point rides it, as a kinematic
+        // body's does, and it takes none of the pair's impulse (its masses read as the
+        // world's, `mass_ids`), so the dominated side is pushed out of its way at the
+        // speed it closes.
+        let ids1: [u32; SIMD_WIDTH] = array![|ii| if !manifold_id[ii].is_padding() {
             manifolds[ii].data.solver_body_ids[0]
         } else {
             u32::MAX
         }];
-        let ids2: [u32; SIMD_WIDTH] = array![|ii| if manifolds[ii].data.relative_dominance >= 0
-            && !manifold_id[ii].is_padding()
-        {
+        let ids2: [u32; SIMD_WIDTH] = array![|ii| if !manifold_id[ii].is_padding() {
             manifolds[ii].data.solver_body_ids[1]
         } else {
             u32::MAX
         }];
+        let mass_ids1: [u32; SIMD_WIDTH] =
+            array![|ii| if manifolds[ii].data.relative_dominance > 0 { u32::MAX } else { ids1[ii] }];
+        let mass_ids2: [u32; SIMD_WIDTH] =
+            array![|ii| if manifolds[ii].data.relative_dominance < 0 { u32::MAX } else { ids2[ii] }];
 
         // Optional guard: validate the solver-body ids once here, before the
         // unchecked SIMD gathers below (and every per-iteration gather that
@@ -93,9 +98,19 @@ impl ContactWithTwistFrictionBuilder<SimdReal> {
         }
 
         let vels1 = solver_bodies.gather_vels(ids1);
-        let poses1 = solver_bodies.gather_poses(ids1);
+        let mut poses1 = solver_bodies.gather_poses(ids1);
         let vels2 = solver_bodies.gather_vels(ids2);
-        let poses2 = solver_bodies.gather_poses(ids2);
+        let mut poses2 = solver_bodies.gather_poses(ids2);
+        if mass_ids1 != ids1 {
+            let masses = solver_bodies.gather_poses(mass_ids1);
+            poses1.im = masses.im;
+            poses1.ii = masses.ii;
+        }
+        if mass_ids2 != ids2 {
+            let masses = solver_bodies.gather_poses(mass_ids2);
+            poses2.im = masses.im;
+            poses2.ii = masses.ii;
+        }
 
         let world_com1 = poses1.translation;
         let world_com2 = poses2.translation;

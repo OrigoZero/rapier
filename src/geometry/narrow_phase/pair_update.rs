@@ -689,8 +689,9 @@ pub(super) fn process_pair(
             }
 
             // Localize solver contacts: bake skins (and hook-written `dist`) into the anchors, then
-            // express each in its body's CoM frame (world-attached/dominance-superior sides keep world
-            // anchors, matching the solver's identity pose). Riding rigidly lets recycled steps skip updates.
+            // express each in its body's CoM frame (a fixed side keeps world anchors, matching the
+            // solver's identity pose; a dominant dynamic or kinematic side rides its own body, as the
+            // solver moves it). Riding rigidly lets recycled steps skip updates.
             {
                 let normal = manifold.data.normal;
                 let rel_dom = manifold.data.relative_dominance;
@@ -699,8 +700,14 @@ pub(super) fn process_pair(
                         .position
                         .prepend_translation(rb.mprops.local_mprops.local_com)
                 };
-                let com_pose1 = rb1.as_ref().filter(|_| rel_dom <= 0).map(com_pose);
-                let com_pose2 = rb2.as_ref().filter(|_| rel_dom >= 0).map(com_pose);
+                let com_pose1 = rb1
+                    .as_ref()
+                    .filter(|rb| rel_dom <= 0 || rb.is_dynamic_or_kinematic())
+                    .map(com_pose);
+                let com_pose2 = rb2
+                    .as_ref()
+                    .filter(|rb| rel_dom >= 0 || rb.is_dynamic_or_kinematic())
+                    .map(com_pose);
                 // Split-borrow: the frozen solver arms are written to the
                 // manifold points while iterating the solver contacts.
                 let manifold_points = &mut manifold.points;

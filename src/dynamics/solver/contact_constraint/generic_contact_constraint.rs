@@ -164,7 +164,9 @@ impl GenericContactConstraintBuilder {
             let dp1 = pt_data.solver_dp1;
             let dp2 = pt_data.solver_dp2;
             let point =
-                if manifold.data.relative_dominance > 0 || manifold.data.rigid_body1.is_none() {
+                if (manifold.data.relative_dominance > 0 && !rb1.is_dynamic_or_kinematic())
+                    || manifold.data.rigid_body1.is_none()
+                {
                     dp1
                 } else {
                     mprops1.world_com + dp1
@@ -342,7 +344,9 @@ impl GenericContactConstraintBuilder {
             // contact point rides its own rigid motion); the base separation is rebased so the
             // per-substep tracking is a pure delta from build-time poses.
             let point2 =
-                if manifold.data.relative_dominance < 0 || manifold.data.rigid_body2.is_none() {
+                if (manifold.data.relative_dominance < 0 && !rb2.is_dynamic_or_kinematic())
+                    || manifold.data.rigid_body2.is_none()
+                {
                     dp2
                 } else {
                     mprops2.world_com + dp2
