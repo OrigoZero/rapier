@@ -366,3 +366,49 @@ fn bodies_read_the_substeps_their_group_ran() {
         assert_eq!(world.bodies[body].solved_substeps(), (base, pgs));
     }
 }
+
+/// A dynamic body in a higher dominance group pushes a body of a lower group at its own
+/// speed: the dominated body takes the dominant one's velocity where they meet (with no
+/// restitution, plus the little the contact's bias adds) instead of being pushed out of an overlap,
+/// and the dominant body keeps its velocity. The overlap of the step they meet on is
+/// recovered, and stays within the solver's allowed error after it.
+#[test]
+fn a_dominant_body_pushes_a_dominated_one_at_its_own_speed() {
+    use crate::pipeline::PhysicsWorld;
+
+    for run in 0..2 {
+        let mut world = PhysicsWorld::new();
+        world.gravity = Vector::ZERO;
+        #[cfg(feature = "dim2")]
+        let cuboid = || ColliderBuilder::cuboid(0.5, 0.5).friction(0.0).restitution(0.0);
+        #[cfg(feature = "dim3")]
+        let cuboid = || ColliderBuilder::cuboid(0.5, 0.5, 0.5).friction(0.0).restitution(0.0);
+        let (pusher, _) = world.insert(
+            RigidBodyBuilder::dynamic()
+                .dominance_group(1)
+                .linvel(Vector::X * 5.0)
+                .can_sleep(false),
+            cuboid(),
+        );
+        let (pushed, _) = world.insert(
+            RigidBodyBuilder::dynamic()
+                .translation(Vector::X * 1.2)
+                .can_sleep(false),
+            cuboid(),
+        );
+        let mut deepest: crate::math::Real = 0.0;
+        let mut last = 0.0;
+        for _ in 0..30 {
+            world.step();
+            let gap = world.bodies[pushed].translation().x - world.bodies[pusher].translation().x;
+            deepest = deepest.max(1.0 - gap);
+            last = 1.0 - gap;
+        }
+        let pusher_speed = world.bodies[pusher].linvel().x;
+        let pushed_speed = world.bodies[pushed].linvel().x;
+        assert!((pusher_speed - 5.0).abs() < 1.0e-3, "run {run}: the dominant body slowed to {pusher_speed}");
+        assert!((4.95..5.25).contains(&pushed_speed), "run {run}: the dominated body moves at {pushed_speed}, not the 5 it is pushed at");
+        assert!(deepest < 0.1, "run {run}: the two overlapped by {deepest}");
+        assert!(last < 0.01, "run {run}: the two still overlap by {last} half a second on");
+    }
+}

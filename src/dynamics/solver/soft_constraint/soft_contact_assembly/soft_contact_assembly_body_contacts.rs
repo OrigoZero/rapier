@@ -220,8 +220,8 @@ impl SoftConstraintsSet {
                     let mut feature_constraints: parry::utils::hashmap::HashMap<(u32, u32), usize> =
                         Default::default();
                     // The narrow phase localized the anchors in the parent bodies' CoM frames,
-                    // except on the dominant side of a pair (world anchor, like a fixed body):
-                    // the same rule (`relative_dominance`) recovers the world anchors.
+                    // except on a fixed dominant side (world anchor): the same rule
+                    // (`relative_dominance` and the body's type) recovers the world anchors.
                     let (rb1, rb2) = if surface_first {
                         (surface_rb, other_rb)
                     } else {
@@ -230,8 +230,8 @@ impl SoftConstraintsSet {
                     let anchor_poses = |manifold: &crate::geometry::ContactManifold| {
                         let rel_dom = manifold.data.relative_dominance;
                         (
-                            rb1.filter(|_| rel_dom <= 0).map(com_pose),
-                            rb2.filter(|_| rel_dom >= 0).map(com_pose),
+                            rb1.filter(|rb| rel_dom <= 0 || rb.is_dynamic_or_kinematic()).map(com_pose),
+                            rb2.filter(|rb| rel_dom >= 0 || rb.is_dynamic_or_kinematic()).map(com_pose),
                         )
                     };
                     let localized = |anchor: Vector, pose: &Option<crate::math::Pose>| match pose {
