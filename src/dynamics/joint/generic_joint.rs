@@ -146,6 +146,13 @@ pub struct JointLimits<N> {
     pub max: N,
     /// Internal: impulse being applied to enforce the limit.
     pub impulse: N,
+    /// The most force (linear axis) or torque (angular axis) the limit applies to hold its
+    /// range (default: `Real::MAX`, unbounded).
+    ///
+    /// A load past it pushes the joint beyond its range at the excess: the limit keeps
+    /// pushing back with exactly this force while it does, so a limit given one is a slip
+    /// clutch or a load limiter rather than a hard stop.
+    pub max_force: N,
 }
 
 impl<N: SimdRealCopy> Default for JointLimits<N> {
@@ -154,6 +161,7 @@ impl<N: SimdRealCopy> Default for JointLimits<N> {
             min: -N::splat(Real::MAX),
             max: N::splat(Real::MAX),
             impulse: N::splat(0.0),
+            max_force: N::splat(Real::MAX),
         }
     }
 }
@@ -164,6 +172,7 @@ impl<N: SimdRealCopy> From<[N; 2]> for JointLimits<N> {
             min: value[0],
             max: value[1],
             impulse: N::splat(0.0),
+            max_force: N::splat(Real::MAX),
         }
     }
 }
@@ -353,7 +362,10 @@ impl GenericJoint {
                 == 0;
         #[cfg(feature = "dim3")]
         let motors_ok = (self.motor_axes.bits() & !self.locked_axes.bits()) == 0;
-        motors_ok && (self.limit_axes & self.coupled_axes).is_empty()
+        // A force-bounded limit row is capped per joint, which only the scalar rows carry.
+        motors_ok
+            && (self.limit_axes & self.coupled_axes).is_empty()
+            && !self.has_force_bounded_limit()
     }
 
     /// The constraint-row layout signature of this joint: joints sharing it emit
@@ -529,6 +541,20 @@ impl GenericJoint {
         self.limits[i].min = limits[0];
         self.limits[i].max = limits[1];
         self
+    }
+
+    /// Sets the most force (linear axis) or torque (angular axis) the limit along `axis`
+    /// applies, `Real::MAX` for unbounded. On coupled axes the limit is the first coupled
+    /// axis' (a rope's is `LinX`). See [`JointLimits::max_force`].
+    pub fn set_limit_max_force(&mut self, axis: JointAxis, max_force: Real) -> &mut Self {
+        self.limits[axis as usize].max_force = max_force;
+        self
+    }
+
+    /// Whether a limit this joint enforces is bounded by a `max_force`.
+    pub fn has_force_bounded_limit(&self) -> bool {
+        let limited = self.limit_axes.bits() & !self.locked_axes.bits();
+        (0..SPATIAL_DIM).any(|i| limited & (1 << i) != 0 && self.limits[i].max_force != Real::MAX)
     }
 
     /// The spring-like motor model along the specified axis of this joint.

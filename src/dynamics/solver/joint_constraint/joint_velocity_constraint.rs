@@ -1,7 +1,7 @@
 use crate::dynamics::solver::SolverVel;
 use crate::dynamics::solver::joint_constraint::{AngularLimitParams, JointConstraintHelper};
 use crate::dynamics::{
-    GenericJoint, IntegrationParameters, JointAxesMask, JointGraphEdge, JointIndex,
+    GenericJoint, IntegrationParameters, JointAxesMask, JointGraphEdge, JointIndex, JointMotor,
 };
 use crate::math::{ANG_DIM, DIM, Real, SPATIAL_DIM};
 use crate::utils::{ComponentMul, DotProduct, ScalarType, SimdRealCopy};
@@ -297,6 +297,7 @@ impl JointConstraint<Real, 1> {
                     erp_inv_dt,
                     cfm_coeff,
                 );
+                out[len].bound_limit_force(joint.limits[i].max_force, params.dt);
                 len += 1;
             }
         }
@@ -313,6 +314,7 @@ impl JointConstraint<Real, 1> {
                     erp_inv_dt,
                     cfm_coeff,
                 );
+                out[len].bound_limit_force(joint.limits[i].max_force, params.dt);
                 len += 1;
             }
         }
@@ -333,6 +335,8 @@ impl JointConstraint<Real, 1> {
                 erp_inv_dt,
                 cfm_coeff,
             );
+            out[len]
+                .bound_limit_force(joint.limits[first_coupled_ang_axis_id].max_force, params.dt);
             len += 1;
         }
 
@@ -351,11 +355,24 @@ impl JointConstraint<Real, 1> {
                 erp_inv_dt,
                 cfm_coeff,
             );
+            out[len]
+                .bound_limit_force(joint.limits[first_coupled_lin_axis_id].max_force, params.dt);
             len += 1;
         }
         JointConstraintHelper::finalize_constraints(&mut out[start..len]);
 
         len
+    }
+
+    /// Bound a limit row's impulse to what `max_force` applies over a substep of `dt`
+    /// ([`crate::dynamics::JointLimits::max_force`]); an unbounded limit is left as built.
+    pub fn bound_limit_force(&mut self, max_force: Real, dt: Real) {
+        if max_force == Real::MAX {
+            return;
+        }
+        let bound = JointMotor::max_impulse(max_force.max(0.0), dt);
+        self.impulse_bounds[0] = self.impulse_bounds[0].max(-bound);
+        self.impulse_bounds[1] = self.impulse_bounds[1].min(bound);
     }
 
     pub fn solve(&mut self, solver_vels: &mut SolverBodies) {
