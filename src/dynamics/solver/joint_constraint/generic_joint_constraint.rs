@@ -2,7 +2,9 @@ use super::LinkOrBodyRef;
 use crate::dynamics::solver::joint_constraint::joint_velocity_constraint::WritebackId;
 use crate::dynamics::solver::joint_constraint::{JointConstraintHelper, JointSolverBody};
 use crate::dynamics::solver::solver_body::SolverBodies;
-use crate::dynamics::{GenericJoint, IntegrationParameters, JointGraphEdge, JointIndex};
+use crate::dynamics::{
+    GenericJoint, IntegrationParameters, JointGraphEdge, JointIndex, JointMotor,
+};
 use crate::math::{DIM, DVector, Real, SPATIAL_DIM};
 use na::{DVectorView, DVectorViewMut};
 use parry::math::Pose;
@@ -180,6 +182,7 @@ impl GenericJointConstraint {
                     joint.softness,
                     WritebackId::Limit(i),
                 );
+                out[len].bound_limit_force(joint.limits[i].max_force, params.dt);
                 len += 1;
             }
         }
@@ -199,6 +202,7 @@ impl GenericJointConstraint {
                     joint.softness,
                     WritebackId::Limit(i),
                 );
+                out[len].bound_limit_force(joint.limits[i].max_force, params.dt);
                 len += 1;
             }
         }
@@ -269,6 +273,17 @@ impl GenericJointConstraint {
         } else {
             generic_solver_vels.rows_mut(self.solver_vel2 as usize, self.ndofs2)
         }
+    }
+
+    /// Bound a limit row's impulse to what `max_force` applies over a substep of `dt`
+    /// ([`crate::dynamics::JointLimits::max_force`]); an unbounded limit is left as built.
+    pub fn bound_limit_force(&mut self, max_force: Real, dt: Real) {
+        if max_force == Real::MAX {
+            return;
+        }
+        let bound = JointMotor::max_impulse(max_force.max(0.0), dt);
+        self.impulse_bounds[0] = self.impulse_bounds[0].max(-bound);
+        self.impulse_bounds[1] = self.impulse_bounds[1].min(bound);
     }
 
     pub fn solve(
