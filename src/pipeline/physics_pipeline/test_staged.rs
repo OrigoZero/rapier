@@ -311,3 +311,58 @@ fn substep_groups_partition() {
     world.step();
     assert!(world.islands.solve_groups.is_empty());
 }
+
+/// Each body the step moved reads the substeps and passes of the group that
+/// solved it: the world's counts plus the largest extras its connected
+/// component asked for, a jointed partner taking the elevated body's, and the
+/// world's counts alone once nothing asks for more.
+#[test]
+fn bodies_read_the_substeps_their_group_ran() {
+    use crate::pipeline::PhysicsWorld;
+
+    let mut world = PhysicsWorld::new();
+
+    #[cfg(feature = "dim2")]
+    let cuboid = || ColliderBuilder::cuboid(0.5, 0.5);
+    #[cfg(feature = "dim3")]
+    let cuboid = || ColliderBuilder::cuboid(0.5, 0.5, 0.5);
+    let dynamic = |x: crate::math::Real, y: crate::math::Real| {
+        RigidBodyBuilder::dynamic()
+            .translation(Vector::X * x + Vector::Y * y)
+            .can_sleep(false)
+    };
+
+    let (plain, _) = world.insert(dynamic(0.0, 1.0), cuboid());
+    let (chain_a, _) = world.insert(dynamic(10.0, 5.0), cuboid());
+    let (chain_b, _) = world.insert(
+        dynamic(10.0, 3.0)
+            .additional_solver_iterations(4)
+            .additional_pgs_iterations(2),
+        cuboid(),
+    );
+    #[cfg(feature = "dim2")]
+    let joint = RevoluteJointBuilder::new();
+    #[cfg(feature = "dim3")]
+    let joint = RevoluteJointBuilder::new(Vector::Z);
+    world.insert_impulse_joint(chain_a, chain_b, joint);
+    let (lone, _) = world.insert(dynamic(-10.0, 5.0).additional_solver_iterations(8), cuboid());
+
+    assert_eq!(world.bodies[plain].solved_substeps(), (0, 0), "no step has moved it yet");
+    for _ in 0..2 {
+        world.step();
+    }
+    let base = world.integration_parameters.num_solver_iterations;
+    let pgs = world.integration_parameters.num_internal_pgs_iterations;
+    assert_eq!(world.bodies[plain].solved_substeps(), (base, pgs));
+    assert_eq!(world.bodies[chain_a].solved_substeps(), (base + 4, pgs + 2), "a joint partner runs the elevated body's");
+    assert_eq!(world.bodies[chain_b].solved_substeps(), (base + 4, pgs + 2));
+    assert_eq!(world.bodies[lone].solved_substeps(), (base + 8, pgs));
+
+    world.bodies.get_mut(chain_b).unwrap().set_additional_solver_iterations(0);
+    world.bodies.get_mut(chain_b).unwrap().set_additional_pgs_iterations(0);
+    world.bodies.get_mut(lone).unwrap().set_additional_solver_iterations(0);
+    world.step();
+    for body in [plain, chain_a, chain_b, lone] {
+        assert_eq!(world.bodies[body].solved_substeps(), (base, pgs));
+    }
+}

@@ -1059,6 +1059,19 @@ pub(super) unsafe fn run_worker(ctx: &SharedCtx, worker_id: usize) {
                 let new_vels = undamped.apply_damping(base_params.dt, &rb.damping);
                 rb.vels = new_vels;
 
+                // The group whose substeps moved this body: the only one, or
+                // the one whose body range holds its slot.
+                let group = match ctx.groups.len() {
+                    1 => &ctx.groups[0],
+                    _ => ctx
+                        .groups
+                        .iter()
+                        .find(|g| g.bodies.contains(&slot))
+                        .unwrap_or(&ctx.groups[0]),
+                };
+                rb.solved_substeps = group.num_substeps as u32;
+                rb.solved_pgs_iterations = group.num_pgs_iterations as u32;
+
                 if vs.solver_bodies.flags[slot] & SOLVER_BODY_RECORD_SUBSTEPS != 0 {
                     // The damping the step applies once, to the velocity it ends with, is
                     // spread evenly over its substeps: the substep `k` of `n` carries `k / n`
@@ -1086,12 +1099,7 @@ pub(super) unsafe fn run_worker(ctx: &SharedCtx, worker_id: usize) {
                         center_of_mass: solver_poses.translation,
                         rotation: solver_poses.rotation,
                     });
-                    rb.substep_dt = ctx
-                        .groups
-                        .iter()
-                        .find(|g| g.bodies.contains(&slot))
-                        .map(|g| g.dt)
-                        .unwrap_or(ctx.groups[0].dt);
+                    rb.substep_dt = group.dt;
                 }
 
                 // NOTE: if it's a position-based kinematic body, don't writeback as we want
