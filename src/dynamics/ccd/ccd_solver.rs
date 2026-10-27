@@ -14,8 +14,8 @@ use parry::query::sweep_toi::Sweep;
 
 use super::kinematic_sweeps::{KinematicPairs, KinematicStrike, solve_kinematic_sweeps};
 use super::sweeps::{
-    BodyContinuousResult, CcdTargets, PseudoHitMode, collect_fixed_targets, collect_soft_targets,
-    is_bullet, map_bodies_parallel, sweep_fast_body,
+    BodyContinuousResult, CcdTargets, PseudoHitMode, SoftTies, collect_fixed_targets,
+    collect_soft_targets, is_bullet, map_bodies_parallel, sweep_fast_body,
 };
 
 /// Continuous Collision Detection solver preventing fast objects from tunneling:
@@ -24,7 +24,7 @@ use super::sweeps::{
 /// residual approach resolves next step via speculative contacts.
 ///
 /// Fast dynamic bodies sweep against fixed colliders and soft-body meshes (all but the meshes of a
-/// soft body with particles attached to the body itself); `ccd_enabled` makes a
+/// soft body tied to the body itself, by a particle attachment or a joint); `ccd_enabled` makes a
 /// bullet that also sweeps kinematic/dynamic bodies (never other bullets); mesh-like colliders are
 /// never the moving shape; compounds sweep per convex child; `max_ccd_substeps = 0` disables CCD.
 ///
@@ -185,10 +185,17 @@ impl CCDSolver {
         bodies: &RigidBodySet,
         colliders: &ColliderSet,
         soft_bodies: &SoftBodySet,
+        impulse_joints: &ImpulseJointSet,
+        multibody_joints: &MultibodyJointSet,
         broad_phase: &mut BroadPhaseBvh,
         narrow_phase: &NarrowPhase,
         hooks: &dyn PhysicsHooks,
     ) -> Option<Real> {
+        let ties = SoftTies {
+            soft_bodies,
+            impulse_joints,
+            multibody_joints,
+        };
         // NOTE: broad-phase AABBs are NOT enlarged to the swept volumes: only the fast body's
         // query box is swept (per collider, below); targets keep their regular fat AABBs.
         // Swept AABBs written into the tree would leak into the next step (pair explosion).
@@ -216,7 +223,7 @@ impl CCDSolver {
                 handle,
                 bodies,
                 colliders,
-                soft_bodies,
+                ties,
                 predicted_body_pos,
                 CcdTargets::FullBvh(bvh),
                 dispatcher,
@@ -249,11 +256,18 @@ impl CCDSolver {
         bodies: &mut RigidBodySet,
         colliders: &ColliderSet,
         soft_bodies: &SoftBodySet,
+        impulse_joints: &ImpulseJointSet,
+        multibody_joints: &MultibodyJointSet,
         broad_phase: &mut BroadPhaseBvh,
         narrow_phase: &NarrowPhase,
         hooks: &dyn PhysicsHooks,
         events: &dyn EventHandler,
     ) {
+        let ties = SoftTies {
+            soft_bodies,
+            impulse_joints,
+            multibody_joints,
+        };
         let dt = params.dt;
         let linear_slop = params.allowed_linear_error();
 
@@ -302,7 +316,7 @@ impl CCDSolver {
                     handle,
                     bodies,
                     colliders,
-                    soft_bodies,
+                    ties,
                     bodies[handle].pos.next_position,
                     targets,
                     dispatcher,
@@ -334,7 +348,7 @@ impl CCDSolver {
                         handle,
                         bodies,
                         colliders,
-                        soft_bodies,
+                        ties,
                         bodies[handle].pos.next_position,
                         CcdTargets::FullBvh(bvh),
                         dispatcher,
