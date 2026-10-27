@@ -111,6 +111,12 @@ pub struct RigidBody {
     #[cfg_attr(feature = "serde-serialize", serde(skip))]
     pub(crate) substep_vels: Vec<RigidBodySubstep>,
     pub(crate) substep_dt: Real,
+    /// The substeps, and the passes within each, of the last step the solver
+    /// moved this body in ([`Self::solved_substeps`]).
+    #[cfg_attr(feature = "serde-serialize", serde(default))]
+    pub(crate) solved_substeps: u32,
+    #[cfg_attr(feature = "serde-serialize", serde(default))]
+    pub(crate) solved_pgs_iterations: u32,
     /// The velocity the impulses applied to this body since
     /// [`Self::clear_impulse_velocities`] gave it, kept while
     /// `records_substeps` is set ([`Self::impulse_velocities`]).
@@ -159,6 +165,8 @@ impl RigidBody {
             records_substeps: false,
             substep_vels: Vec::new(),
             substep_dt: 0.0,
+            solved_substeps: 0,
+            solved_pgs_iterations: 0,
             impulse_vels: RigidBodyVelocity::zero(),
         }
     }
@@ -214,6 +222,8 @@ impl RigidBody {
             records_substeps,
             substep_vels: _substep_vels, // What the last step recorded belongs to this body's own run.
             substep_dt: _substep_dt,
+            solved_substeps: _solved_substeps, // Like the substeps recorded, this body's own run.
+            solved_pgs_iterations: _solved_pgs_iterations,
             impulse_vels: _impulse_vels,
             user_data,
         } = other;
@@ -300,6 +310,24 @@ impl RigidBody {
     pub fn clear_substep_velocities(&mut self) {
         self.substep_vels.clear();
         self.substep_dt = 0.0;
+    }
+
+    /// How many substeps the last step that moved this body ran for the
+    /// island component it was solved in, and how many passes over its
+    /// constraints within each: the world's
+    /// [`IntegrationParameters::num_solver_iterations`] and
+    /// [`IntegrationParameters::num_internal_pgs_iterations`] plus the extra
+    /// ones that component asked for ([`Self::set_additional_solver_iterations`],
+    /// [`Self::set_additional_pgs_iterations`]). A joint or contact holding
+    /// this body was solved over substeps of `dt / substeps`, which is what
+    /// turns the impulse it stored for its last substep into a force. `(0, 0)`
+    /// for a body no step has moved; a sleeping body keeps the counts of the
+    /// last step that moved it, and a multibody link records none.
+    ///
+    /// [`IntegrationParameters::num_solver_iterations`]: crate::dynamics::IntegrationParameters::num_solver_iterations
+    /// [`IntegrationParameters::num_internal_pgs_iterations`]: crate::dynamics::IntegrationParameters::num_internal_pgs_iterations
+    pub fn solved_substeps(&self) -> (usize, usize) {
+        (self.solved_substeps as usize, self.solved_pgs_iterations as usize)
     }
 
     /// The additional number of solver iterations run for the constraints directly
