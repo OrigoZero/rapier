@@ -2,13 +2,19 @@
 //!
 //! See <https://github.com/fitzgen/generational-arena/blob/master/src/lib.rs>.
 //! This has been modified to have a fully deterministic deserialization (including for the order of
-//! Index attribution after a deserialization of the arena).
+//! Index attribution after a deserialization of the arena), and to hand out the lowest free slot on
+//! every insertion, so the index an element receives depends on which slots are occupied and on
+//! nothing else: the order earlier elements were removed in leaves no trace on later indices.
+#[cfg(feature = "alloc")]
+use alloc::collections::BinaryHeap;
 #[cfg(feature = "alloc")]
 use crate::alloc_prelude::*;
 #[cfg(feature = "alloc")]
 use alloc::vec;
 #[cfg(feature = "alloc")]
 use core::cmp;
+#[cfg(feature = "alloc")]
+use core::cmp::Reverse;
 #[cfg(feature = "alloc")]
 use core::iter::{self, Extend, FromIterator, FusedIterator};
 #[cfg(feature = "alloc")]
@@ -28,7 +34,8 @@ use core::slice;
 pub struct Arena<T> {
     items: Vec<Entry<T>>,
     generation: u32,
-    free_list_head: Option<u32>,
+    /// The free slots, popped lowest index first.
+    free: BinaryHeap<Reverse<u32>>,
     len: usize,
 }
 
@@ -36,7 +43,7 @@ pub struct Arena<T> {
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 enum Entry<T> {
-    Free { next_free: Option<u32> },
+    Free,
     Occupied { generation: u32, value: T },
 }
 
@@ -138,7 +145,7 @@ impl<T> Arena<T> {
         let mut arena = Arena {
             items: Vec::new(),
             generation: 0,
-            free_list_head: None,
+            free: BinaryHeap::new(),
             len: 0,
         };
         arena.reserve(n);
@@ -163,16 +170,8 @@ impl<T> Arena<T> {
         self.items.clear();
 
         let end = self.items.capacity() as u32;
-        self.items.extend((0..end).map(|i| {
-            if i == end - 1 {
-                Entry::Free { next_free: None }
-            } else {
-                Entry::Free {
-                    next_free: Some(i + 1),
-                }
-            }
-        }));
-        self.free_list_head = Some(0);
+        self.items.extend((0..end).map(|_| Entry::Free));
+        self.free = (0..end).map(Reverse).collect();
         self.len = 0;
     }
 
@@ -257,19 +256,16 @@ impl<T> Arena<T> {
 
     #[inline]
     fn try_alloc_next_index(&mut self) -> Option<Index> {
-        match self.free_list_head {
-            None => None,
-            Some(i) => match self.items[i as usize] {
-                Entry::Occupied { .. } => panic!("corrupt free list"),
-                Entry::Free { next_free } => {
-                    self.free_list_head = next_free;
-                    self.len += 1;
-                    Some(Index {
-                        index: i,
-                        generation: self.generation,
-                    })
-                }
-            },
+        let Reverse(i) = self.free.pop()?;
+        match self.items[i as usize] {
+            Entry::Occupied { .. } => panic!("corrupt free list"),
+            Entry::Free => {
+                self.len += 1;
+                Some(Index {
+                    index: i,
+                    generation: self.generation,
+                })
+            }
         }
     }
 
@@ -357,14 +353,9 @@ impl<T> Arena<T> {
 
         match self.items[i.index as usize] {
             Entry::Occupied { generation, .. } if i.generation == generation => {
-                let entry = mem::replace(
-                    &mut self.items[i.index as usize],
-                    Entry::Free {
-                        next_free: self.free_list_head,
-                    },
-                );
+                let entry = mem::replace(&mut self.items[i.index as usize], Entry::Free);
                 self.generation += 1;
-                self.free_list_head = Some(i.index);
+                self.free.push(Reverse(i.index));
                 self.len -= 1;
 
                 match entry {
@@ -646,20 +637,9 @@ impl<T> Arena<T> {
     pub fn reserve(&mut self, additional_capacity: usize) {
         let start = self.items.len();
         let end = self.items.len() + additional_capacity;
-        let old_head = self.free_list_head;
         self.items.reserve_exact(additional_capacity);
-        self.items.extend((start..end).map(|i| {
-            if i == end - 1 {
-                Entry::Free {
-                    next_free: old_head,
-                }
-            } else {
-                Entry::Free {
-                    next_free: Some(i as u32 + 1),
-                }
-            }
-        }));
-        self.free_list_head = Some(start as u32);
+        self.items.extend((start..end).map(|_| Entry::Free));
+        self.free.extend((start as u32..end as u32).map(Reverse));
     }
 
     /// Iterate over shared references to the elements in this arena.
@@ -739,6 +719,8 @@ impl<T> Arena<T> {
     /// assert!(arena.get(idx_2).is_none());
     /// ```
     pub fn drain(&mut self) -> Drain<'_, T> {
+        self.free.clear();
+        self.len = 0;
         Drain {
             inner: self.items.drain(..).enumerate(),
         }
@@ -836,7 +818,7 @@ impl<T> Iterator for IntoIter<T> {
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             match self.inner.next() {
-                Some(Entry::Free { .. }) => continue,
+                Some(Entry::Free) => continue,
                 Some(Entry::Occupied { value, .. }) => {
                     self.len -= 1;
                     return Some(value);
@@ -859,7 +841,7 @@ impl<T> DoubleEndedIterator for IntoIter<T> {
     fn next_back(&mut self) -> Option<Self::Item> {
         loop {
             match self.inner.next_back() {
-                Some(Entry::Free { .. }) => continue,
+                Some(Entry::Free) => continue,
                 Some(Entry::Occupied { value, .. }) => {
                     self.len -= 1;
                     return Some(value);
@@ -925,7 +907,7 @@ impl<'a, T> Iterator for Iter<'a, T> {
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             match self.inner.next() {
-                Some((_, &Entry::Free { .. })) => continue,
+                Some((_, &Entry::Free)) => continue,
                 Some((
                     index,
                     &Entry::Occupied {
@@ -958,7 +940,7 @@ impl<T> DoubleEndedIterator for Iter<'_, T> {
     fn next_back(&mut self) -> Option<Self::Item> {
         loop {
             match self.inner.next_back() {
-                Some((_, &Entry::Free { .. })) => continue,
+                Some((_, &Entry::Free)) => continue,
                 Some((
                     index,
                     &Entry::Occupied {
@@ -1034,7 +1016,7 @@ impl<'a, T> Iterator for IterMut<'a, T> {
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             match self.inner.next() {
-                Some((_, &mut Entry::Free { .. })) => continue,
+                Some((_, &mut Entry::Free)) => continue,
                 Some((
                     index,
                     &mut Entry::Occupied {
@@ -1067,7 +1049,7 @@ impl<T> DoubleEndedIterator for IterMut<'_, T> {
     fn next_back(&mut self) -> Option<Self::Item> {
         loop {
             match self.inner.next_back() {
-                Some((_, &mut Entry::Free { .. })) => continue,
+                Some((_, &mut Entry::Free)) => continue,
                 Some((
                     index,
                     &mut Entry::Occupied {
@@ -1138,7 +1120,7 @@ impl<T> Iterator for Drain<'_, T> {
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             match self.inner.next() {
-                Some((_, Entry::Free { .. })) => continue,
+                Some((_, Entry::Free)) => continue,
                 Some((index, Entry::Occupied { generation, value })) => {
                     let idx = Index {
                         index: index as u32,
@@ -1187,5 +1169,38 @@ impl<T> ops::Index<Index> for Arena<T> {
 impl<T> ops::IndexMut<Index> for Arena<T> {
     fn index_mut(&mut self, index: Index) -> &mut Self::Output {
         self.get_mut(index).expect("No element at index")
+    }
+}
+
+#[cfg(all(test, feature = "alloc"))]
+mod tests {
+    use super::*;
+
+    fn slots(arena: &mut Arena<u32>, n: u32) -> Vec<u32> {
+        (0..n).map(|v| arena.insert(v).into_raw_parts().0).collect()
+    }
+
+    #[test]
+    fn an_insertion_takes_the_lowest_free_slot_whatever_order_the_slots_were_freed_in() {
+        for order in [[0usize, 1, 2, 3, 4], [4, 3, 2, 1, 0], [2, 0, 4, 1, 3]] {
+            let mut arena = Arena::new();
+            let held: Vec<Index> = (0..8).map(|v| arena.insert(v)).collect();
+            for k in order {
+                arena.remove(held[k]);
+            }
+            assert_eq!(slots(&mut arena, 6), vec![0, 1, 2, 3, 4, 8], "freed in the order {order:?}");
+        }
+    }
+
+    #[test]
+    fn a_cleared_or_grown_arena_hands_out_its_slots_from_the_lowest() {
+        let mut arena = Arena::with_capacity(2);
+        assert_eq!(slots(&mut arena, 5), vec![0, 1, 2, 3, 4]);
+        arena.clear();
+        assert_eq!(slots(&mut arena, 3), vec![0, 1, 2]);
+        let mut drained = Arena::new();
+        drained.extend([1u32, 2, 3]);
+        assert_eq!(drained.drain().count(), 3);
+        assert_eq!(drained.len(), 0);
     }
 }
