@@ -304,7 +304,10 @@ pub struct GenericJoint {
     ///
     /// Note that the limit must also be explicitly enabled by the `limit_axes` bitmask.
     /// For coupled degrees of freedoms (DoF), only the first linear (resp. angular) coupled DoF limit and `limit_axis`
-    /// bitmask is applied to the coupled linear (resp. angular) axes.
+    /// bitmask is applied to the coupled linear (resp. angular) axes. On coupled linear
+    /// axes it bounds the length of the anchors' offset along those axes: `max` keeps it
+    /// at most that long, a positive `min` at least that long, and `min == max` holds it
+    /// at that length (a point held on a circle, or on a sphere).
     pub limits: [JointLimits<Real>; SPATIAL_DIM],
     /// The motors, along each degree of freedoms of this joint.
     ///
