@@ -411,7 +411,7 @@ fn strike(
 
 /// Whether contacts between the bodies `h1` and `h2` are switched off by a joint linking them.
 /// The lookup walks the joints of `h1`.
-fn contacts_disabled_by_joint(
+pub(super) fn contacts_disabled_by_joint(
     impulse_joints: &ImpulseJointSet,
     multibody_joints: &MultibodyJointSet,
     h1: RigidBodyHandle,
