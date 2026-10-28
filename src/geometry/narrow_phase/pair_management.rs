@@ -159,6 +159,20 @@ impl NarrowPhase {
             }
         }
 
+        // The removed pairs give back the solver colors they hold: a body's color mask
+        // lives on in its slot, and the body that takes the slot next would otherwise
+        // start out with colors no pair of its own holds.
+        let removed_edges: Vec<usize> = self
+            .contact_graph
+            .graph
+            .edges(contact_graph_id)
+            .map(|edge| edge.id().index())
+            .collect();
+        for edge_id in removed_edges {
+            let pair = &mut self.contact_graph.graph.edges[edge_id].weight;
+            clear_pair_solver_color(&mut self.body_solver_color_masks, pair);
+        }
+
         // Node removal swap-removes contact-graph edges, shifting the edge indices the
         // solver graph's `ContactRef`s and the force-event list are keyed by (neither is
         // mirrored through node removal), so both must be rebuilt from scratch next step.

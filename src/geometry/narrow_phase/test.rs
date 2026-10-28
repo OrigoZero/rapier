@@ -11,7 +11,7 @@ use std::println;
 
 use super::*;
 
-use crate::dynamics::{ImpulseJointSet, MultibodyJointSet, SoftBodySet};
+use crate::dynamics::{ImpulseJointSet, MultibodyJointSet, RigidBodyHandle, SoftBodySet};
 
 /// Test for https://github.com/dimforge/rapier/issues/734.
 #[test]
@@ -288,5 +288,80 @@ pub fn collider_set_parent_no_self_intersection() {
         contact_pair.manifolds().len(),
         1,
         "There should be a contact manifold."
+    );
+}
+
+/// Removing a body gives back the solver colors its contact pairs held, so the
+/// slot it leaves comes to the next body with no colors taken.
+#[test]
+pub fn removing_a_body_releases_the_solver_colors_of_its_pairs() {
+    let mut bodies = RigidBodySet::new();
+    let mut colliders = ColliderSet::new();
+    let mut islands = IslandManager::new();
+    let mut broad_phase = DefaultBroadPhase::new();
+    let mut narrow_phase = NarrowPhase::new();
+    let mut impulse_joints = ImpulseJointSet::new();
+    let mut multibody_joints = MultibodyJointSet::new();
+    let mut soft_bodies = SoftBodySet::new();
+    let mut ccd = CCDSolver::new();
+    let mut pipeline = PhysicsPipeline::new();
+    let params = IntegrationParameters::default();
+
+    let stack: Vec<RigidBodyHandle> = (0..3)
+        .map(|k| {
+            let h = bodies.insert(
+                RigidBodyBuilder::dynamic()
+                    .translation(Vector::new(0.0, 0.5 + 0.99 * k as f32, 0.0))
+                    .build(),
+            );
+            colliders.insert_with_parent(ColliderBuilder::cuboid(0.5, 0.5, 0.5).build(), h, &mut bodies);
+            h
+        })
+        .collect();
+    colliders.insert(ColliderBuilder::cuboid(5.0, 0.1, 5.0).translation(Vector::new(0.0, -0.1, 0.0)).build());
+    for _ in 0..5 {
+        pipeline.step(
+            Vector::new(0.0, -9.81, 0.0),
+            &params,
+            &mut islands,
+            &mut broad_phase,
+            &mut narrow_phase,
+            &mut bodies,
+            &mut colliders,
+            &mut impulse_joints,
+            &mut multibody_joints,
+            &mut soft_bodies,
+            &mut ccd,
+            &(),
+            &(),
+        );
+    }
+    let masks = |np: &NarrowPhase| np.body_solver_color_masks().to_vec();
+    assert!(
+        stack.iter().all(|h| masks(&narrow_phase).get(h.into_raw_parts().0 as usize).is_some_and(|m| *m != 0)),
+        "the stacked boxes hold solver colors while they touch"
+    );
+    for h in &stack {
+        bodies.remove(*h, &mut islands, &mut colliders, &mut impulse_joints, &mut multibody_joints, &mut soft_bodies, true);
+    }
+    pipeline.step(
+        Vector::new(0.0, -9.81, 0.0),
+        &params,
+        &mut islands,
+        &mut broad_phase,
+        &mut narrow_phase,
+        &mut bodies,
+        &mut colliders,
+        &mut impulse_joints,
+        &mut multibody_joints,
+        &mut soft_bodies,
+        &mut ccd,
+        &(),
+        &(),
+    );
+    assert!(
+        masks(&narrow_phase).iter().all(|m| *m == 0),
+        "no slot holds a color once the bodies are gone: {:?}",
+        masks(&narrow_phase)
     );
 }
