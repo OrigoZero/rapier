@@ -208,6 +208,12 @@ impl SoftTies<'_> {
                 .any(|(_, cluster)| self.joined(cluster.proxy(), body))
     }
 
+    /// Whether a joint between the rigid bodies `a` and `b` switches their contacts off, as the
+    /// narrow phase reads it: the sweep then lets them pass through each other as the contacts do.
+    fn contacts_disabled(&self, a: RigidBodyHandle, b: RigidBodyHandle) -> bool {
+        super::kinematic_sweeps::contacts_disabled_by_joint(self.impulse_joints, self.multibody_joints, a, b)
+    }
+
     /// Whether an impulse joint or a multibody joint links the rigid bodies `a` and `b`.
     fn joined(&self, a: RigidBodyHandle, b: RigidBodyHandle) -> bool {
         self.impulse_joints.joints_between(a, b).next().is_some()
@@ -636,6 +642,9 @@ pub(super) fn sweep_fast_body(
             }
             if ties.tie(co2, handle) {
                 return;
+            }
+            if bh2.is_some_and(|bh2| ties.contacts_disabled(handle, bh2)) {
+                return; // A joint between the two bodies switches their contacts off.
             }
             let rb2 = bh2.and_then(|h| bodies.get(h));
             if !tier_allows(rb1, rb2, co2) {
