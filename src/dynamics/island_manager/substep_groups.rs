@@ -169,8 +169,10 @@ impl IslandManager {
             ws.keys[i] = ws.keys[root];
         }
 
-        // Lift kinematic bodies to the max key among the dynamic bodies they touch. Contacts are
-        // the only solver coupling a kinematic body has; joints follow the same rule for consistency.
+        // Lift kinematic bodies to the max key among the dynamic bodies they couple with: the ones
+        // they touch, the ones jointed to them and the soft bodies whose particles are attached to
+        // them. A coupling is solved in the group of its dynamic side, so the kinematic body takes
+        // that group's substeps and stands where the step moves it at each of them.
         let kinematic_slot = |handle: RigidBodyHandle| -> Option<u32> {
             let rb = bodies.get(handle)?;
             (!rb.is_dynamic()
@@ -196,6 +198,11 @@ impl IslandManager {
         for (_, joint) in impulse_joints.iter() {
             lift(ws, joint.body1, joint.body2);
             lift(ws, joint.body2, joint.body1);
+        }
+        for (_, sb) in soft_bodies.iter() {
+            for attachment in sb.particle_attachments() {
+                lift(ws, attachment.body, sb.root_body());
+            }
         }
 
         // Fast path: the list is already grouped (keys non-increasing along the

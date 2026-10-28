@@ -412,3 +412,89 @@ fn a_dominant_body_pushes_a_dominated_one_at_its_own_speed() {
         assert!(last < 0.01, "run {run}: the two still overlap by {last} half a second on");
     }
 }
+
+/// A soft body whose floor particles are attached to a kinematic body follows that body at the
+/// soft body's own substep cadence: the kinematic body takes the substeps of the group its
+/// attached soft body solves in, so the particles are held to where the body stands at each
+/// substep. Driven up to 1, 12 and 30 m/s at 6 m/s², then held there, the shell keeps its rest
+/// offset from the body and its attachments pull with about the impulse they pull with at rest:
+/// the weight they carry, and while the body speeds up the push that speeds the shell up with it.
+#[test]
+#[cfg(feature = "dim3")]
+fn a_soft_body_attached_to_a_moving_kinematic_body_keeps_up_with_it() {
+    use crate::alloc_prelude::*;
+    use crate::dynamics::SoftBodyBuilder;
+    use crate::pipeline::PhysicsWorld;
+
+    let dt = 1.0 / 30.0;
+    let run = |speed: crate::math::Real| {
+        let mut world = PhysicsWorld::new();
+        world.integration_parameters.dt = dt;
+        let body = world.insert_body(RigidBodyBuilder::kinematic_position_based());
+        let shell = world.insert_soft_body(
+            SoftBodyBuilder::cuboid(
+                Vector::new(0.0, 0.69, 0.0),
+                Vector::new(1.0, 0.3, 1.25),
+                3,
+                2,
+                4,
+            )
+            .mass(20.0)
+            .additional_solver_iterations(3),
+        );
+        {
+            let sb = world.soft_bodies.get_mut(shell).unwrap();
+            let floor: Vec<usize> = sb
+                .particles()
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| p.position.y < 0.5)
+                .map(|(i, _)| i)
+                .collect();
+            assert_eq!(floor.len(), 12);
+            for i in floor {
+                sb.attach_particle(i, body, &world.bodies);
+            }
+        }
+        let offset = |world: &PhysicsWorld| {
+            world.soft_bodies[shell].center_of_mass().z - world.bodies[body].translation().z
+        };
+        let pull = |world: &PhysicsWorld| {
+            world.soft_bodies[shell]
+                .particle_attachments()
+                .iter()
+                .map(|a| a.impulse().length())
+                .fold(0.0, crate::math::Real::max)
+        };
+        for _ in 0..60 {
+            world.step();
+        }
+        let (rest_offset, rest_pull) = (offset(&world), pull(&world));
+        let (mut lag, mut most_pull) = (0.0 as crate::math::Real, 0.0 as crate::math::Real);
+        let mut velocity = 0.0;
+        for _ in 0..240 {
+            velocity = (velocity + 6.0 * dt).min(speed);
+            let z = world.bodies[body].translation().z + velocity * dt;
+            world
+                .bodies
+                .get_mut(body)
+                .unwrap()
+                .set_next_kinematic_translation(Vector::new(0.0, 0.0, z));
+            world.step();
+            lag = lag.max((offset(&world) - rest_offset).abs());
+            most_pull = most_pull.max(pull(&world));
+        }
+        (rest_pull, lag, most_pull)
+    };
+    for speed in [1.0, 12.0, 30.0] {
+        let (rest_pull, lag, most_pull) = run(speed);
+        assert!(
+            lag < 0.01,
+            "at {speed} m/s the shell trails its body by {lag} m"
+        );
+        assert!(
+            most_pull < 1.3 * rest_pull,
+            "at {speed} m/s an attachment pulls {most_pull}, against {rest_pull} at rest"
+        );
+    }
+}
