@@ -279,24 +279,46 @@ impl<N: ScalarType> JointConstraintHelper<N> {
             }
         }
 
-        // FIXME: handle min limit too.
-
         let dist = lin_jac.simd_length();
         let inv_dist = crate::utils::simd_inv(dist);
         lin_jac *= inv_dist;
         ang_jac1 *= inv_dist;
         ang_jac2 *= inv_dist;
 
-        let rhs_wo_bias = (dist - limits[1]).simd_min(zero) * N::splat(params.inv_dt());
+        let [min, max] = limits;
+        let inv_dt = N::splat(params.inv_dt());
+
+        // The upper bound's row (a rope's) pulls the bodies together: a positive
+        // impulse closes the distance. It lets them close at any speed and part no
+        // faster than reaches the bound within the step.
+        let upper_rhs_wo_bias = (dist - max).simd_min(zero) * inv_dt;
+        let upper_bias = (dist - max).simd_max(zero) * erp_inv_dt;
+        // The lower bound's row is its mirror: a negative impulse pushes the bodies
+        // apart, and they close no faster than reaches the bound within the step.
+        let lower_rhs_wo_bias = (dist - min).simd_max(zero) * inv_dt;
+        let lower_bias = (dist - min).simd_min(zero) * erp_inv_dt;
+
+        // A lower bound of zero or less bounds nothing, since a distance is never
+        // negative. A lower bound at the upper one holds the distance there from
+        // both sides; otherwise the row holds the bound the distance is nearer.
+        let lower = zero.simd_lt(min);
+        let held = lower & max.simd_le(min);
+        let at_lower = lower & !held & (dist - min).simd_lt(max - dist);
+
+        let rhs_wo_bias = zero.select(held, lower_rhs_wo_bias.select(at_lower, upper_rhs_wo_bias));
 
         let ii_ang_jac1 = body1.ii.transform_vector(ang_jac1);
         let ii_ang_jac2 = body2.ii.transform_vector(ang_jac2);
 
         let max_bias = N::splat(params.max_corrective_velocity());
-        let rhs_bias =
-            ((dist - limits[1]).simd_max(zero) * erp_inv_dt).simd_clamp(-max_bias, max_bias);
+        let rhs_bias = ((dist - max) * erp_inv_dt)
+            .select(held, lower_bias.select(at_lower, upper_bias))
+            .simd_clamp(-max_bias, max_bias);
         let rhs = rhs_wo_bias + rhs_bias;
-        let impulse_bounds = [N::zero(), N::splat(Real::INFINITY)];
+        let impulse_bounds = [
+            N::splat(-Real::INFINITY).select(held | at_lower, zero),
+            N::splat(Real::INFINITY).select(!at_lower, zero),
+        ];
 
         JointConstraint {
             joint_id,
