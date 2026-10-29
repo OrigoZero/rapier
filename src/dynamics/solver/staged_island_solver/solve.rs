@@ -226,15 +226,19 @@ pub(super) unsafe fn solve_pass(
                     generic_velocity_constraints,
                     ..
                 } = joints;
-                for c in generic_velocity_constraints.iter_mut() {
-                    if wo_bias {
+                if wo_bias {
+                    for c in generic_velocity_constraints.iter_mut() {
                         c.remove_bias_from_rhs();
                     }
-                    c.solve(
-                        generic_jacobians,
-                        &mut vs.solver_bodies,
-                        &mut vs.generic_solver_vels,
-                    );
+                }
+                for _ in 0..params.num_multibody_joint_iterations.max(1) {
+                    for c in generic_velocity_constraints.iter_mut() {
+                        c.solve(
+                            generic_jacobians,
+                            &mut vs.solver_bodies,
+                            &mut vs.generic_solver_vels,
+                        );
+                    }
                 }
             }
             sync.complete(stage, 1, 1);

@@ -655,7 +655,12 @@ fn joint_friction_bounds_the_joint_force() {
 /// between the two coupled axes. Returns the largest swing and the largest twist, in degrees,
 /// the link reached over `steps` steps.
 #[cfg(feature = "dim3")]
-fn spherical_link_extremes(cone_deg: Real, twist_deg: Real, spin: Real, steps: usize) -> (Real, Real) {
+fn spherical_link_extremes(
+    cone_deg: Real,
+    twist_deg: Real,
+    spin: Real,
+    steps: usize,
+) -> (Real, Real) {
     let mut world = PhysicsWorld::new();
     let g = 9.81 / core::f32::consts::SQRT_2 as Real;
     world.gravity = Vector::new(0.0, -g, -g);
@@ -708,7 +713,10 @@ fn spherical_link_extremes(cone_deg: Real, twist_deg: Real, spin: Real, steps: u
 fn a_spherical_multibody_joint_holds_its_swing_cone() {
     let (swing, _) = spherical_link_extremes(30.0, 180.0, 0.0, 240);
     assert!(swing < 31.5, "the link swings {swing}° on a 30° cone");
-    assert!(swing > 25.0, "the link reaches the cone: it swings {swing}°");
+    assert!(
+        swing > 25.0,
+        "the link reaches the cone: it swings {swing}°"
+    );
 }
 
 /// A spherical multibody joint's twist range holds the turn about its X axis while it swings:
@@ -719,4 +727,83 @@ fn a_spherical_multibody_joint_holds_its_twist_range_while_it_swings() {
     let (swing, twist) = spherical_link_extremes(30.0, 20.0, 6.0, 240);
     assert!(twist < 22.0, "the link twists {twist}° on a 20° range");
     assert!(swing < 31.5, "the link swings {swing}° on a 30° cone");
+}
+
+/// A chain of `links` boxes 0.5 m long laid out level from a fixed wall on multibody hinges
+/// about Z, each limited to 30 degrees either way, the adjacent links not colliding, the last
+/// link `load` kg and the others 1 kg, dropped under gravity for three seconds of `dt` steps.
+/// Answers the widest angle, in degrees, any joint stood at, or `None` once a pose stopped
+/// being finite.
+#[cfg(feature = "dim3")]
+fn hinge_chain_widest_angle(links: usize, load: Real, dt: Real) -> Option<Real> {
+    let mut world = PhysicsWorld::new();
+    world.integration_parameters.dt = dt;
+    let wall =
+        world.insert_body(RigidBodyBuilder::fixed().translation(Vector::new(0.0, 20.0, 0.0)));
+    let limit = 30.0 as Real * core::f32::consts::PI as Real / 180.0;
+    let mut above = wall;
+    let mut chain = Vec::new();
+    for i in 0..links {
+        let mass = if i + 1 == links { load } else { 1.0 };
+        let (link, _) = world.insert(
+            RigidBodyBuilder::dynamic()
+                .translation(Vector::new(0.5 * i as Real + 0.25, 20.0, 0.0))
+                .can_sleep(false),
+            ColliderBuilder::cuboid(0.25, 0.05, 0.05).mass(mass),
+        );
+        let joint = RevoluteJointBuilder::new(Vector::Z)
+            .local_anchor1(Vector::new(if i == 0 { 0.0 } else { 0.25 }, 0.0, 0.0))
+            .local_anchor2(Vector::new(-0.25, 0.0, 0.0))
+            .limits([-limit, limit])
+            .contacts_enabled(false);
+        world.insert_multibody_joint(above, link, joint).unwrap();
+        chain.push((link, above));
+        above = link;
+    }
+    let mut widest: Real = 0.0;
+    for _ in 0..(3.0 / dt) as usize {
+        world.step();
+        for (link, parent) in &chain {
+            let turn = world.bodies[*parent].rotation().inverse() * *world.bodies[*link].rotation();
+            let angle =
+                turn.angle_between(Rotation::IDENTITY) * 180.0 / core::f32::consts::PI as Real;
+            if !angle.is_finite() {
+                return None;
+            }
+            widest = widest.max(angle);
+        }
+    }
+    Some(widest)
+}
+
+/// Several joints of a multibody at their limits at once: a level chain of limited hinges
+/// whipping down under a heavy end link. The limits used to hold only once a link had
+/// passed one, pushing it back by the whole violation each step; with three or more joints
+/// pinned at once the pushes fed each other until the chain's velocities ran off to
+/// infinity within a second.
+#[test]
+#[cfg(feature = "dim3")]
+fn a_multibody_chain_of_limited_hinges_keeps_its_limits_under_a_heavy_load() {
+    for dt in [1.0 / 60.0, 1.0 / 30.0] {
+        for load in [1.0, 10.0, 20.0] {
+            let widest = hinge_chain_widest_angle(10, load, dt);
+            assert!(
+                widest.is_some_and(|widest| widest < 33.0),
+                "a 30 degree limit in a chain with a {load} kg end at dt {dt} reached {widest:?} degrees"
+            );
+        }
+    }
+}
+
+/// One limited hinge swung into its stop by gravity: the link stops at the limit.
+#[test]
+#[cfg(feature = "dim3")]
+fn a_multibody_hinge_swung_into_its_stop_stops_at_it() {
+    for dt in [1.0 / 60.0, 1.0 / 30.0] {
+        let widest = hinge_chain_widest_angle(1, 5.0, dt).expect("a finite pose");
+        assert!(
+            widest < 30.05,
+            "a 30 degree limit at dt {dt} reached {widest} degrees"
+        );
+    }
 }

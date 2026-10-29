@@ -6,6 +6,44 @@ use crate::dynamics::solver::{GenericJointConstraint, WritebackId};
 use crate::dynamics::{IntegrationParameters, JointMotor, Multibody};
 use crate::math::{DVector, Real};
 
+/// The bound a limit row holds a coordinate to, and what it asks of the coordinate's velocity.
+struct LimitRow {
+    impulse_bounds: [Real; 2],
+    rhs_wo_bias: Real,
+    rhs_bias: Real,
+}
+
+/// The row holding `curr_pos` inside `limits`, on the side of the range it stands nearer to.
+///
+/// Inside the range the row is speculative: it lets the coordinate close the gap to the
+/// bound over the substep and no further, so a link driven fast into its stop stops at it
+/// rather than passing it and being pushed back. Past the bound it pushes the coordinate back
+/// at the joint's error-reduction rate.
+fn limit_row(
+    params: &IntegrationParameters,
+    softness: SpringCoefficients<Real>,
+    limits: [Real; 2],
+    curr_pos: Real,
+) -> LimitRow {
+    let inv_dt = params.inv_dt();
+    let erp_inv_dt = softness.erp_inv_dt(params.dt);
+    if curr_pos >= (limits[0] + limits[1]) * 0.5 {
+        let past = curr_pos - limits[1];
+        LimitRow {
+            impulse_bounds: [0.0, Real::MAX],
+            rhs_wo_bias: past.min(0.0) * inv_dt,
+            rhs_bias: past.max(0.0) * erp_inv_dt,
+        }
+    } else {
+        let past = limits[0] - curr_pos;
+        LimitRow {
+            impulse_bounds: [-Real::MAX, 0.0],
+            rhs_wo_bias: -past.min(0.0) * inv_dt,
+            rhs_bias: -past.max(0.0) * erp_inv_dt,
+        }
+    }
+}
+
 /// Initializes and generate the velocity constraints applicable to the multibody links attached
 /// to this multibody_joint.
 pub fn unit_joint_limit_constraint(
@@ -22,15 +60,12 @@ pub fn unit_joint_limit_constraint(
     softness: SpringCoefficients<Real>,
 ) {
     let ndofs = multibody.ndofs();
-    let min_enabled = curr_pos < limits[0];
-    let max_enabled = limits[1] < curr_pos;
-
-    // Compute per-joint ERP and CFM
-    let erp_inv_dt = softness.erp_inv_dt(params.dt);
     let cfm_coeff = softness.cfm_coeff(params.dt);
-
-    let rhs_bias = ((curr_pos - limits[1]).max(0.0) - (limits[0] - curr_pos).max(0.0)) * erp_inv_dt;
-    let rhs_wo_bias = 0.0;
+    let LimitRow {
+        impulse_bounds,
+        rhs_wo_bias,
+        rhs_bias,
+    } = limit_row(params, softness, limits, curr_pos);
 
     let dof_j_id = *j_id + dof_id + link.assembly_id;
     jacobians.rows_mut(*j_id, ndofs * 2).fill(0.0);
@@ -41,10 +76,6 @@ pub fn unit_joint_limit_constraint(
         .solve_mut(&mut jacobians.rows_mut(*j_id + ndofs, ndofs));
 
     let lhs = jacobians[dof_j_id + ndofs]; // = J^t * M^-1 J
-    let impulse_bounds = [
-        min_enabled as u32 as Real * -Real::MAX,
-        max_enabled as u32 as Real * Real::MAX,
-    ];
     let cfm_gain = lhs * cfm_coeff;
 
     let constraint = GenericJointConstraint {
@@ -230,19 +261,12 @@ pub fn unit_joint_limit_constraint_along(
     writeback_id: WritebackId,
 ) {
     let ndofs = multibody.ndofs();
-    let min_enabled = curr_pos < limits[0];
-    let max_enabled = limits[1] < curr_pos;
-
-    let erp_inv_dt = softness.erp_inv_dt(params.dt);
     let cfm_coeff = softness.cfm_coeff(params.dt);
-
-    // The bias is capped so a deep violation recovers over a few steps instead of throwing
-    // the link, as an impulse joint's angular limit is.
-    let max_bias = params.max_corrective_velocity();
-    let rhs_bias = (((curr_pos - limits[1]).max(0.0) - (limits[0] - curr_pos).max(0.0))
-        * erp_inv_dt)
-        .clamp(-max_bias, max_bias);
-    let rhs_wo_bias = 0.0;
+    let LimitRow {
+        impulse_bounds,
+        rhs_wo_bias,
+        rhs_bias,
+    } = limit_row(params, softness, limits, curr_pos);
 
     let base = *j_id + first_dof + link.assembly_id;
     jacobians.rows_mut(*j_id, ndofs * 2).fill(0.0);
@@ -260,10 +284,6 @@ pub fn unit_joint_limit_constraint_along(
         .enumerate()
         .map(|(k, weight)| *weight * jacobians[base + k + ndofs])
         .sum();
-    let impulse_bounds = [
-        min_enabled as u32 as Real * -Real::MAX,
-        max_enabled as u32 as Real * Real::MAX,
-    ];
     let cfm_gain = lhs * cfm_coeff;
 
     constraints[*insert_at] = GenericJointConstraint {
