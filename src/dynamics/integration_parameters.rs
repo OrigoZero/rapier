@@ -291,6 +291,16 @@ pub struct IntegrationParameters {
     pub num_internal_pgs_iterations: usize,
     /// The number of stabilization iterations run at each solver iterations (default: `1`).
     pub num_internal_stabilization_iterations: usize,
+    /// How many times each PGS iteration sweeps the multibody joint constraints (the limits,
+    /// motors and frictions of a multibody's own joints, and the joints between a multibody
+    /// and another body) (default: `32`).
+    ///
+    /// A multibody's joint constraints all act on its one set of generalized velocities, so
+    /// each limit a sweep holds is disturbed by the next: a chain with several joints at their
+    /// limits at once converges over many sweeps. A sweep costs a dot product and an update
+    /// over the multibody's degrees of freedom per constraint, far less than a solver
+    /// iteration over every body.
+    pub num_multibody_joint_iterations: usize,
     /// Maximum number of CCD substeps performed by the solver (default: `1`).
     ///
     /// Also the global CCD on/off switch: `0` disables **all** CCD for the world (including the
@@ -413,6 +423,7 @@ impl Default for IntegrationParameters {
             warmstart_coefficient: 1.0,
             num_internal_pgs_iterations: 1,
             num_internal_stabilization_iterations: 1,
+            num_multibody_joint_iterations: 32,
             num_solver_iterations: 4,
             normalized_allowed_linear_error: 0.005,
             normalized_max_corrective_velocity: 3.0,
