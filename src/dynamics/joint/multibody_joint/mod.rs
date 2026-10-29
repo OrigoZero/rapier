@@ -13,7 +13,8 @@ pub use self::multibody_joint_set::{MultibodyJointSet, MultibodyLinkId};
 pub use self::multibody_link::MultibodyLink;
 #[cfg(feature = "alloc")]
 pub use self::unit_multibody_joint::{
-    unit_joint_friction_constraint, unit_joint_limit_constraint, unit_joint_motor_constraint,
+    unit_joint_friction_constraint, unit_joint_limit_constraint, unit_joint_limit_constraint_along,
+    unit_joint_motor_constraint,
 };
 
 #[cfg(feature = "alloc")]

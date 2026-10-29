@@ -291,9 +291,15 @@ impl MultibodyJoint {
         let motor_bits = self.data.motor_axes.bits();
         let mut num_constraints = 0;
 
+        #[cfg(feature = "dim3")]
+        let spherical = self.is_spherical();
+        #[cfg(feature = "dim2")]
+        let spherical = false;
+        let cone = if spherical { self.swing_cone_axes() } else { 0 };
         for i in 0..SPATIAL_DIM {
             if (locked_bits & (1 << i)) == 0 {
-                if (limit_bits & (1 << i)) != 0 {
+                let in_cone = i >= DIM && (cone & (1 << (i - DIM))) != 0;
+                if (limit_bits & (1 << i)) != 0 && !in_cone {
                     num_constraints += 1;
                 }
                 if (motor_bits & (1 << i)) != 0 {
@@ -301,8 +307,31 @@ impl MultibodyJoint {
                 }
             }
         }
+        if cone != 0 {
+            num_constraints += 1;
+        }
 
         num_constraints
+    }
+
+    /// Whether all three of the joint's angles are free: its rotation is held as a whole
+    /// (`joint_rot`), and its angles, swing cone and twist are measured on it.
+    #[cfg(feature = "dim3")]
+    fn is_spherical(&self) -> bool {
+        (self.data.locked_axes.bits() >> DIM) & 0b111 == 0
+    }
+
+    /// The two angular axes (bit `i` for angle `i`) whose shared limit is a swing cone about
+    /// the third, on a spherical joint whose coupled angular axes are both limited; zero when
+    /// the joint has no cone.
+    fn swing_cone_axes(&self) -> u8 {
+        let coupled = (self.data.coupled_axes.bits() >> DIM) & 0b111;
+        let limited = (self.data.limit_axes.bits() >> DIM) & 0b111;
+        if coupled.count_ones() == 2 && limited & coupled == coupled {
+            coupled
+        } else {
+            0
+        }
     }
 
     /// Initialize and generate velocity constraints to enforce, e.g., multibody_joint limits and motors.
@@ -396,7 +425,21 @@ impl MultibodyJoint {
             _ => unreachable!(),
         }
          */
-        // TODO: we should make special cases for multi-angular-dofs limits/motors
+        #[cfg(feature = "dim3")]
+        if self.is_spherical() {
+            self.spherical_velocity_constraints(
+                params,
+                multibody,
+                link,
+                curr_free_dof,
+                j_id,
+                jacobians,
+                constraints,
+                &mut num_constraints,
+            );
+            return num_constraints;
+        }
+
         for i in DIM..SPATIAL_DIM {
             if (locked_bits & (1 << i)) == 0 {
                 let limits = if (limit_bits & (1 << i)) != 0 {
@@ -459,4 +502,160 @@ impl MultibodyJoint {
 
         num_constraints
     }
+
+    /// The limit, motor and friction constraints of a joint whose three angles are free.
+    ///
+    /// The angles are read off the joint's rotation `q` (the second frame in the first) as
+    /// an impulse joint reads them: the angle about axis `i` is `2 atan2(q_i, q_w)`, its
+    /// limit row pushes along that angle's gradient over the joint's angular velocities
+    /// (which are expressed in the first frame), and its motor drives the angular velocity
+    /// about the axis. A swing cone (two coupled, limited angular axes) holds the angle
+    /// between the two frames' third axes with one row along the axis it turns about.
+    #[cfg(feature = "dim3")]
+    #[allow(clippy::too_many_arguments)]
+    fn spherical_velocity_constraints(
+        &self,
+        params: &IntegrationParameters,
+        multibody: &Multibody,
+        link: &MultibodyLink,
+        first_ang_dof: usize,
+        j_id: &mut usize,
+        jacobians: &mut DVector,
+        constraints: &mut [GenericJointConstraint],
+        num_constraints: &mut usize,
+    ) {
+        use crate::dynamics::solver::WritebackId;
+
+        let limit_bits = self.data.limit_axes.bits();
+        let motor_bits = self.data.motor_axes.bits();
+        let cone = self.swing_cone_axes();
+        let mut q = self.joint_rot;
+        if q.w < 0.0 {
+            q = -q;
+        }
+        let imag = [q.x, q.y, q.z];
+        let w = q.w;
+
+        for a in 0..ANG_DIM {
+            let i = DIM + a;
+            let in_cone = (cone & (1 << a)) != 0;
+            let angle = 2.0 * imag[a].atan2(w);
+            let limits = [self.data.limits[i].min, self.data.limits[i].max];
+
+            if (limit_bits & (1 << i)) != 0 && !in_cone {
+                let center = (limits[0] + limits[1]) * 0.5;
+                let half_range = (limits[1] - limits[0]) * 0.5;
+                let recentered = wrap_angle(angle - center);
+                let gradient = angle_gradient(imag, w, a);
+                joint::unit_joint_limit_constraint_along(
+                    params,
+                    multibody,
+                    link,
+                    [-half_range, half_range],
+                    recentered,
+                    first_ang_dof,
+                    &gradient,
+                    j_id,
+                    jacobians,
+                    constraints,
+                    num_constraints,
+                    self.data.softness,
+                    WritebackId::Limit(i),
+                );
+            }
+
+            if (motor_bits & (1 << i)) != 0 {
+                joint::unit_joint_motor_constraint(
+                    params,
+                    multibody,
+                    link,
+                    &self.data.motors[i],
+                    angle,
+                    None,
+                    first_ang_dof + a,
+                    j_id,
+                    jacobians,
+                    constraints,
+                    num_constraints,
+                );
+            }
+
+            let friction = multibody.frictions()[link.assembly_id + first_ang_dof + a];
+            if friction > 0.0 {
+                joint::unit_joint_friction_constraint(
+                    params,
+                    multibody,
+                    link,
+                    friction,
+                    first_ang_dof + a,
+                    j_id,
+                    jacobians,
+                    constraints,
+                    num_constraints,
+                    self.data.softness,
+                );
+            }
+        }
+
+        if cone != 0 {
+            let axis = (!cone & 0b111).trailing_zeros() as usize;
+            let axis1 = Vector::ith(axis, 1.0);
+            let axis2 = q * axis1;
+            let swing = axis1.dot(axis2).clamp(-1.0, 1.0).acos();
+            let turn = axis1.cross(axis2);
+            let dir = if turn.length() > 1.0e-6 {
+                turn.normalize()
+            } else {
+                Vector::ith((axis + 1) % 3, 1.0)
+            };
+            let first_coupled = (cone.trailing_zeros() as usize) + DIM;
+            let limits = [
+                self.data.limits[first_coupled].min,
+                self.data.limits[first_coupled].max,
+            ];
+            joint::unit_joint_limit_constraint_along(
+                params,
+                multibody,
+                link,
+                limits,
+                swing,
+                first_ang_dof,
+                &[dir.x, dir.y, dir.z],
+                j_id,
+                jacobians,
+                constraints,
+                num_constraints,
+                self.data.softness,
+                WritebackId::Limit(first_coupled),
+            );
+        }
+    }
+}
+
+/// `angle` wrapped into `[-π, π]`.
+#[cfg(feature = "dim3")]
+fn wrap_angle(angle: Real) -> Real {
+    let two_pi = core::f32::consts::TAU as Real;
+    let pi = core::f32::consts::PI as Real;
+    angle - two_pi * ((angle + pi) / two_pi).floor()
+}
+
+/// The gradient of the angle `2 atan2(q_axis, q_w)` of the rotation `q` (its imaginary part
+/// `imag`, real part `w`) with respect to an angular velocity expressed in the rotation's
+/// first frame: `axis` itself while the two other angles stand at zero, tilted toward them
+/// as the rotation swings away from `axis`.
+#[cfg(feature = "dim3")]
+fn angle_gradient(imag: [Real; 3], w: Real, axis: usize) -> [Real; 3] {
+    // `w² + q_axis²` is `cos²(θ / 2)` of the swing `θ` away from `axis`; it vanishes only with
+    // the two frames' axes opposite, where the angle is undefined. The floor holds the
+    // gradient finite there.
+    const MIN_PLANE: Real = 7.6e-5;
+    let j = (axis + 1) % 3;
+    let k = (axis + 2) % 3;
+    let plane = (w * w + imag[axis] * imag[axis]).max(MIN_PLANE);
+    let mut gradient = [0.0; 3];
+    gradient[axis] = 1.0;
+    gradient[j] = (w * imag[k] + imag[axis] * imag[j]) / plane;
+    gradient[k] = (imag[axis] * imag[k] - w * imag[j]) / plane;
+    gradient
 }
