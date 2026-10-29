@@ -807,3 +807,67 @@ fn a_multibody_hinge_swung_into_its_stop_stops_at_it() {
         );
     }
 }
+
+/// A chain of `links` boxes 0.5 m long hanging straight down from a fixed anchor on multibody
+/// spherical joints, the last link pushed sideways by an impulse of 2 N·s through
+/// `apply_link_impulse` before the multibody ever stepped, then stepped once. Answers the
+/// pushed link's velocity and the anchor-to-end length over the chain's length.
+#[cfg(feature = "dim3")]
+fn pushed_chain(links: usize, root: RigidBodyBuilder) -> (Vector, Real) {
+    let mut world = PhysicsWorld::new();
+    let anchor = world.insert_body(root.translation(Vector::new(0.0, 20.0, 0.0)));
+    let mut above = anchor;
+    let mut last = anchor;
+    for i in 0..links {
+        let (link, _) = world.insert(
+            RigidBodyBuilder::dynamic()
+                .translation(Vector::new(0.0, 20.0 - 0.5 * i as Real - 0.25, 0.0))
+                .can_sleep(false),
+            ColliderBuilder::cuboid(0.05, 0.25, 0.05).mass(1.0),
+        );
+        let joint = SphericalJointBuilder::new()
+            .local_anchor1(Vector::new(0.0, if i == 0 { 0.0 } else { -0.25 }, 0.0))
+            .local_anchor2(Vector::new(0.0, 0.25, 0.0))
+            .contacts_enabled(false);
+        world.insert_multibody_joint(above, link, joint).unwrap();
+        above = link;
+        last = link;
+    }
+    let link = world
+        .multibody_joints
+        .rigid_body_link(last)
+        .copied()
+        .unwrap();
+    let multibody = world
+        .multibody_joints
+        .get_multibody_mut(link.multibody)
+        .unwrap();
+    multibody.apply_link_impulse(
+        &world.bodies,
+        link.id,
+        Vector::new(2.0, 0.0, 0.0),
+        Vector::ZERO,
+    );
+    world.step();
+    let end = world.bodies[last].position() * Vector::new(0.0, -0.25, 0.0);
+    let length = (end - world.bodies[anchor].translation()).length() / (0.5 * links as Real);
+    (world.bodies[last].linvel(), length)
+}
+
+/// An impulse on a link moves the link and the chain it hangs in, before the multibody ever
+/// stepped, with a fixed root and with a kinematic one, and the chain does not stretch.
+#[test]
+#[cfg(feature = "dim3")]
+fn an_impulse_on_a_multibody_link_moves_the_link_and_its_chain() {
+    for root in [
+        RigidBodyBuilder::fixed(),
+        RigidBodyBuilder::kinematic_position_based(),
+    ] {
+        let (velocity, length) = pushed_chain(4, root);
+        assert!(velocity.x > 0.3, "the pushed link moves at {velocity:?}");
+        assert!(
+            length < 1.0 + 1.0e-3,
+            "the chain stretched to {length} of its length"
+        );
+    }
+}

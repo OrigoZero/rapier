@@ -1117,6 +1117,48 @@ impl Multibody {
         out
     }
 
+    /// Applies an impulse to the rigid body of link `link_id`: `linear` through its centre of
+    /// mass and `angular` about it, the push a body alone would take as a change of velocity.
+    ///
+    /// A link's velocity is its multibody's to state, from the generalized velocities, so an
+    /// impulse written to the link's rigid body is lost at the next step. This one goes into the
+    /// generalized velocities instead, by `M⁻¹ Jᵀ f` at the multibody's current configuration:
+    /// the link and every link it is joined to move off together, as the push moves them. It
+    /// takes effect whether or not the multibody has stepped since it was built or changed. The
+    /// degrees of freedom of kinematic links, whose velocities are prescribed, keep theirs.
+    pub fn apply_link_impulse(
+        &mut self,
+        bodies: &RigidBodySet,
+        link_id: usize,
+        linear: Vector,
+        angular: AngVector,
+    ) {
+        if link_id >= self.links.len() {
+            return;
+        }
+        self.forward_kinematics(bodies, false);
+        if self.ndofs == 0 {
+            return;
+        }
+        // `dt = 0`: the plain mass matrix, with no damping or spring folded into it; an impulse
+        // takes no time.
+        self.update_mass_matrix(0.0, bodies);
+        let impulse = Force::new(linear, angular);
+        let mut change = self.body_jacobians[link_id].tr_mul(impulse.as_vector());
+        self.augmented_mass_indices
+            .with_rearranged_rows_mut(&mut change, |rows| {
+                self.inv_augmented_mass.solve_mut(rows);
+            });
+        for link in self.links.iter() {
+            if link.joint.kinematic {
+                change
+                    .rows_mut(link.assembly_id, link.joint.ndofs())
+                    .fill(0.0);
+            }
+        }
+        self.velocities += change;
+    }
+
     /// Adds a holonomic coupling between two of this multibody's generalized
     /// coordinates (`q2 = coeff·q1 + offset`), enforced as a velocity-level
     /// equality constraint each step. See [`MultibodyDofCoupling`].
