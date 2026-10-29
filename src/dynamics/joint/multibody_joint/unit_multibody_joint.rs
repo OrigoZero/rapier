@@ -205,3 +205,88 @@ pub fn unit_joint_motor_constraint(
 
     *j_id += 2 * ndofs;
 }
+
+/// Initializes the velocity constraint holding a measure of a link's position, `curr_pos`,
+/// inside `limits` along a direction that spans several of its joint's degrees of freedom:
+/// `dir[k]` is the measure's rate per unit of the joint's dof `first_dof + k`, so the row is
+/// the measure's gradient over the joint's generalized velocities.
+///
+/// A spherical joint's swing cone and twist are measured on its rotation as a whole: each is
+/// moved by all three of its angular velocities, which a row on a single dof cannot hold.
+#[allow(clippy::too_many_arguments)]
+pub fn unit_joint_limit_constraint_along(
+    params: &IntegrationParameters,
+    multibody: &Multibody,
+    link: &MultibodyLink,
+    limits: [Real; 2],
+    curr_pos: Real,
+    first_dof: usize,
+    dir: &[Real],
+    j_id: &mut usize,
+    jacobians: &mut DVector,
+    constraints: &mut [GenericJointConstraint],
+    insert_at: &mut usize,
+    softness: SpringCoefficients<Real>,
+    writeback_id: WritebackId,
+) {
+    let ndofs = multibody.ndofs();
+    let min_enabled = curr_pos < limits[0];
+    let max_enabled = limits[1] < curr_pos;
+
+    let erp_inv_dt = softness.erp_inv_dt(params.dt);
+    let cfm_coeff = softness.cfm_coeff(params.dt);
+
+    // The bias is capped so a deep violation recovers over a few steps instead of throwing
+    // the link, as an impulse joint's angular limit is.
+    let max_bias = params.max_corrective_velocity();
+    let rhs_bias = (((curr_pos - limits[1]).max(0.0) - (limits[0] - curr_pos).max(0.0))
+        * erp_inv_dt)
+        .clamp(-max_bias, max_bias);
+    let rhs_wo_bias = 0.0;
+
+    let base = *j_id + first_dof + link.assembly_id;
+    jacobians.rows_mut(*j_id, ndofs * 2).fill(0.0);
+    for (k, weight) in dir.iter().enumerate() {
+        jacobians[base + k] = *weight;
+        jacobians[base + k + ndofs] = *weight;
+    }
+    multibody
+        .inv_augmented_mass()
+        .solve_mut(&mut jacobians.rows_mut(*j_id + ndofs, ndofs));
+
+    // J^t * M^-1 * J, over the entries of J that are not zero.
+    let lhs: Real = dir
+        .iter()
+        .enumerate()
+        .map(|(k, weight)| *weight * jacobians[base + k + ndofs])
+        .sum();
+    let impulse_bounds = [
+        min_enabled as u32 as Real * -Real::MAX,
+        max_enabled as u32 as Real * Real::MAX,
+    ];
+    let cfm_gain = lhs * cfm_coeff;
+
+    constraints[*insert_at] = GenericJointConstraint {
+        is_rigid_body1: false,
+        solver_vel1: u32::MAX,
+        ndofs1: 0,
+        j_id1: 0,
+
+        is_rigid_body2: false,
+        solver_vel2: multibody.solver_id,
+        ndofs2: ndofs,
+        j_id2: *j_id,
+        joint_id: usize::MAX,
+        impulse: 0.0,
+        impulse_bounds,
+        inv_lhs: crate::utils::inv(lhs + cfm_gain),
+        rhs: rhs_wo_bias + rhs_bias,
+        rhs_wo_bias,
+        cfm_coeff,
+        cfm_gain,
+        writeback_id,
+    };
+    *insert_at += 1;
+
+    *j_id += 2 * ndofs;
+}

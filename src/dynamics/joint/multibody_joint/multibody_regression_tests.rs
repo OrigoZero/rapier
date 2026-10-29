@@ -648,3 +648,75 @@ fn joint_friction_bounds_the_joint_force() {
         "an oversized friction bound must stay inert, not chatter: {extreme}"
     );
 }
+
+/// A link hanging off a fixed root by a spherical joint whose swing is held to a cone of
+/// `cone_deg` about the joint's X axis and whose twist about it is held to `twist_deg` either
+/// way, with gravity pulling it down and to the side so it swings toward the cone's edge
+/// between the two coupled axes. Returns the largest swing and the largest twist, in degrees,
+/// the link reached over `steps` steps.
+#[cfg(feature = "dim3")]
+fn spherical_link_extremes(cone_deg: Real, twist_deg: Real, spin: Real, steps: usize) -> (Real, Real) {
+    let mut world = PhysicsWorld::new();
+    let g = 9.81 / core::f32::consts::SQRT_2 as Real;
+    world.gravity = Vector::new(0.0, -g, -g);
+    let root = world.insert_body(RigidBodyBuilder::fixed().translation(Vector::new(0.0, 5.0, 0.0)));
+    let (link, _) = world.insert(
+        RigidBodyBuilder::dynamic()
+            .translation(Vector::new(1.0, 5.0, 0.0))
+            .angvel(Vector::new(spin, 0.0, 0.0))
+            .can_sleep(false),
+        ColliderBuilder::cuboid(0.5, 0.1, 0.1),
+    );
+    let cone = cone_deg.to_radians();
+    let twist = twist_deg.to_radians();
+    let mut joint: GenericJoint = SphericalJointBuilder::new()
+        .local_anchor1(Vector::ZERO)
+        .local_anchor2(Vector::new(-1.0, 0.0, 0.0))
+        .contacts_enabled(false)
+        .build()
+        .into();
+    joint.coupled_axes |= JointAxesMask::ANG_Y | JointAxesMask::ANG_Z;
+    joint.set_limits(JointAxis::AngY, [-cone, cone]);
+    joint.set_limits(JointAxis::AngZ, [-cone, cone]);
+    joint.set_limits(JointAxis::AngX, [-twist, twist]);
+    world.insert_multibody_joint(root, link, joint).unwrap();
+
+    let (mut max_swing, mut max_twist): (Real, Real) = (0.0, 0.0);
+    for _ in 0..steps {
+        world.step();
+        let rot = *world.bodies[link].rotation();
+        let x2 = rot * Vector::X;
+        max_swing = max_swing.max(Vector::X.dot(x2).clamp(-1.0, 1.0).acos().to_degrees());
+        // The twist about the link's own X: its rotation with the shortest arc taking X to
+        // where it points taken off.
+        let swing_rot = Rotation::from_rotation_arc(Vector::X, x2);
+        let mut twist_rot = swing_rot.inverse() * rot;
+        if twist_rot.w < 0.0 {
+            twist_rot = -twist_rot;
+        }
+        max_twist = max_twist.max((2.0 * twist_rot.x.atan2(twist_rot.w)).to_degrees().abs());
+    }
+    (max_swing, max_twist)
+}
+
+/// A spherical multibody joint's swing cone holds the angle between its two frames' X axes:
+/// a link pulled toward the cone's edge between its two coupled axes stops at the cone, where
+/// two separate limits on those axes would let it reach the corner of their square, 41° for a
+/// 30° cone.
+#[test]
+#[cfg(feature = "dim3")]
+fn a_spherical_multibody_joint_holds_its_swing_cone() {
+    let (swing, _) = spherical_link_extremes(30.0, 180.0, 0.0, 240);
+    assert!(swing < 31.5, "the link swings {swing}° on a 30° cone");
+    assert!(swing > 25.0, "the link reaches the cone: it swings {swing}°");
+}
+
+/// A spherical multibody joint's twist range holds the turn about its X axis while it swings:
+/// a spinning link stops turning at the range's bound.
+#[test]
+#[cfg(feature = "dim3")]
+fn a_spherical_multibody_joint_holds_its_twist_range_while_it_swings() {
+    let (swing, twist) = spherical_link_extremes(30.0, 20.0, 6.0, 240);
+    assert!(twist < 22.0, "the link twists {twist}° on a 20° range");
+    assert!(swing < 31.5, "the link swings {swing}° on a 30° cone");
+}
