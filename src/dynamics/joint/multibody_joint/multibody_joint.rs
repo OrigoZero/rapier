@@ -100,7 +100,7 @@ impl MultibodyJoint {
         self.joint_rot
     }
 
-    fn num_free_lin_dofs(&self) -> usize {
+    pub(crate) fn num_free_lin_dofs(&self) -> usize {
         let locked_bits = self.data.locked_axes.bits();
         DIM - (locked_bits & ((1 << DIM) - 1)).count_ones() as usize
     }
@@ -316,17 +316,58 @@ impl MultibodyJoint {
         num_constraints
     }
 
+    /// The stiffness with which a spherical joint's swing cone holds its link across the
+    /// cone's bound while the link presses on it, and the axis that stiffness acts about, in
+    /// the first frame: `None` while the cone pushes on nothing.
+    ///
+    /// The cone's bound is curved: as the link slides round it, the direction the cone pushes
+    /// along turns with it, so a link pressed on the bound with the force `λ` is held toward
+    /// where it stood with a stiffness `λ cot θ` against a turn about `t`, the axis in the plane
+    /// of the two frames' cone axes that is square to the second (`θ` the swing). A solver
+    /// that meets that stiffness only at the start of each substep overshoots it once
+    /// `λ cot θ · dt²` passes the link's inertia about `t`: a light link between two joints
+    /// pressed on their cones by a heavy load swings ever wider round them, each substep the
+    /// other way. Returned as the stiffness times `dt`, from the impulse the cone's limit last
+    /// applied over a substep, for the mass matrix to take it in implicitly.
+    #[cfg(feature = "dim3")]
+    pub(crate) fn swing_cone_stiffness_dt(&self) -> Option<(Vector, Real)> {
+        if !self.is_spherical() {
+            return None;
+        }
+        let cone = self.swing_cone_axes();
+        if cone == 0 {
+            return None;
+        }
+        let first_coupled = (cone.trailing_zeros() as usize) + DIM;
+        let impulse = self.data.limits[first_coupled].impulse;
+        if impulse <= 0.0 {
+            return None;
+        }
+        let axis = (!cone & 0b111).trailing_zeros() as usize;
+        let axis1 = Vector::ith(axis, 1.0);
+        let axis2 = self.joint_rot * axis1;
+        let cos = axis1.dot(axis2);
+        let turn = axis1.cross(axis2);
+        let sin = turn.length();
+        // Past a quarter turn the bound curves away from the link, and nothing holds it.
+        if sin <= 1.0e-6 || cos <= 0.0 {
+            return None;
+        }
+        let t = (turn / sin).cross(axis2);
+        Some((t, impulse * cos / sin))
+    }
+
     /// Whether all three of the joint's angles are free: its rotation is held as a whole
     /// (`joint_rot`), and its angles, swing cone and twist are measured on it.
     #[cfg(feature = "dim3")]
-    fn is_spherical(&self) -> bool {
+    pub(crate) fn is_spherical(&self) -> bool {
         (self.data.locked_axes.bits() >> DIM) & 0b111 == 0
     }
 
     /// The two angular axes (bit `i` for angle `i`) whose shared limit is a swing cone about
     /// the third, on a spherical joint whose coupled angular axes are both limited; zero when
     /// the joint has no cone.
-    fn swing_cone_axes(&self) -> u8 {
+    pub(crate) fn swing_cone_axes(&self) -> u8 {
         let coupled = (self.data.coupled_axes.bits() >> DIM) & 0b111;
         let limited = (self.data.limit_axes.bits() >> DIM) & 0b111;
         if coupled.count_ones() == 2 && limited & coupled == coupled {

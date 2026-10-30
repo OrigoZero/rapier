@@ -780,6 +780,21 @@ pub(super) unsafe fn run_worker(ctx: &SharedCtx, worker_id: usize) {
                     let vs = unsafe { &mut *ctx.velocity_solver };
                     let bodies = unsafe { &mut *ctx.bodies };
                     let multibodies = unsafe { &mut *ctx.multibodies };
+                    // Each multibody joint keeps the impulses its limits and motors applied
+                    // this substep, which the mass matrix the next substep solves with reads
+                    // (a swing cone's stiffness across its bound). Generic constraints exist
+                    // only on the single-group path.
+                    if ctx.groups.len() == 1 {
+                        let joints = unsafe { &*ctx.joint_constraints };
+                        for builder in joints.generic_velocity_constraints_builder.iter() {
+                            if let GenericJointConstraintBuilder::Internal(b) = builder {
+                                b.writeback_impulses(
+                                    multibodies,
+                                    &joints.generic_velocity_constraints,
+                                );
+                            }
+                        }
+                    }
                     vs.integrate_multibody_positions(params, is_last_substep, bodies, multibodies);
                     sync.complete(stage, 1, num_group_bodies + 1);
                 }
