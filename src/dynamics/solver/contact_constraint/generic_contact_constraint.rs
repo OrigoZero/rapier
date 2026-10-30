@@ -21,6 +21,10 @@ pub(crate) struct GenericContactConstraintBuilder {
     infos: [CoulombContactPointInfos<Real>; MAX_MANIFOLD_POINTS],
     handle1: RigidBodyHandle,
     handle2: RigidBodyHandle,
+    /// Each body's centre of mass in its own frame, which a multibody link's lever arm to a
+    /// contact point is measured from.
+    local_com1: Vector,
+    local_com2: Vector,
 }
 
 impl GenericContactConstraintBuilder {
@@ -29,6 +33,8 @@ impl GenericContactConstraintBuilder {
             infos: [CoulombContactPointInfos::default(); MAX_MANIFOLD_POINTS],
             handle1: RigidBodyHandle::invalid(),
             handle2: RigidBodyHandle::invalid(),
+            local_com1: Vector::ZERO,
+            local_com2: Vector::ZERO,
         }
     }
 
@@ -377,6 +383,8 @@ impl GenericContactConstraintBuilder {
 
             out_builder.handle1 = handle1;
             out_builder.handle2 = handle2;
+            out_builder.local_com1 = mprops1.local_mprops.local_com;
+            out_builder.local_com2 = mprops2.local_mprops.local_com;
             out_builder.infos[k] = infos;
             out_constraint.manifold_contact_id[k] =
                 (manifold_point.contact_id[0] & !crate::geometry::NEW_CONTACT_BIT) as u8;
@@ -398,12 +406,17 @@ impl GenericContactConstraintBuilder {
         out_constraint.generic_constraint_mask = generic_constraint_mask;
     }
 
+    /// Prepares `constraint` for a substep: its biases from where the bodies stand and, from
+    /// the second substep on (`refresh_jacobians`), the jacobians and effective masses of each
+    /// multibody side (see [`Self::refresh_multibody_jacobians`]).
     pub fn update(
         &self,
         params: &IntegrationParameters,
         solved_dt: Real,
         bodies: &SolverBodies,
         multibodies: &MultibodyJointSet,
+        jacobians: &mut DVector,
+        refresh_jacobians: bool,
         constraint: &mut GenericContactConstraint,
     ) {
         // Contacts touching a fixed body use a stiffer "static" softness.
@@ -502,6 +515,133 @@ impl GenericContactConstraintBuilder {
         }
 
         constraint.cfm_factor = cfm_factor;
+
+        if refresh_jacobians {
+            self.refresh_multibody_jacobians(
+                multibodies,
+                pose1,
+                pose2,
+                tangents1,
+                jacobians,
+                constraint,
+            );
+        }
+    }
+
+    /// Writes the jacobians, `M⁻¹·Jᵀ` and effective masses of the multibody sides of
+    /// `constraint` from the configuration their multibodies stand at: the link's body
+    /// jacobian, the multibody's mass matrix and the lever arm from the link's centre of mass to
+    /// each contact point as the link now holds it. A multibody's generalized velocities move
+    /// its links through jacobians that turn with every joint, so the ones its configuration
+    /// had when the step began map them onto the contact's directions less and less truly as
+    /// the links turn over the step's substeps, and a link driven hard through a contact (one
+    /// pushed out of deep penetration) is then pushed along directions the contact never
+    /// asked for, faster each substep. `pose1` and `pose2` are the poses
+    /// [`Self::update`] resolved the contact points with. A rigid-body side keeps the lever
+    /// arms and inverse inertia its constraint was built with, as a rigid contact does.
+    fn refresh_multibody_jacobians(
+        &self,
+        multibodies: &MultibodyJointSet,
+        pose1: crate::math::Pose,
+        pose2: crate::math::Pose,
+        tangents1: [Vector; DIM - 1],
+        jacobians: &mut DVector,
+        constraint: &mut GenericContactConstraint,
+    ) {
+        let link_of = |handle: RigidBodyHandle, ndofs: usize| {
+            if ndofs == 0 {
+                return None;
+            }
+            let link = multibodies.rigid_body_link(handle)?;
+            Some((&multibodies[link.multibody], link.id))
+        };
+        let mb1 = link_of(self.handle1, constraint.ndofs1);
+        let mb2 = link_of(self.handle2, constraint.ndofs2);
+        if mb1.is_none() && mb2.is_none() {
+            return;
+        }
+        let (ndofs1, ndofs2) = (constraint.ndofs1, constraint.ndofs2);
+        let row_step = (ndofs1 + ndofs2) * 2;
+        let com1 = pose1 * self.local_com1;
+        let com2 = pose2 * self.local_com2;
+        let dir1 = constraint.dir1;
+        let (im1, im2) = (constraint.im1, constraint.im2);
+
+        // One row: the multibody side's inverse effective mass along `dir` (written with its
+        // jacobians at `j_id`), or the rigid side's from the lever arm it was built with.
+        let side = |mb: Option<(&crate::dynamics::Multibody, usize)>,
+                    j_id: usize,
+                    dir: Vector,
+                    arm: Vector,
+                    im: Vector,
+                    torque_dir: crate::math::AngVector,
+                    ii_torque_dir: crate::math::AngVector,
+                    jacobians: &mut DVector| {
+            match mb {
+                Some((mb, link_id)) => {
+                    let mut j_id = j_id;
+                    mb.fill_jacobians(link_id, dir, arm.gcross(dir), &mut j_id, jacobians)
+                        .0
+                }
+                None => dir.dot(im * dir) + ii_torque_dir.gdot(torque_dir),
+            }
+        };
+
+        for k in 0..constraint.num_contacts as usize {
+            let info = &self.infos[k];
+            let arm1 = pose1 * info.local_p1 - com1;
+            let arm2 = pose2 * info.local_p2 - com2;
+            let base = constraint.j_id + k * row_step * DIM;
+
+            let normal_part = &mut constraint.normal_part[k];
+            let inv_r1 = side(
+                mb1,
+                base,
+                dir1,
+                arm1,
+                im1,
+                normal_part.torque_dir1,
+                normal_part.ii_torque_dir1,
+                jacobians,
+            );
+            let inv_r2 = side(
+                mb2,
+                base + ndofs1 * 2,
+                -dir1,
+                arm2,
+                im2,
+                normal_part.torque_dir2,
+                normal_part.ii_torque_dir2,
+                jacobians,
+            );
+            normal_part.r = crate::utils::inv(inv_r1 + inv_r2);
+
+            let tangent_part = &mut constraint.tangent_part[k];
+            for (j, tangent) in tangents1.iter().enumerate() {
+                let rows = base + (j + 1) * row_step;
+                let inv_r1 = side(
+                    mb1,
+                    rows,
+                    *tangent,
+                    arm1,
+                    im1,
+                    tangent_part.torque_dir1[j],
+                    tangent_part.ii_torque_dir1[j],
+                    jacobians,
+                );
+                let inv_r2 = side(
+                    mb2,
+                    rows + ndofs1 * 2,
+                    -*tangent,
+                    arm2,
+                    im2,
+                    tangent_part.torque_dir2[j],
+                    tangent_part.ii_torque_dir2[j],
+                    jacobians,
+                );
+                tangent_part.r[j] = crate::utils::inv(inv_r1 + inv_r2);
+            }
+        }
     }
 
     /// Does any active point of this constraint hold a restitution seed (an approaching
