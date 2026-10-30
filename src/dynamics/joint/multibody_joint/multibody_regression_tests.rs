@@ -1099,3 +1099,215 @@ fn a_level_chain_on_its_swing_cones_under_a_heavy_end_stays_finite() {
     assert!(failed.is_empty(), "the chain went not finite: {failed:?}");
     assert!(widest < 43.0, "a joint swung {widest}° on a 40° cone");
 }
+
+/// A ragdoll of eleven boxes on multibody joints, each joint built the way an engine joins a
+/// body to its parent: pelvis, chest and head on spherical joints with swing cones and twist
+/// ranges, ball shoulders and hips, hinge elbows and knees on 0 to 140° ranges. It stands
+/// beside a flight of eight fixed stairs whose foot is at `at`, its pelvis `height` m above that
+/// foot, so that below 2.2 m its legs start inside the top step. It is pushed by 60 N·s on its
+/// chest one step in and stepped for `seconds` at `rate` steps a second in `substeps` substeps.
+/// Answers the step a body's pose first read not finite at, if one did, and how far, in metres,
+/// any body rose above the highest point the ragdoll was spawned at.
+#[cfg(feature = "dim3")]
+fn ragdoll_by_stairs(
+    at: Vector,
+    height: Real,
+    rate: Real,
+    substeps: usize,
+    seconds: Real,
+) -> (Option<usize>, Real) {
+    let mut world = PhysicsWorld::new();
+    world.integration_parameters.dt = 1.0 / rate;
+    world.integration_parameters.num_solver_iterations = substeps;
+    world.integration_parameters.normalized_max_linear_velocity = Real::MAX;
+    for step in 0..8 {
+        let top = 1.6 - 0.2 * step as Real;
+        world.insert(
+            RigidBodyBuilder::fixed()
+                .translation(at + Vector::new(0.0, top * 0.5, 0.3 * step as Real + 0.15)),
+            ColliderBuilder::cuboid(1.5, top * 0.5, 0.15),
+        );
+    }
+    let base = at + Vector::new(0.0, height, 0.15);
+    let mut made = Vec::new();
+    let mut part = |world: &mut PhysicsWorld, offset: Vector, half: Vector, mass: Real| {
+        let (body, _) = world.insert(
+            RigidBodyBuilder::dynamic()
+                .translation(base + offset)
+                .allow_fast_rotation(true)
+                .can_sleep(false),
+            ColliderBuilder::cuboid(half.x, half.y, half.z).mass(mass),
+        );
+        made.push(body);
+        body
+    };
+    // Both frames' X axes along `axis`, the way the engine completes a joint's frames.
+    let frame = |axis: Vector| Rotation::from_rotation_arc(Vector::X, axis);
+    let ball = |axis: Vector, on_parent: Vector, on_child: Vector, swing: Real, twist: Real| {
+        let mut joint: GenericJoint = SphericalJointBuilder::new()
+            .local_anchor1(on_parent)
+            .local_anchor2(on_child)
+            .contacts_enabled(false)
+            .build()
+            .into();
+        joint.local_frame1.rotation = frame(axis);
+        joint.local_frame2.rotation = frame(axis);
+        let (swing, twist) = (swing.to_radians(), twist.to_radians());
+        joint.coupled_axes |= JointAxesMask::ANG_Y | JointAxesMask::ANG_Z;
+        joint.set_limits(JointAxis::AngY, [-swing, swing]);
+        joint.set_limits(JointAxis::AngZ, [-swing, swing]);
+        joint.set_limits(JointAxis::AngX, [-twist, twist]);
+        joint
+    };
+    let hinge = |axis: Vector, on_parent: Vector, on_child: Vector| {
+        let mut joint: GenericJoint = RevoluteJointBuilder::new(Vector::X)
+            .local_anchor1(on_parent)
+            .local_anchor2(on_child)
+            .contacts_enabled(false)
+            .build()
+            .into();
+        joint.local_frame1.rotation = frame(axis);
+        joint.local_frame2.rotation = frame(axis);
+        joint.set_limits(JointAxis::AngX, [0.0, 140.0_f32.to_radians() as Real]);
+        joint
+    };
+    let v = Vector::new;
+    let pelvis = part(&mut world, v(0.0, 0.2, 0.0), v(0.15, 0.1, 0.1), 10.0);
+    let chest = part(&mut world, v(0.0, 0.5, 0.0), v(0.15, 0.2, 0.1), 15.0);
+    let head = part(&mut world, v(0.0, 0.8, 0.0), v(0.1, 0.1, 0.1), 5.0);
+    let joints = [
+        (
+            pelvis,
+            chest,
+            ball(Vector::Y, v(0.0, 0.1, 0.0), v(0.0, -0.2, 0.0), 30.0, 20.0),
+        ),
+        (
+            chest,
+            head,
+            ball(Vector::Y, v(0.0, 0.2, 0.0), v(0.0, -0.1, 0.0), 40.0, 30.0),
+        ),
+    ];
+    for (parent, child, joint) in joints {
+        world.insert_multibody_joint(parent, child, joint).unwrap();
+    }
+    for side in [-1.0 as Real, 1.0] {
+        let upper = part(
+            &mut world,
+            v(0.3 * side, 0.65, 0.0),
+            v(0.15, 0.05, 0.05),
+            2.0,
+        );
+        let fore = part(
+            &mut world,
+            v(0.6 * side, 0.65, 0.0),
+            v(0.15, 0.04, 0.04),
+            1.5,
+        );
+        let thigh = part(
+            &mut world,
+            v(0.1 * side, -0.1, 0.0),
+            v(0.06, 0.2, 0.06),
+            6.0,
+        );
+        let shin = part(
+            &mut world,
+            v(0.1 * side, -0.5, 0.0),
+            v(0.05, 0.2, 0.05),
+            4.0,
+        );
+        let shoulder = ball(
+            v(side, 0.0, 0.0),
+            v(0.15 * side, 0.15, 0.0),
+            v(-0.15 * side, 0.0, 0.0),
+            70.0,
+            40.0,
+        );
+        let elbow = hinge(
+            Vector::Z,
+            v(0.15 * side, 0.0, 0.0),
+            v(-0.15 * side, 0.0, 0.0),
+        );
+        let hip = ball(
+            -Vector::Y,
+            v(0.1 * side, -0.1, 0.0),
+            v(0.0, 0.2, 0.0),
+            60.0,
+            30.0,
+        );
+        let knee = hinge(Vector::X, v(0.0, -0.2, 0.0), v(0.0, 0.2, 0.0));
+        let limbs = [
+            (chest, upper, shoulder),
+            (upper, fore, elbow),
+            (pelvis, thigh, hip),
+            (thigh, shin, knee),
+        ];
+        for (parent, child, joint) in limbs {
+            world.insert_multibody_joint(parent, child, joint).unwrap();
+        }
+    }
+    let top = base.y + 0.9;
+    let mut rose: Real = 0.0;
+    for step in 0..(seconds * rate) as usize {
+        if step == 1 {
+            let link = *world.multibody_joints.rigid_body_link(chest).unwrap();
+            let mb = world
+                .multibody_joints
+                .get_multibody_mut(link.multibody)
+                .unwrap();
+            mb.apply_link_impulse(
+                &world.bodies,
+                link.id,
+                Vector::new(0.0, 0.0, 60.0),
+                AngVector::ZERO,
+            );
+        }
+        world.step();
+        for body in &made {
+            let pose = world.bodies[*body].position();
+            if !pose.translation.is_finite() || !pose.rotation.is_finite() {
+                return (Some(step), rose);
+            }
+            rose = rose.max(pose.translation.y - top);
+        }
+    }
+    (None, rose)
+}
+
+/// A ragdoll on multibody joints spawned with its legs deep inside a fixed step stays finite and
+/// rises no more than half a metre above where it was spawned, wherever it stands, at 30, 60 and
+/// 120 steps a second and at 30 in 16 substeps. Its thighs and shins are pushed out of the step
+/// opposite ways and their contacts held hundreds of N·s against one another through the knees;
+/// carried into the next step, where the narrow phase had replaced some of their points, they
+/// threw the legs with the impulse the replaced points gave up, and solved with the contact
+/// jacobians of the configuration the step began at, the push drove the links along directions
+/// the contacts no longer pointed. The ragdoll went NaN within a second at every rate. On impulse
+/// joints the same ragdoll rises at most a third of a metre.
+#[test]
+#[cfg(feature = "dim3")]
+fn a_ragdoll_spawned_with_its_legs_inside_a_step_stays_finite_and_in_place() {
+    let mut failed = Vec::new();
+    let mut highest: Real = 0.0;
+    for (rate, substeps) in [(30.0 as Real, 4), (60.0, 4), (120.0, 4), (30.0, 16)] {
+        for height in [1.5 as Real, 1.6] {
+            for i in 0..4 {
+                let at = Vector::new(
+                    -20.0 + 5.0 * i as Real,
+                    0.2 * i as Real,
+                    3.0 * (i % 2) as Real,
+                );
+                let (nan, rose) = ragdoll_by_stairs(at, height, rate, substeps, 2.0);
+                highest = highest.max(rose);
+                if let Some(step) = nan {
+                    failed.push(alloc::format!(
+                        "{rate} Hz in {substeps} substeps, pelvis {height} m up, at {at:?}: step {step}"
+                    ));
+                }
+            }
+        }
+    }
+    assert!(failed.is_empty(), "the ragdoll went not finite: {failed:?}");
+    assert!(
+        highest < 0.5,
+        "a body rose {highest} m above where the ragdoll was spawned"
+    );
+}
