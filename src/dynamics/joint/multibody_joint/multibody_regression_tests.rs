@@ -1103,8 +1103,9 @@ fn a_level_chain_on_its_swing_cones_under_a_heavy_end_stays_finite() {
 /// A ragdoll of eleven boxes on multibody joints, each joint built the way an engine joins a
 /// body to its parent: pelvis, chest and head on spherical joints with swing cones and twist
 /// ranges, ball shoulders and hips, hinge elbows and knees on 0 to 140° ranges. It stands
-/// beside a flight of eight fixed stairs whose foot is at `at`, its pelvis `height` m above that
-/// foot, so that below 2.2 m its legs start inside the top step. It is pushed by 60 N·s on its
+/// beside a flight of eight fixed stairs whose foot is at `at`, its pelvis' centre `height` +
+/// 0.2 m above that foot, so that for a `height` below 2.3 m its shins start inside the top
+/// step, which is 1.6 m high. It is pushed by 60 N·s on its
 /// chest one step in and stepped for `seconds` at `rate` steps a second in `substeps` substeps.
 /// Answers the step a body's pose first read not finite at, if one did, and how far, in metres,
 /// any body rose above the highest point the ragdoll was spawned at.
@@ -1299,7 +1300,7 @@ fn a_ragdoll_spawned_with_its_legs_inside_a_step_stays_finite_and_in_place() {
                 highest = highest.max(rose);
                 if let Some(step) = nan {
                     failed.push(alloc::format!(
-                        "{rate} Hz in {substeps} substeps, pelvis {height} m up, at {at:?}: step {step}"
+                        "{rate} Hz in {substeps} substeps, `height` {height}, at {at:?}: step {step}"
                     ));
                 }
             }
