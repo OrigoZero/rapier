@@ -303,6 +303,31 @@ impl JointGenericInternalConstraintBuilder {
         *out_constraint_id += num_constraints;
     }
 
+    /// Store in the link's joint the impulse each of its own limits and motors applied over
+    /// the substep just solved, in `constraints` as [`Self::update`] wrote them: the joint's
+    /// `limits[i].impulse` and `motors[i].impulse`, which an impulse joint's are too.
+    pub fn writeback_impulses(
+        &self,
+        multibodies: &mut MultibodyJointSet,
+        constraints: &[GenericJointConstraint],
+    ) {
+        let Some(mb) = multibodies.get_multibody_mut_internal(self.link.multibody) else {
+            return;
+        };
+        let Some(link) = mb.link_mut(self.link.id) else {
+            return;
+        };
+        let n_own = link.joint.num_velocity_constraints();
+        let end = (self.constraint_id + n_own).min(constraints.len());
+        for c in &constraints[self.constraint_id.min(end)..end] {
+            match c.writeback_id {
+                WritebackId::Limit(i) => link.joint.data.limits[i].impulse = c.impulse,
+                WritebackId::Motor(i) => link.joint.data.motors[i].impulse = c.impulse,
+                WritebackId::Dof(_) | WritebackId::Friction(_) => {}
+            }
+        }
+    }
+
     pub fn update(
         &self,
         params: &IntegrationParameters,

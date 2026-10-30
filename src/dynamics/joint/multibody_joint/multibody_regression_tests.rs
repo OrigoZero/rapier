@@ -1009,3 +1009,93 @@ fn multibody_contacts_step_the_same_whatever_contacts_elsewhere_were_removed() {
     };
     assert_eq!(run(false), run(true), "a body removed elsewhere");
 }
+
+/// A level chain of eight thin rods (0.4 m by 0.1 m along X, 1 kg each, 10 kg the last)
+/// joined by spherical joints whose swing is held to a 40° cone about the joint frames' X
+/// axis, which `frame` turns from the rods' length, hung from a fixed root at `at` and let fall
+/// for 5 s at `rate` steps a second. Returns the step a link's pose first read not finite at,
+/// if one did, and the widest any joint swung before it.
+#[cfg(feature = "dim3")]
+fn level_coned_chain(at: Vector, rate: Real, frame: Rotation) -> (Option<usize>, Real) {
+    let mut world = PhysicsWorld::new();
+    world.integration_parameters.dt = 1.0 / rate;
+    // A breath of sideways pull, so the chain does not fall in one exact plane.
+    world.gravity.z = 0.01;
+    let (root, _) = world.insert(
+        RigidBodyBuilder::fixed().translation(at),
+        ColliderBuilder::cuboid(0.2, 0.2, 0.2),
+    );
+    let cone = 40.0_f32.to_radians() as Real;
+    let mut above = root;
+    let mut links = Vec::new();
+    for i in 0..8 {
+        let mass = if i == 7 { 10.0 } else { 1.0 };
+        let (link, _) = world.insert(
+            RigidBodyBuilder::dynamic()
+                .translation(at + Vector::new(0.45 * (i as Real + 1.0), 0.0, 0.0))
+                .allow_fast_rotation(true)
+                .can_sleep(false),
+            ColliderBuilder::cuboid(0.2, 0.05, 0.05).mass(mass),
+        );
+        let mut joint: GenericJoint = SphericalJointBuilder::new()
+            .local_anchor1(Vector::new(if i == 0 { 0.0 } else { 0.225 }, 0.0, 0.0))
+            .local_anchor2(Vector::new(-0.225, 0.0, 0.0))
+            .contacts_enabled(false)
+            .build()
+            .into();
+        joint.local_frame1.rotation = frame;
+        joint.local_frame2.rotation = frame;
+        joint.coupled_axes |= JointAxesMask::ANG_Y | JointAxesMask::ANG_Z;
+        joint.set_limits(JointAxis::AngY, [-cone, cone]);
+        joint.set_limits(JointAxis::AngZ, [-cone, cone]);
+        world.insert_multibody_joint(above, link, joint).unwrap();
+        links.push(link);
+        above = link;
+    }
+    let mut widest: Real = 0.0;
+    for step in 0..(5.0 * rate) as usize {
+        world.step();
+        for (k, link) in links.iter().enumerate() {
+            let pose = *world.bodies[*link].position();
+            if !pose.translation.is_finite() || !pose.rotation.is_finite() {
+                return (Some(step), widest);
+            }
+            let parent = if k == 0 { root } else { links[k - 1] };
+            let rel = world.bodies[parent].rotation().inverse() * pose.rotation;
+            let axis = frame * Vector::X;
+            widest = widest.max(axis.dot(rel * axis).clamp(-1.0, 1.0).acos().to_degrees());
+        }
+    }
+    (None, widest)
+}
+
+/// A chain lying on the swing cones of its joints under a heavy end load stays finite and
+/// keeps its cones, at 60 and 30 steps a second, wherever it hangs, with the cones about the
+/// rods' length and across it. A cone's bound is curved, so the cone holds a link pressed on
+/// it against sliding round it with a stiffness the load sets; met only at the start of each
+/// substep, that stiffness swung the light links between two loaded joints round their cones
+/// wider each substep, the other way each time, until the chain's state was NaN within a
+/// second of falling.
+#[test]
+#[cfg(feature = "dim3")]
+fn a_level_chain_on_its_swing_cones_under_a_heavy_end_stays_finite() {
+    let mut failed = Vec::new();
+    let mut widest: Real = 0.0;
+    let across = Rotation::from_axis_angle(Vector::Z, core::f32::consts::FRAC_PI_2 as Real);
+    for (name, frame) in [("along", Rotation::IDENTITY), ("across", across)] {
+        for rate in [60.0, 30.0] {
+            for i in 0..8 {
+                let at = Vector::new(-30.0 + 5.0 * i as Real, 8.0 + (i % 3) as Real, 0.0);
+                let (nan, swing) = level_coned_chain(at, rate, frame);
+                widest = widest.max(swing);
+                if let Some(step) = nan {
+                    failed.push(alloc::format!(
+                        "cone {name} the rods, {rate} Hz at {at:?}: step {step}"
+                    ));
+                }
+            }
+        }
+    }
+    assert!(failed.is_empty(), "the chain went not finite: {failed:?}");
+    assert!(widest < 43.0, "a joint swung {widest}° on a 40° cone");
+}

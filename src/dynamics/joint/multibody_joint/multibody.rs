@@ -1022,6 +1022,32 @@ impl Multibody {
         }
 
         /*
+         * The swing cones' stiffness across their bounds, made implicit the way a spring is:
+         * `dt²·K` on the mass matrix, with `K = λ cot θ · t tᵀ` over the joint's angular dofs
+         * (see `MultibodyJoint::swing_cone_stiffness_dt`). The force behind it is already the
+         * cone limit's, so nothing joins the accelerations.
+         */
+        #[cfg(feature = "dim3")]
+        for li in 0..self.links.len() {
+            let link = &self.links[li];
+            if link.joint.kinematic {
+                continue;
+            }
+            let Some((t, stiffness_dt)) = link.joint.swing_cone_stiffness_dt() else {
+                continue;
+            };
+            let base = link.assembly_id + link.joint.num_free_lin_dofs();
+            let gain = stiffness_dt * dt;
+            for r in 0..ANG_DIM {
+                for c in 0..ANG_DIM {
+                    let v = gain * t[r] * t[c];
+                    self.acc_augmented_mass[(base + r, base + c)] += v;
+                    self.augmented_mass[(base + r, base + c)] += v;
+                }
+            }
+        }
+
+        /*
          * Damping and armature.
          *
          * Damping is a velocity-proportional force made implicit, so it adds
