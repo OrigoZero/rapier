@@ -9,6 +9,8 @@ use crate::math::{DIM, Matrix, Real, Vector};
 #[cfg(not(feature = "std"))]
 #[allow(unused_imports)]
 use simba::scalar::{ComplexField as _, RealField as _};
+#[cfg(feature = "dim3")]
+use simba::simd::SimdComplexField as _;
 
 /// Which strains make a soft-body edge flow plastically (see
 /// [`SoftBodyMaterial::edge_plastic_yield`]).
@@ -327,7 +329,7 @@ impl SoftBody {
             if !det.is_finite() || det <= 1.0e-6 {
                 continue;
             }
-            let plastic = stretch * (1.0 / det.powf(1.0 / DIM as Real));
+            let plastic = stretch * (1.0 / det.simd_powf(1.0 / DIM as Real));
             let dm = plastic * dm0;
             let volume = dm.determinant() / 6.0;
             if volume.is_finite() && volume.abs() > Real::EPSILON {
