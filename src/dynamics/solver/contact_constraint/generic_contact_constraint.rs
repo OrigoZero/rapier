@@ -104,6 +104,17 @@ impl GenericContactConstraintBuilder {
                     u32::MAX
                 });
         let force_dir1 = -manifold.data.normal;
+        // A contact on a multibody link starts each step from no impulse, and each substep
+        // after the first is warm-started from the one before it. The impulses a
+        // multibody's contacts ended the last step with balanced one another through its
+        // joints, over the contact points the last step held: contacts on two links of one
+        // leg held inside a fixed body push opposite ways and build up hundreds of N·s
+        // between them, which cancel through the knee. The narrow phase replaces contact
+        // points as the links move, and a set carried into a step where some of its points
+        // are new no longer cancels: the ones that kept their impulse throw the links with
+        // the impulse the new ones gave up. Over one step the points stay the same, so the
+        // impulses carried from substep to substep still balance.
+        let warmstarts = multibody1.is_none() && multibody2.is_none();
 
         #[cfg(feature = "dim2")]
         let tangents1 = force_dir1.orthonormal_basis();
@@ -231,6 +242,11 @@ impl GenericContactConstraintBuilder {
                 // Warm-start impulses and contact newness come from the manifold
                 // point (they are not duplicated on the solver contacts).
                 let is_new = pt_data.impulse == 0.0;
+                let warmstart_impulse = if warmstarts {
+                    pt_data.warmstart_impulse
+                } else {
+                    0.0
+                };
                 let is_bouncy = crate::geometry::is_bouncy(manifold.data.restitution, is_new);
 
                 let projected_velocity = (vel1 - vel2).dot(force_dir1);
@@ -250,8 +266,8 @@ impl GenericContactConstraintBuilder {
                     // Minus the warm-start impulse, so the first substep's `update` cancels it
                     // when it folds `impulse` in: that value belongs to the previous step (see
                     // the coulomb-friction `generate`).
-                    impulse_accumulator: -pt_data.warmstart_impulse,
-                    impulse: pt_data.warmstart_impulse,
+                    impulse_accumulator: -warmstart_impulse,
+                    impulse: warmstart_impulse,
                     r,
                     #[cfg(feature = "block-solver")]
                     r_mat_elts: [0.0; 2],
@@ -264,13 +280,21 @@ impl GenericContactConstraintBuilder {
                 // current tangent basis (see `ContactData::warmstart_tangent_world`).
                 #[cfg(feature = "dim3")]
                 {
-                    let w = pt_data.warmstart_tangent_world;
+                    let w = if warmstarts {
+                        pt_data.warmstart_tangent_world
+                    } else {
+                        Vector::ZERO
+                    };
                     out_constraint.tangent_part[k].impulse =
                         TangentImpulse::new(w.gdot(tangents1[0]), w.gdot(tangents1[1]));
                 }
                 #[cfg(feature = "dim2")]
                 {
-                    out_constraint.tangent_part[k].impulse = pt_data.warmstart_tangent_impulse;
+                    out_constraint.tangent_part[k].impulse = if warmstarts {
+                        pt_data.warmstart_tangent_impulse
+                    } else {
+                        Default::default()
+                    };
                 }
 
                 // See the normal part.
