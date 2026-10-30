@@ -5,6 +5,7 @@ use crate::math::Real;
 #[cfg(not(feature = "std"))]
 #[allow(unused_imports)]
 use simba::scalar::{ComplexField as _, RealField as _};
+use simba::simd::SimdComplexField as _;
 
 /// The stiffness and damping of every soft-body constraint family: a `natural_frequency` (Hz) and
 /// `damping_ratio` per family, normalized by the constraint's effective mass (independent of mass,
@@ -240,7 +241,7 @@ impl SoftBodyMaterial {
         if self.tear_smoothing <= 0.0 {
             load
         } else {
-            let blend = 1.0 - (-dt / self.tear_smoothing).exp();
+            let blend = 1.0 - (-dt / self.tear_smoothing).simd_exp();
             stress + (load - stress) * blend
         }
     }

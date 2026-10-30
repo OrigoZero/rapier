@@ -6,6 +6,8 @@ use parry::utils::hashmap::HashMap;
 #[cfg(not(feature = "std"))]
 #[allow(unused_imports)]
 use simba::scalar::{ComplexField as _, RealField as _};
+#[cfg(feature = "dim3")]
+use simba::simd::SimdComplexField as _;
 
 use super::super::SoftBodyCell;
 
@@ -290,7 +292,7 @@ pub(crate) fn dihedral_angle(p0: Vector, p1: Vector, p2: Vector, p3: Vector) -> 
     if l1 == 0.0 || l2 == 0.0 {
         return 0.0;
     }
-    (n1.dot(n2) / (l1 * l2)).clamp(-1.0, 1.0).acos()
+    (n1.dot(n2) / (l1 * l2)).clamp(-1.0, 1.0).simd_acos()
 }
 
 /// An icosphere: vertices on the sphere of the given center and radius, outward-oriented

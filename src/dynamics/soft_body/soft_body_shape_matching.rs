@@ -5,6 +5,8 @@ use crate::math::{Matrix, Real, Rotation};
 #[cfg(not(feature = "std"))]
 #[allow(unused_imports)]
 use simba::scalar::{ComplexField as _, RealField as _};
+#[cfg(feature = "dim2")]
+use simba::simd::SimdRealField as _;
 
 /// The rotation `R` of the polar decomposition `A = R S` of a covariance matrix, warm-started
 /// from `warm`: closed form in 2D; in 3D, Müller et al.'s iterative rotation extraction, which
@@ -28,7 +30,7 @@ pub(crate) fn extract_rotation_within(a: Matrix, warm: Rotation, tolerance: Real
         if sin == 0.0 && cos == 0.0 {
             warm
         } else {
-            Rotation::new(sin.atan2(cos))
+            Rotation::new(sin.simd_atan2(cos))
         }
     }
     #[cfg(feature = "dim3")]

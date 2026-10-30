@@ -7,6 +7,8 @@ use crate::utils::DotProduct;
 #[cfg(not(feature = "std"))]
 #[allow(unused_imports)]
 use simba::scalar::{ComplexField as _, RealField as _};
+#[cfg(feature = "dim3")]
+use simba::simd::SimdComplexField as _;
 
 /// Number of particles a soft constraint can touch.
 pub(crate) const MAX_CONSTRAINT_PARTICLES: usize = DIM + 1;
@@ -101,7 +103,7 @@ pub(crate) fn dihedral_gradients(pos: &[Vector; 4], rest: Real, grad: &mut [Vect
     let n1 = n1_raw / l1;
     let n2 = n2_raw / l2;
     let d = n1.dot(n2).clamp(-1.0, 1.0);
-    let angle = d.acos();
+    let angle = d.simd_acos();
     let sin = (1.0 - d * d).sqrt();
     if sin < 1.0e-6 {
         // Flat configuration: the angle is stationary, no useful gradient.
