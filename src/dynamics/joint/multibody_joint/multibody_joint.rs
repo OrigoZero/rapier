@@ -15,6 +15,8 @@ use crate::math::rotation_from_angle;
 use crate::utils::RotationOps;
 use crate::utils::vect_to_na;
 use na::DVectorViewMut;
+#[cfg(feature = "dim3")]
+use simba::simd::{SimdComplexField as _, SimdRealField as _};
 
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[derive(Copy, Clone, Debug)]
@@ -539,7 +541,7 @@ impl MultibodyJoint {
         for a in 0..ANG_DIM {
             let i = DIM + a;
             let in_cone = (cone & (1 << a)) != 0;
-            let angle = 2.0 * imag[a].atan2(w);
+            let angle = 2.0 * imag[a].simd_atan2(w);
             let limits = [self.data.limits[i].min, self.data.limits[i].max];
 
             if (limit_bits & (1 << i)) != 0 && !in_cone {
@@ -601,7 +603,7 @@ impl MultibodyJoint {
             let axis = (!cone & 0b111).trailing_zeros() as usize;
             let axis1 = Vector::ith(axis, 1.0);
             let axis2 = q * axis1;
-            let swing = axis1.dot(axis2).clamp(-1.0, 1.0).acos();
+            let swing = axis1.dot(axis2).clamp(-1.0, 1.0).simd_acos();
             let turn = axis1.cross(axis2);
             let dir = if turn.length() > 1.0e-6 {
                 turn.normalize()
