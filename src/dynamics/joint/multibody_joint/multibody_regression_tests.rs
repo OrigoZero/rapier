@@ -871,3 +871,74 @@ fn an_impulse_on_a_multibody_link_moves_the_link_and_its_chain() {
         );
     }
 }
+
+/// A multibody whose links strike the ground steps to the same bits however
+/// often its links' bodies are borrowed mutably between steps. Borrowing a body
+/// mutably marks it modified, and the narrow phase then reconciles its pairs
+/// with the solver contact graph, which appends and swap-removes the generic
+/// (multibody-involved) manifolds as they qualify: the solve order of those
+/// contacts followed that history, so writing a link's own velocity back to it
+/// (or only touching it) on some steps and not others parted the result.
+#[test]
+#[cfg(feature = "dim3")]
+fn multibody_contacts_step_the_same_however_often_their_links_are_touched() {
+    let run = |every: usize| {
+        let mut world = PhysicsWorld::new();
+        world.insert(
+            RigidBodyBuilder::fixed().translation(Vector::new(0.0, -0.5, 0.0)),
+            ColliderBuilder::cuboid(10.0, 0.5, 10.0),
+        );
+        world.insert(
+            RigidBodyBuilder::fixed()
+                .translation(Vector::new(0.0, 0.2, 0.6))
+                .rotation(Vector::new(0.3, 0.0, 0.0)),
+            ColliderBuilder::cuboid(2.0, 0.2, 0.3),
+        );
+        let mut links = Vec::new();
+        let mut above = None;
+        for i in 0..6 {
+            let (link, _) = world.insert(
+                RigidBodyBuilder::dynamic()
+                    .translation(Vector::new(0.3 * i as Real, 1.5, 0.3 * i as Real))
+                    .linvel(Vector::new(0.0, 0.0, 2.0))
+                    .angvel(Vector::new(0.4, 1.0, 0.0))
+                    .can_sleep(false),
+                ColliderBuilder::cuboid(0.15, 0.08, 0.08),
+            );
+            if let Some(parent) = above {
+                let joint = SphericalJointBuilder::new()
+                    .local_anchor1(Vector::new(0.15, 0.0, 0.15))
+                    .local_anchor2(Vector::new(-0.15, 0.0, -0.15))
+                    .limits(JointAxis::AngX, [-0.5, 0.5])
+                    .limits(JointAxis::AngY, [-0.5, 0.5])
+                    .limits(JointAxis::AngZ, [-0.5, 0.5]);
+                world.insert_multibody_joint(parent, link, joint);
+            }
+            links.push(link);
+            above = Some(link);
+        }
+        for step in 0..150 {
+            if every > 0 && step % every == 0 {
+                for link in &links {
+                    let body = &mut world.bodies[*link];
+                    let v = body.linvel();
+                    body.set_linvel(v, true);
+                }
+            }
+            world.step();
+        }
+        links
+            .iter()
+            .map(|link| {
+                let body = &world.bodies[*link];
+                let p = body.translation();
+                let q = body.rotation();
+                [p.x, p.y, p.z, q.x, q.y, q.z, q.w].map(Real::to_bits)
+            })
+            .collect::<Vec<_>>()
+    };
+    let untouched = run(0);
+    assert_eq!(untouched, run(1), "touched before every step");
+    assert_eq!(untouched, run(2), "touched before every second step");
+    assert_eq!(untouched, run(3), "touched before every third step");
+}
