@@ -4,6 +4,7 @@ use crate::dynamics::solver::contact_constraint::{
     GenericContactConstraintBuilder,
 };
 use crate::dynamics::solver::interaction_groups::InteractionGroups;
+use crate::dynamics::solver::solver_contact_graph::ContactRef;
 use crate::dynamics::{ImpulseJoint, JointAxesMask};
 use crate::math::DVector;
 use parry::math::SimdReal;
@@ -45,6 +46,10 @@ pub(crate) struct ContactConstraintsSet {
     pub interaction_groups: InteractionGroups,
 
     pub generic_velocity_constraints: Vec<GenericContactConstraint>,
+    /// The generic (multibody-involved) manifolds of the current step, in the
+    /// order their constraints are generated and solved: ascending (edge,
+    /// manifold), the order a full rebuild of the solver contact graph lays them in.
+    pub generic_order: Vec<ContactRef>,
     pub simd_velocity_coulomb_constraints: Vec<ContactWithCoulombFriction<SimdReal>>,
     #[cfg(feature = "dim3")]
     pub simd_velocity_twist_constraints: Vec<ContactWithTwistFriction<SimdReal>>,
@@ -61,6 +66,7 @@ impl ContactConstraintsSet {
             generic_jacobians: DVector::zeros(0),
             interaction_groups: InteractionGroups::new(),
             generic_velocity_constraints: vec![],
+            generic_order: vec![],
             simd_velocity_coulomb_constraints: vec![],
             generic_velocity_constraints_builder: vec![],
             simd_velocity_coulomb_constraints_builder: vec![],
