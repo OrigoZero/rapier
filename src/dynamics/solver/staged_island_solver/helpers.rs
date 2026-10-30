@@ -29,13 +29,19 @@ impl ContactConstraintsSet {
         // The generic list holds its manifolds in the order they qualified, which an
         // incremental update reorders (it appends and swap-removes), and its constraints
         // share the multibodies they touch, so the order they are solved in decides the
-        // result. They are solved in ascending (edge, manifold), the layout a full rebuild
-        // gives them, so the result depends on the contacts alone and not on the history
-        // of updates that brought the list to them.
+        // result. They are solved in the order of the colliders each pair joins (the lower
+        // collider index, then the higher, then the manifold's ordinal in its pair): the
+        // contact graph's edge indices move as edges are removed, and collider indices
+        // depend only on which slots of the collider set are occupied, so the result
+        // depends on the contacts alone and not on the history that brought the list or
+        // the graph to them.
         let mut generic = core::mem::take(&mut self.generic_order);
         generic.clear();
         generic.extend_from_slice(graph.generic());
-        generic.sort_unstable_by_key(|r| (r.edge, r.manifold));
+        generic.sort_unstable_by_key(|r| {
+            let (a, b) = store.collider_indices(*r);
+            (a, b, r.manifold)
+        });
         let total_num_constraints = generic.len();
         self.generic_velocity_constraints_builder.resize(
             total_num_constraints,

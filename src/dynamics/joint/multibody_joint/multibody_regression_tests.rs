@@ -942,3 +942,70 @@ fn multibody_contacts_step_the_same_however_often_their_links_are_touched() {
     assert_eq!(untouched, run(2), "touched before every second step");
     assert_eq!(untouched, run(3), "touched before every third step");
 }
+
+/// A multibody striking the ground steps to the same bits whether or not a body
+/// far from it rested on the same ground and was removed while it stepped.
+/// Removing that body's contact moved the contact graph's edges, so a solve
+/// order read off edge indices changed the multibody's result.
+#[test]
+#[cfg(feature = "dim3")]
+fn multibody_contacts_step_the_same_whatever_contacts_elsewhere_were_removed() {
+    let run = |aside: bool| {
+        let mut world = PhysicsWorld::new();
+        world.insert(
+            RigidBodyBuilder::fixed().translation(Vector::new(0.0, -0.5, 0.0)),
+            ColliderBuilder::cuboid(50.0, 0.5, 50.0),
+        );
+        let others: Vec<_> = (0..3)
+            .map(|i| {
+                world
+                    .insert(
+                        RigidBodyBuilder::dynamic()
+                            .translation(Vector::new(30.0 + 2.0 * i as Real, 0.3, 30.0))
+                            .can_sleep(false),
+                        ColliderBuilder::cuboid(0.3, 0.3, 0.3),
+                    )
+                    .0
+            })
+            .collect();
+        let mut links = Vec::new();
+        let mut above = None;
+        for i in 0..6 {
+            let (link, _) = world.insert(
+                RigidBodyBuilder::dynamic()
+                    .translation(Vector::new(0.3 * i as Real, 1.0, 0.3 * i as Real))
+                    .linvel(Vector::new(0.0, 0.0, 2.0))
+                    .angvel(Vector::new(0.4, 1.0, 0.0))
+                    .can_sleep(false),
+                ColliderBuilder::cuboid(0.15, 0.08, 0.08),
+            );
+            if let Some(parent) = above {
+                let joint = SphericalJointBuilder::new()
+                    .local_anchor1(Vector::new(0.15, 0.0, 0.15))
+                    .local_anchor2(Vector::new(-0.15, 0.0, -0.15))
+                    .limits(JointAxis::AngX, [-0.5, 0.5])
+                    .limits(JointAxis::AngY, [-0.5, 0.5])
+                    .limits(JointAxis::AngZ, [-0.5, 0.5]);
+                world.insert_multibody_joint(parent, link, joint);
+            }
+            links.push(link);
+            above = Some(link);
+        }
+        for step in 0..150 {
+            if aside && step == 40 {
+                world.remove_body(others[0]);
+            }
+            world.step();
+        }
+        links
+            .iter()
+            .map(|link| {
+                let body = &world.bodies[*link];
+                let p = body.translation();
+                let q = body.rotation();
+                [p.x, p.y, p.z, q.x, q.y, q.z, q.w].map(Real::to_bits)
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(run(false), run(true), "a body removed elsewhere");
+}

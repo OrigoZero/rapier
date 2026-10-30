@@ -122,6 +122,17 @@ impl<'a> ManifoldStore<'a> {
         }
     }
 
+    /// The two colliders of the pair `r` belongs to, the lower index first.
+    #[inline]
+    pub(crate) fn collider_indices(&self, r: ContactRef) -> (u32, u32) {
+        let pair = self.pair_ptr(r.edge);
+        // Read the two handles through the raw pointer, without a reference to the whole
+        // pair (see the aliasing contract).
+        let (a, b) = unsafe { ((*pair).collider1, (*pair).collider2) };
+        let (a, b) = (a.into_raw_parts().0, b.into_raw_parts().0);
+        (a.min(b), a.max(b))
+    }
+
     /// Resolves a manifold for reading.
     #[inline]
     pub(crate) fn get(&self, r: ContactRef) -> &ContactManifold {

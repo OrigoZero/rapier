@@ -47,8 +47,8 @@ pub(crate) struct ContactConstraintsSet {
 
     pub generic_velocity_constraints: Vec<GenericContactConstraint>,
     /// The generic (multibody-involved) manifolds of the current step, in the
-    /// order their constraints are generated and solved: ascending (edge,
-    /// manifold), the order a full rebuild of the solver contact graph lays them in.
+    /// order their constraints are generated and solved: by the colliders each
+    /// pair joins, then the manifold's ordinal in its pair.
     pub generic_order: Vec<ContactRef>,
     pub simd_velocity_coulomb_constraints: Vec<ContactWithCoulombFriction<SimdReal>>,
     #[cfg(feature = "dim3")]
