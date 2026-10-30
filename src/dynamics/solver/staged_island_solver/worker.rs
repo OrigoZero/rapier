@@ -558,6 +558,8 @@ pub(super) unsafe fn run_worker(ctx: &SharedCtx, worker_id: usize) {
                                     solved_dt,
                                     solver_bodies,
                                     multibodies,
+                                    &mut contacts.generic_jacobians,
+                                    substep_id > 0,
                                     constraint,
                                 );
                             }
@@ -663,7 +665,15 @@ pub(super) unsafe fn run_worker(ctx: &SharedCtx, worker_id: usize) {
                         .iter()
                         .zip(contacts.generic_velocity_constraints.iter_mut())
                     {
-                        builder.update(params, solved_dt, &vs.solver_bodies, multibodies, c);
+                        builder.update(
+                            params,
+                            solved_dt,
+                            &vs.solver_bodies,
+                            multibodies,
+                            &mut contacts.generic_jacobians,
+                            substep_id > 0,
+                            c,
+                        );
                         c.warmstart(
                             &contacts.generic_jacobians,
                             &mut vs.solver_bodies,
