@@ -19,6 +19,7 @@ use crate::utils::{
 
 #[cfg(not(feature = "std"))]
 use simba::scalar::ComplexField as _;
+use simba::simd::SimdComplexField as _;
 
 use crate::num::FloatConst;
 #[cfg(feature = "dim2")]
@@ -59,9 +60,9 @@ impl AngularLimitParams<Real> {
 
         let center = (min + max) * 0.5;
         #[cfg(feature = "dim2")]
-        let (sin, cos) = center.sin_cos();
+        let (sin, cos) = center.simd_sin_cos();
         #[cfg(feature = "dim3")]
-        let (sin, cos) = (center * 0.5).sin_cos();
+        let (sin, cos) = (center * 0.5).simd_sin_cos();
 
         Self {
             center: [cos, sin],

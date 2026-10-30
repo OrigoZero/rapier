@@ -1,5 +1,5 @@
-#[cfg(all(not(feature = "std"), feature = "dim3"))]
-use simba::scalar::ComplexField;
+#[cfg(feature = "dim3")]
+use simba::simd::SimdComplexField as _;
 
 use crate::dynamics::integration_parameters::SpringCoefficients;
 use crate::dynamics::joint::{GenericJoint, GenericJointBuilder, JointAxesMask};
@@ -101,9 +101,9 @@ impl RevoluteJoint {
 
         #[cfg(feature = "dim3")]
         if joint_rot1.dot(joint_rot2) < 0.0 {
-            -ang_err.x.clamp(-1.0, 1.0).asin() * 2.0
+            -ang_err.x.clamp(-1.0, 1.0).simd_asin() * 2.0
         } else {
-            ang_err.x.clamp(-1.0, 1.0).asin() * 2.0
+            ang_err.x.clamp(-1.0, 1.0).simd_asin() * 2.0
         }
 
         #[cfg(feature = "dim2")]
