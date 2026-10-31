@@ -549,12 +549,9 @@ impl Multibody {
         // to the explicit term if needed
         let check_implicit_coriolis_divergence = dt * self.velocities.amax() >= 1.0e-3;
         // Generalized forces that derive from positions or external inputs
-        // (gravity, user forces, spring position terms).
-        let mut pos_forces = DVector::zeros(if check_implicit_coriolis_divergence {
-            self.ndofs
-        } else {
-            0
-        });
+        // (gravity, user forces, spring position terms), which the energy hold
+        // reads as the work of a substep (`kinetic_energy_scale`).
+        let mut pos_forces = DVector::zeros(self.ndofs);
 
         // Eqn 42 to 45
         for i in 0..self.links.len() {
@@ -617,15 +614,13 @@ impl Multibody {
                 1.0,
             );
 
-            if check_implicit_coriolis_divergence {
-                let applied_forces = Force::new(rb.forces.force, rb.forces.torque);
-                pos_forces.gemv_tr(
-                    1.0,
-                    &self.body_jacobians[i],
-                    applied_forces.as_vector(),
-                    1.0,
-                );
-            }
+            let applied_forces = Force::new(rb.forces.force, rb.forces.torque);
+            pos_forces.gemv_tr(
+                1.0,
+                &self.body_jacobians[i],
+                applied_forces.as_vector(),
+                1.0,
+            );
         }
 
         self.accelerations
@@ -645,9 +640,7 @@ impl Multibody {
                         let rest = self.links[li].joint.spring_ref[a];
                         let spring_pos_force = -k * (q - rest);
                         self.accelerations[idx] += spring_pos_force - k * dt * self.velocities[idx];
-                        if check_implicit_coriolis_divergence {
-                            pos_forces[idx] += spring_pos_force;
-                        }
+                        pos_forces[idx] += spring_pos_force;
                     }
                     idx += 1;
                 }
@@ -669,8 +662,8 @@ impl Multibody {
 
         if check_implicit_coriolis_divergence {
             self.free_velocity_energy_guard(dt, &gen_forces, &pos_forces);
-            self.workspace.position_forces = pos_forces;
         }
+        self.workspace.position_forces = pos_forces;
     }
 
     /// The kinetic energy of the links at the generalized `velocities`, at the configuration the

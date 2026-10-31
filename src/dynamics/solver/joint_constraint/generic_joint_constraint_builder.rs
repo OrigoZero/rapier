@@ -344,6 +344,19 @@ impl JointGenericInternalConstraintBuilder {
             jacobians,
             &mut out[self.constraint_id..],
         );
+        // Each limit starts the substep from the impulse it held over the substep before
+        // ([`Self::writeback_impulses`]), within what its row may push this substep: a link
+        // held on its stop under a load is held from the first iteration, and the rows of a
+        // chain pinned on several stops at once converge on one another within the iterations
+        // they are given.
+        for c in &mut out[self.constraint_id..self.constraint_id + n_own] {
+            if let WritebackId::Limit(i) = c.writeback_id {
+                c.impulse = link.joint().data.limits[i]
+                    .impulse
+                    .clamp(c.impulse_bounds[0], c.impulse_bounds[1])
+                    * params.warmstart_coefficient;
+            }
+        }
         // DoF couplings owned by this link follow its own constraints, both in
         // the jacobian buffer (each constraint reserves `2·ndofs`) and in the
         // output slice.
