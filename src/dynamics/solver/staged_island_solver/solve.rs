@@ -13,8 +13,10 @@ use super::{SharedCtx, stage_batch};
 const MULTIBODY_CONTACT_ROUNDS: usize = 8;
 
 /// One solve pass: joints (colored, then overflow + generic on worker 0), soft-body rows, then
-/// contact colors (parallel); returns the updated stage ordinal. `soft_update` updates the soft
-/// constraints from the poses first; `soft_warmstart` is `Some(coefficient)` to warm-start them.
+/// contact colors (parallel); returns the updated stage ordinal. `soft_update` is set on the
+/// first iteration of each of a substep's passes: it updates the soft constraints from the poses
+/// first, and in the biased pass the multibodies' limits apply the impulse they start from;
+/// `soft_warmstart` is `Some(coefficient)` to warm-start the soft constraints.
 pub(super) unsafe fn solve_pass(
     ctx: &SharedCtx,
     group_index: usize,
@@ -233,6 +235,16 @@ pub(super) unsafe fn solve_pass(
                 if wo_bias {
                     for c in generic_velocity_constraints.iter_mut() {
                         c.remove_bias_from_rhs();
+                    }
+                } else if soft_update {
+                    // The first biased iteration of the substep: the rows that start from an
+                    // impulse (a multibody's limits) apply it first.
+                    for c in generic_velocity_constraints.iter() {
+                        c.warmstart(
+                            generic_jacobians,
+                            &mut vs.solver_bodies,
+                            &mut vs.generic_solver_vels,
+                        );
                     }
                 }
                 for _ in 0..params.num_multibody_joint_iterations.max(1) {

@@ -43,6 +43,10 @@ pub(crate) struct VelocitySolver {
     pub generic_solver_vels: DVector,
     pub generic_solver_vels_increment: DVector,
     pub multibody_roots: Vec<MultibodyLinkId>,
+    /// The kinetic energy each multibody of `multibody_roots` moved through the current substep
+    /// with, when its energy is held, indexed like `multibody_roots`: read as the substep moves
+    /// the multibody, applied once its stabilization pass has settled the velocity it ends at.
+    pub multibody_energy_holds: Vec<Option<Real>>,
     /// Per-solver-body gyroscopic parameters (3D), indexed like `solver_bodies`; consumed each
     /// substep by the velocity-increment stage, gated by a global "any gyroscopic body" flag so
     /// gyro-free scenes (the common case) skip the pass entirely.
@@ -93,6 +97,7 @@ impl VelocitySolver {
             generic_solver_vels: DVector::zeros(0),
             generic_solver_vels_increment: DVector::zeros(0),
             multibody_roots: Vec::new(),
+            multibody_energy_holds: Vec::new(),
             #[cfg(feature = "dim3")]
             solver_gyro: Vec::new(),
             substep_vels: Vec::new(),

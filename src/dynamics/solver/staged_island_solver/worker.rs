@@ -790,21 +790,6 @@ pub(super) unsafe fn run_worker(ctx: &SharedCtx, worker_id: usize) {
                     let vs = unsafe { &mut *ctx.velocity_solver };
                     let bodies = unsafe { &mut *ctx.bodies };
                     let multibodies = unsafe { &mut *ctx.multibodies };
-                    // Each multibody joint keeps the impulses its limits and motors applied
-                    // this substep, which the mass matrix the next substep solves with reads
-                    // (a swing cone's stiffness across its bound). Generic constraints exist
-                    // only on the single-group path.
-                    if ctx.groups.len() == 1 {
-                        let joints = unsafe { &*ctx.joint_constraints };
-                        for builder in joints.generic_velocity_constraints_builder.iter() {
-                            if let GenericJointConstraintBuilder::Internal(b) = builder {
-                                b.writeback_impulses(
-                                    multibodies,
-                                    &joints.generic_velocity_constraints,
-                                );
-                            }
-                        }
-                    }
                     vs.integrate_multibody_positions(params, is_last_substep, bodies, multibodies);
                     sync.complete(stage, 1, num_group_bodies + 1);
                 }
@@ -829,6 +814,36 @@ pub(super) unsafe fn run_worker(ctx: &SharedCtx, worker_id: usize) {
                         solved_dt + params.dt,
                     )
                 };
+            }
+
+            /*
+             * Stage: the multibodies' dynamics for the next substep, from the velocity this
+             * substep ended at (worker 0, sole accessor of `bodies` and `multibodies`).
+             */
+            if ctx.has_multibodies {
+                if worker_id == 0 {
+                    let vs = unsafe { &mut *ctx.velocity_solver };
+                    let bodies = unsafe { &mut *ctx.bodies };
+                    let multibodies = unsafe { &mut *ctx.multibodies };
+                    // Each multibody joint keeps the impulses its limits and motors applied over
+                    // the whole substep, both passes, which the mass matrix the next substep
+                    // solves with reads (a swing cone's stiffness across its bound) and its
+                    // limits start from. Generic constraints exist only on the single-group path.
+                    if ctx.groups.len() == 1 {
+                        let joints = unsafe { &*ctx.joint_constraints };
+                        for builder in joints.generic_velocity_constraints_builder.iter() {
+                            if let GenericJointConstraintBuilder::Internal(b) = builder {
+                                b.writeback_impulses(
+                                    multibodies,
+                                    &joints.generic_velocity_constraints,
+                                );
+                            }
+                        }
+                    }
+                    vs.update_multibody_dynamics(params, is_last_substep, bodies, multibodies);
+                    sync.complete(stage, 1, 1);
+                }
+                stage = sync.sync(stage, 1);
             }
         }
 
@@ -1185,6 +1200,12 @@ pub(super) unsafe fn run_worker(ctx: &SharedCtx, worker_id: usize) {
                     .generic_solver_vels
                     .rows(multibody.solver_id as usize, multibody.ndofs());
                 multibody.velocities.copy_from(&solver_vels);
+                // The links' bodies end the step at the velocity the step ended at, at the
+                // poses it left them in, so a velocity read between steps is the one the next
+                // step starts from.
+                let bodies = unsafe { &mut *ctx.bodies };
+                multibody.update_rigid_bodies_internal(bodies, true, true, false);
+                multibody.update_velocities(bodies);
             }
         }
         // No sync after the multibody-velocity writeback: nothing follows, and

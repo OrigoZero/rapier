@@ -320,6 +320,28 @@ impl GenericJointConstraint {
         solver_vel2.axpy(-delta_impulse, &wj2, 1.0);
     }
 
+    /// Applies the impulse the row starts with to the velocities it acts on, before the row is
+    /// first solved.
+    pub fn warmstart(
+        &self,
+        jacobians: &DVector,
+        solver_vels: &mut SolverBodies,
+        generic_solver_vels: &mut DVector,
+    ) {
+        if self.impulse == 0.0 {
+            return;
+        }
+        let jacobians = jacobians.as_slice();
+
+        let mut solver_vel1 = self.solver_vel1_mut(solver_vels, generic_solver_vels);
+        let wj1 = DVectorView::from_slice(&jacobians[self.wj_id1()..], self.ndofs1);
+        solver_vel1.axpy(self.impulse, &wj1, 1.0);
+
+        let mut solver_vel2 = self.solver_vel2_mut(solver_vels, generic_solver_vels);
+        let wj2 = DVectorView::from_slice(&jacobians[self.wj_id2()..], self.ndofs2);
+        solver_vel2.axpy(-self.impulse, &wj2, 1.0);
+    }
+
     pub fn writeback_impulses(&self, joints_all: &mut [JointGraphEdge]) {
         // TODO: we don’t support impulse writeback for internal constraints yet.
         if self.joint_id != JointIndex::MAX {
