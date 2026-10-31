@@ -830,21 +830,6 @@ pub(super) unsafe fn run_worker(ctx: &SharedCtx, worker_id: usize) {
                     )
                 };
             }
-
-            /*
-             * Stage: the multibodies' dynamics for the next substep, from the velocity this
-             * substep ended at (worker 0, sole accessor of `bodies` and `multibodies`).
-             */
-            if ctx.has_multibodies {
-                if worker_id == 0 {
-                    let vs = unsafe { &mut *ctx.velocity_solver };
-                    let bodies = unsafe { &mut *ctx.bodies };
-                    let multibodies = unsafe { &mut *ctx.multibodies };
-                    vs.update_multibody_dynamics(params, is_last_substep, bodies, multibodies);
-                    sync.complete(stage, 1, 1);
-                }
-                stage = sync.sync(stage, 1);
-            }
         }
 
         /*

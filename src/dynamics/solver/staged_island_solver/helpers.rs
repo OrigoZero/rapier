@@ -151,10 +151,7 @@ impl VelocitySolver {
     }
 
     /// The multibody part of `integrate_positions`, used by the staged solver
-    /// (regular solver bodies are integrated in parallel by the workers): each multibody moves
-    /// through the substep at the velocity its biased solve left, which stays in its
-    /// `velocities` for [`Self::update_multibody_dynamics`], with the kinetic energy it moves
-    /// with when the energy hold reads it.
+    /// (regular solver bodies are integrated in parallel by the workers).
     pub(super) fn integrate_multibody_positions(
         &mut self,
         params: &IntegrationParameters,
@@ -162,7 +159,6 @@ impl VelocitySolver {
         bodies: &mut RigidBodySet,
         multibodies: &mut MultibodyJointSet,
     ) {
-        self.multibody_energy_holds.clear();
         for link in &self.multibody_roots {
             let multibody = multibodies
                 .get_multibody_mut_internal(link.multibody)
@@ -176,45 +172,13 @@ impl VelocitySolver {
             multibody.integrate(params.dt);
             multibody.forward_kinematics(bodies, false);
             multibody.update_rigid_bodies_internal(bodies, refresh, true, false);
-            self.multibody_energy_holds.push(energy);
-        }
-    }
 
-    /// The dynamics each multibody starts the next substep with, once the substep's
-    /// stabilization pass has settled the velocity it ends at (see
-    /// `Multibody::update_dynamics_after_move`), then the energy hold of
-    /// [`Self::integrate_multibody_positions`] and the velocity increment of the next substep.
-    ///
-    /// The stabilization pass changes the velocity a multibody moved with: it takes the
-    /// corrective velocity of its contacts and limits out, and solves friction. Read from the
-    /// velocity it moved with alone, the Coriolis forces of the next substep do work on the
-    /// velocity it carries: a chain whose link slides on a fixed body near its root gained energy
-    /// each substep until it was flung.
-    pub(super) fn update_multibody_dynamics(
-        &mut self,
-        params: &IntegrationParameters,
-        is_last_substep: bool,
-        bodies: &mut RigidBodySet,
-        multibodies: &mut MultibodyJointSet,
-    ) {
-        for (link, energy) in self
-            .multibody_roots
-            .iter()
-            .zip(&self.multibody_energy_holds)
-        {
-            if is_last_substep && energy.is_none() {
-                continue;
+            if refresh {
+                multibody.update_velocities(bodies);
+                multibody.update_mass_matrix(params.dt, bodies);
+                multibody.update_acceleration(params.dt, bodies);
             }
-            let multibody = multibodies
-                .get_multibody_mut_internal(link.multibody)
-                .unwrap();
-            let moved = multibody.velocities.clone();
-            let solver_vels = self
-                .generic_solver_vels
-                .rows(multibody.solver_id as usize, multibody.ndofs());
-            multibody.velocities.copy_from(&solver_vels);
-            multibody.update_dynamics_after_move(&moved, params.dt, bodies);
-            if let Some(energy) = *energy {
+            if let Some(energy) = energy {
                 let scale = multibody.kinetic_energy_scale(energy, params.dt, bodies);
                 if scale < 1.0 {
                     multibody.velocities *= scale;
