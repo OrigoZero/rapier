@@ -131,9 +131,10 @@ pub struct SoftBody {
     /// step, and after its particles were placed by `SoftBodySet::rest_at`; a reference whose
     /// length differs from the particles' (a tear or a cut changed them) is not read.
     pub(crate) sleep_reference: Vec<Vector>,
-    /// Set when the body was put at rest where it stands (`SoftBodySet::rest_at`): the contacts
-    /// the next collision detection finds it touching a body that is not moving begin without
-    /// waking it, since nothing moved into them. Cleared at the end of that step.
+    /// Set when the body was put at rest where it stands (`SoftBodySet::rest_at`, or
+    /// `SoftBodySet::carry` of a sleeping body that gives it no motion): the contacts the next
+    /// collision detection finds it touching a body that is not moving begin without waking it,
+    /// since nothing moved into them. Cleared at the end of that step.
     #[cfg_attr(feature = "serde-serialize", serde(default))]
     pub(crate) rests_where_placed: bool,
     /// Set when some edge or cell has a `torn` mark: the tearing pass at the end of the step

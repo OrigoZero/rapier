@@ -575,6 +575,68 @@ impl SoftBodySet {
         true
     }
 
+    /// Carries soft body `handle` as a whole: every particle is turned by `rotation` about `pivot`
+    /// and moved by `translation`, its velocity turned with it (and a pinned particle's target
+    /// carried with it), and every free particle's velocity is changed by `velocity_change`. The
+    /// cells and clusters turn with the particles and each live cluster's proxy body stands at
+    /// the frame the carried particles give, so a read of the body's frame answers for where it
+    /// was carried. The positions the sleep rule measures the next step's travel from are carried
+    /// too, so the carry is no travel of the body's own.
+    ///
+    /// The sleep state is left as it is: an awake body keeps the time it has spent still toward
+    /// falling asleep, and a sleeping body given no velocity change sleeps on where it was
+    /// carried, through the contacts it begins there with bodies that are not moving. A sleeping
+    /// body given a velocity change wakes. Returns `false`, changing nothing, when `handle` names
+    /// no body or a value is not a number.
+    ///
+    /// It keeps a copy of a body another simulation runs at the pose that simulation states,
+    /// correcting the copy's drift without disturbing its own motion or its rest.
+    #[cfg(feature = "dim3")]
+    pub fn carry(
+        &mut self,
+        handle: SoftBodyHandle,
+        pivot: Vector,
+        rotation: crate::math::Rotation,
+        translation: Vector,
+        velocity_change: Vector,
+        bodies: &mut RigidBodySet,
+        colliders: &mut ColliderSet,
+    ) -> bool {
+        let Some(sb) = self.bodies.get_mut(handle.0) else {
+            return false;
+        };
+        if !pivot.is_finite()
+            || !rotation.is_finite()
+            || !translation.is_finite()
+            || !velocity_change.is_finite()
+        {
+            return false;
+        }
+        let carried = |position: Vector| rotation * (position - pivot) + pivot + translation;
+        for p in &mut sb.particles {
+            p.position = carried(p.position);
+            p.velocity = rotation * p.velocity;
+            if p.inv_mass > 0.0 {
+                p.velocity += velocity_change;
+            }
+            p.next_position = p.next_position.map(carried);
+        }
+        for reference in &mut sb.sleep_reference {
+            *reference = carried(*reference);
+        }
+        sb.refresh_cell_rotations();
+        Self::fit_cluster_proxies(sb, bodies, colliders, false);
+        sb.positions_modified = true;
+        if sb.sleeping {
+            if velocity_change == Vector::ZERO {
+                sb.rests_where_placed = true;
+            } else {
+                sb.wake_up();
+            }
+        }
+        true
+    }
+
     /// Wakes up the given soft body (effective at the start of the next step).
     pub fn wake_up(&mut self, handle: SoftBodyHandle, bodies: &mut RigidBodySet, strong: bool) {
         if let Some(sb) = self.bodies.get_mut(handle.0) {
