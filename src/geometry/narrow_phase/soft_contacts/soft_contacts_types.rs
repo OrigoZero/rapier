@@ -50,6 +50,7 @@ impl SoftDetectionCtx<'_> {
 /// A surface element within reach of a vertex of the other surface (see [`SoftVertexPass`]):
 /// the closest point's barycentric weights on the element and the separation, skins deducted.
 /// The contact hook may edit `dir` and `dist` or disable it; the solver reports its impulse.
+#[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[derive(Copy, Clone, Debug)]
 pub struct SoftVertexCandidate {
     /// The element of the surface side.
@@ -77,6 +78,7 @@ pub struct SoftVertexCandidate {
 }
 
 /// The candidates of one surface vertex against the other side's surface.
+#[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[derive(Clone, Debug)]
 pub struct SoftVertexHits {
     /// The vertex of the vertex side.
@@ -91,6 +93,7 @@ pub struct SoftVertexHits {
 /// An edge-vs-edge contact candidate (see [`SoftEdgePass`]): the closest points of two
 /// edges, interior to both. The contact-modification hook may edit `dir` and `dist`, or
 /// disable the candidate; the soft-body solver reports the impulse it applied.
+#[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[derive(Copy, Clone, Debug)]
 pub struct SoftEdgeCandidate {
     /// The edge of the owner mesh.
@@ -119,6 +122,7 @@ pub struct SoftEdgeCandidate {
 
 /// The vertex-vs-surface pass of one side of a pair of soft surfaces: the vertices of
 /// `vertices_of` against the surface of `surface` (for a self pass, both are the same mesh).
+#[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[derive(Clone, Default, Debug)]
 pub struct SoftVertexPass {
     /// The collider whose surface the vertices are tested against.
@@ -175,6 +179,7 @@ impl SoftVertexPass {
 }
 
 /// The edge-vs-edge candidates of a pair, owned by (oriented from) `own`.
+#[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[derive(Clone, Default, Debug)]
 pub struct SoftEdgePass {
     /// The collider whose edges own the pass (the candidates' `edge` and `dir`).
@@ -193,6 +198,7 @@ pub struct SoftEdgePass {
 
 /// The volume patches of a crossed pair of closed soft surfaces (see `SoftOverlapConstraint`): the
 /// bins' own side is the surface of `own` (the pair's lower collider).
+#[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[derive(Clone, Debug)]
 pub struct SoftVolumePatch {
     /// The collider of the bins' own side.
@@ -206,6 +212,7 @@ pub struct SoftVolumePatch {
 /// The volume patch of a closed soft surface intruded by a rigid collider (see
 /// `SoftOverlapConstraint`): the bins (own side only), the surface vertices' depths in the patch
 /// (`NEG_INFINITY` outside, patch-constraint policies only), and the rigid side's CoM and rotation.
+#[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[derive(Clone, Debug)]
 pub struct SoftRigidPatch {
     pub bins: Vec<VolumeBin>,
@@ -217,6 +224,7 @@ pub struct SoftRigidPatch {
 /// A predictive contact between a surface vertex of a soft-rigid pair and the convex rigid
 /// collider: the support of the vertex itself, which an element's manifold does not give when
 /// the rigid shape wraps the element (a single closest point per element).
+#[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[derive(Copy, Clone, Debug)]
 pub(crate) struct SoftRigidVertexContact {
     /// The vertex of the soft mesh.
@@ -236,7 +244,10 @@ pub(crate) struct SoftRigidVertexContact {
     pub tangent_impulse: Vector,
 }
 
-/// The soft contacts of a soft-rigid pair beside its manifolds, rebuilt by every update.
+/// The soft contacts of a soft-rigid pair beside its manifolds, detected again by every update;
+/// each vertex contact carries the impulse the solver applied through it into the next update,
+/// which warm-starts the contact of the same vertex from it.
+#[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[derive(Clone, Default, Debug)]
 pub(crate) struct SoftRigidContacts {
     /// The predictive vertex contacts, sorted by vertex.
@@ -248,6 +259,7 @@ pub(crate) struct SoftRigidContacts {
 /// The contacts of a pair of two soft surfaces: the candidates the narrow phase detected between
 /// them, which the soft-body solver turns into constraints, rebuilt by every update of the pair.
 /// Each slot (vertex-pass, edge, then volume-bin candidates) reports the solver's impulse.
+#[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[derive(Clone, Default, Debug)]
 pub struct SoftPairContacts {
     /// Both vertex passes: the vertices of the pair's second collider against the first's

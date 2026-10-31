@@ -252,8 +252,7 @@ pub enum PairContacts {
         /// Whether some feature of one surface is within contact reach of the other, or the
         /// two surfaces cross: the pair's touching state.
         touching: bool,
-        /// The candidates (not serialized: the next update rebuilds them).
-        #[cfg_attr(feature = "serde-serialize", serde(skip))]
+        /// The candidates, with the impulse the solver applied through each at the last step.
         candidates: Box<SoftPairContacts>,
     },
 }
@@ -303,9 +302,9 @@ pub struct RigidPairContacts {
     /// world-frozen solver anchors) where the uninterrupted run would have recycled.
     pub(crate) recycle_state: Option<ContactRecycleState>,
     /// The soft contacts of a soft-rigid pair beside its manifolds (the predictive vertex
-    /// contacts and the volume patch, see `SoftRigidContacts`), rebuilt by every update; `None`
-    /// for every other pair.
-    #[cfg_attr(feature = "serde-serialize", serde(skip))]
+    /// contacts and the volume patch, see `SoftRigidContacts`), detected again by every update,
+    /// which warm-starts each vertex contact from the impulse it carried; `None` for every
+    /// other pair.
     pub(crate) soft: Option<Box<SoftRigidContacts>>,
 }
 

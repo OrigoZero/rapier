@@ -37,7 +37,6 @@ pub struct SoftBodyCluster {
     #[cfg_attr(feature = "serde-serialize", serde(default))]
     pub(crate) shape_matching: bool,
     pub(crate) shape_matching_target: Option<Pose>,
-    #[cfg_attr(feature = "serde-serialize", serde(skip))]
     pub(crate) prev_shape_matching_target: Option<Pose>,
     /// The rigid velocity gathered from the particles when the proxy was last updated: the
     /// proxy's `rb.vels` was set to exactly this, so `rb.vels - last_gather` is the external

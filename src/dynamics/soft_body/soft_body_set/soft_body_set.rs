@@ -11,6 +11,7 @@ use parry::utils::hashmap::HashMap;
 
 /// Deferred island-connectivity event emitted by [`SoftBodySet`] on insertion, removal and
 /// attachment changes, drained at the start of the next step.
+#[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[derive(Copy, Clone, Debug)]
 pub(crate) struct SoftBodyIslandEvent {
     /// The soft body whose attachment links must be updated (relinked if it still exists,
@@ -27,21 +28,12 @@ pub struct SoftBodySet {
     pub(crate) bodies: Arena<SoftBody>,
     /// Island-connectivity events (soft body inserted/removed, attachments changed), drained at
     /// the start of the next timestep.
-    #[cfg_attr(feature = "serde-serialize", serde(skip))]
     pub(crate) island_events: Vec<SoftBodyIslandEvent>,
     /// The soft bodies attached to each rigid body, with the attachment's index (rebuilt when
     /// attachments change; the island manager's adjacency).
-    #[cfg_attr(feature = "serde-serialize", serde(skip))]
     pub(crate) attached_to: HashMap<RigidBodyHandle, Vec<(SoftBodyHandle, u32)>>,
-    /// Whether `attached_to` must be rebuilt (a body with attachments was removed, or the set
-    /// was deserialized).
-    #[cfg_attr(feature = "serde-serialize", serde(skip, default = "default_true"))]
+    /// Whether `attached_to` must be rebuilt (a body with attachments was removed).
     pub(super) attached_to_stale: bool,
-}
-
-#[cfg(feature = "serde-serialize")]
-fn default_true() -> bool {
-    true
 }
 
 impl SoftBodySet {

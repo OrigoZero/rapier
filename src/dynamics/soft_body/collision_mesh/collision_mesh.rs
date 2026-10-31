@@ -103,12 +103,10 @@ pub struct SoftCollisionMesh {
     /// Whether the closed mesh is currently inside out (its signed volume, updated with the
     /// particles, has the opposite sign to the rest one): the winding is mirrored as a whole, so
     /// the outward normals flip with it.
-    #[cfg_attr(feature = "serde-serialize", serde(skip))]
     pub(crate) inverted: bool,
     /// Whether the closed mesh's signed volume is currently so far below its rest magnitude
     /// (inside the orientation hysteresis band) that the loop is likely self-crossed: part of
     /// its winding is then mirrored and no global flag can say where the outside is.
-    #[cfg_attr(feature = "serde-serialize", serde(skip))]
     pub(crate) orientation_unreliable: bool,
     /// The cell owning each element (`u32::MAX`: none), for a direct mesh: the winding of an
     /// element whose cell is inverted no longer tells where the outside is. Empty for a skinned
@@ -134,21 +132,16 @@ pub struct SoftCollisionMesh {
     /// other soft bodies' vertices): warm-start state.
     pub(crate) vertex_contacts: Vec<SoftVertexContact>,
     /// The overlap corrections' progress per pair (see `SoftOverlapState`).
-    #[cfg_attr(feature = "serde-serialize", serde(skip))]
     pub(crate) overlap_states: Vec<SoftOverlapState>,
     /// The volume contacts' warm impulses (see `SoftOverlapWarm`).
-    #[cfg_attr(feature = "serde-serialize", serde(skip))]
     pub(crate) overlap_warm: Vec<SoftOverlapWarm>,
     /// The volume constraints assembled at the last step (see `SoftVolumeContact`).
-    #[cfg_attr(feature = "serde-serialize", serde(skip))]
     pub(crate) volume_contacts: Vec<SoftVolumeContact>,
     /// Surface travel accumulated since the last self-crossing sweep (the sweep is skipped
     /// while this cannot have bridged half a skin).
-    #[cfg_attr(feature = "serde-serialize", serde(skip))]
     pub(crate) crossing_sweep_travel: Real,
     /// The surface colliders whose pair with this mesh crosses this step (its own collider
     /// for a self tangle, a partner it is tangled with): the pairs the recovery owns.
-    #[cfg_attr(feature = "serde-serialize", serde(skip))]
     pub(crate) crossed_partners: Vec<ColliderHandle>,
     /// Bumped whenever this mesh's elements change (a tear): renderers keying their mesh on it
     /// rebuild it on change.

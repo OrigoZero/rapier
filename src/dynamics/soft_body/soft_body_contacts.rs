@@ -57,6 +57,7 @@ pub(crate) struct SoftOverlapState {
 /// The impulses a volume contact accumulated in the last step, per pair and per particle (see
 /// `SoftOverlapConstraint`), plus the rigid side's: the hard constraints warm start from them
 /// before the elastic constraints of the first substep, so resting springs see the contact force.
+#[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[derive(Clone, Debug)]
 pub(crate) struct SoftOverlapWarm {
     pub other: crate::geometry::ColliderHandle,
@@ -71,6 +72,7 @@ pub(crate) struct SoftOverlapWarm {
 /// One volume constraint assembled at the last step (a bin of a pair's volume contact, see
 /// `SoftOverlapConstraint`), kept for debug rendering: center, normal (from the owner body into the
 /// other side), signed volume estimate, and every entry's position and volume gradient.
+#[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
 #[derive(Clone, Debug)]
 pub struct SoftVolumeContact {
     /// The area-weighted center of the constraint's patch.

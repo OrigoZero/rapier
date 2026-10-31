@@ -263,7 +263,6 @@ pub struct SoftBodyEdge {
     pub(crate) color: u8,
     /// Set when the edge was loaded past the material's tear threshold during the last step
     /// (or by [`crate::dynamics::SoftBody::tear_edge`]): removed by the tearing pass at the end of the step.
-    #[cfg_attr(feature = "serde-serialize", serde(skip))]
     pub(crate) torn: bool,
     /// The load of the edge as a fraction of its tear threshold, smoothed over the material's
     /// `tear_smoothing` (see [`Self::stress`]).
@@ -482,7 +481,6 @@ pub struct SoftBodyCell {
     pub(crate) color: u8,
     /// Set when the cell was strained past the material's `tear_strain` during the last step
     /// (or by [`crate::dynamics::SoftBody::tear_cell`]): removed by the tearing pass at the end of the step.
-    #[cfg_attr(feature = "serde-serialize", serde(skip))]
     pub(crate) torn: bool,
     /// The tensile strain of the cell as a fraction of its tear threshold, smoothed over the
     /// material's `tear_smoothing` (see [`Self::stress`]).

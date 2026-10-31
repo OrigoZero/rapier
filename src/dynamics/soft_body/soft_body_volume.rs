@@ -21,7 +21,6 @@ pub struct SoftVolumePiece {
     /// Whether the piece is currently turned inside out (its signed volume has the opposite sign
     /// to the rest one): its pressure target flips with it (a mirrored balloon is the same
     /// balloon).
-    #[cfg_attr(feature = "serde-serialize", serde(skip))]
     pub(crate) inverted: bool,
 }
 
