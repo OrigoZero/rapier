@@ -8,6 +8,10 @@ use crate::math::Real;
 
 use super::{SharedCtx, stage_batch};
 
+/// How many times each pass solves the multibodies' joint rows and their contacts against each
+/// other once their contacts are first solved (see [`solve_pass`]).
+const MULTIBODY_CONTACT_ROUNDS: usize = 8;
+
 /// One solve pass: joints (colored, then overflow + generic on worker 0), soft-body rows, then
 /// contact colors (parallel); returns the updated stage ordinal. `soft_update` updates the soft
 /// constraints from the poses first; `soft_warmstart` is `Some(coefficient)` to warm-start them.
@@ -355,6 +359,31 @@ pub(super) unsafe fn solve_pass(
                     true,
                     solve_friction,
                 );
+            }
+            // A contact on a link of a multibody changes every one of its coordinates, so a
+            // joint row solved before the contacts no longer holds once they are solved. The
+            // joint rows and the contacts are solved against each other again, the contacts
+            // last, so a link landing hard on its stop is held at it through the substep.
+            if has_generic_joints {
+                let joints = unsafe { &mut *ctx.joint_constraints };
+                for _ in 0..MULTIBODY_CONTACT_ROUNDS {
+                    for c in joints.generic_velocity_constraints.iter_mut() {
+                        c.solve(
+                            &joints.generic_jacobians,
+                            &mut vs.solver_bodies,
+                            &mut vs.generic_solver_vels,
+                        );
+                    }
+                    for c in contacts.generic_velocity_constraints.iter_mut() {
+                        c.solve(
+                            jac,
+                            &mut vs.solver_bodies,
+                            &mut vs.generic_solver_vels,
+                            true,
+                            solve_friction,
+                        );
+                    }
+                }
             }
         }
         sync.complete(stage, 1, 1);

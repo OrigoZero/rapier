@@ -1457,3 +1457,85 @@ fn a_stack_resting_on_a_multibody_holds_still() {
         );
     }
 }
+
+/// A heavy box (`root_mass` kg, 0.3 m by 0.2 m by 0.2 m) with a 1.5 kg forearm hinged to its end
+/// about Z, the hinge held to bend down only (its range -140° to 0°, the arm straight at its
+/// stop), dropped from `height` m onto fixed ground tilted `tilt` degrees forearm first, and
+/// stepped for 2 s at `rate` steps a second. Answers how far, in degrees, the forearm was ever
+/// bent up past its stop.
+#[cfg(feature = "dim3")]
+fn arm_landing_past_its_stop(height: Real, tilt: Real, rate: Real, root_mass: Real) -> Real {
+    let mut world = PhysicsWorld::new();
+    world.integration_parameters.dt = 1.0 / rate;
+    world.insert(
+        RigidBodyBuilder::fixed().translation(Vector::new(0.0, -0.5, 0.0)),
+        ColliderBuilder::cuboid(5.0, 0.5, 5.0).friction(0.7),
+    );
+    let turn = Rotation::from_axis_angle(Vector::Z, -tilt.to_radians());
+    let at = Vector::new(0.0, height, 0.0);
+    let (root, _) = world.insert(
+        RigidBodyBuilder::dynamic()
+            .translation(at)
+            .rotation(turn.to_scaled_axis())
+            .can_sleep(false),
+        ColliderBuilder::cuboid(0.15, 0.1, 0.1)
+            .mass(root_mass)
+            .friction(0.7),
+    );
+    let (forearm, _) = world.insert(
+        RigidBodyBuilder::dynamic()
+            .translation(at + turn * Vector::new(0.3, 0.0, 0.0))
+            .rotation(turn.to_scaled_axis())
+            .can_sleep(false),
+        ColliderBuilder::cuboid(0.15, 0.04, 0.04)
+            .mass(1.5)
+            .friction(0.7),
+    );
+    let elbow = RevoluteJointBuilder::new(Vector::Z)
+        .local_anchor1(Vector::new(0.15, 0.0, 0.0))
+        .local_anchor2(Vector::new(-0.15, 0.0, 0.0))
+        .limits([-140.0_f32.to_radians() as Real, 0.0])
+        .contacts_enabled(false);
+    world.insert_multibody_joint(root, forearm, elbow).unwrap();
+    let mut past: Real = 0.0;
+    for _ in 0..(2.0 * rate) as usize {
+        world.step();
+        let link = world.multibody_joints.rigid_body_link(forearm).unwrap();
+        let angle = world.multibody_joints[link.multibody]
+            .link(link.id)
+            .unwrap()
+            .joint
+            .coords[3];
+        past = past.max(angle.to_degrees());
+    }
+    past
+}
+
+/// A heavy multibody landing on its light forearm keeps the forearm's hinge at its stop, from
+/// every height, tilt and mass tried, at 30, 60 and 120 steps a second. The ground's contact on
+/// the forearm changes every coordinate of the multibody, and it was solved after the hinge's
+/// limit in each pass with nothing solving the limit again: the forearm was driven up to 29°
+/// past its stop as the box came down on it.
+#[test]
+#[cfg(feature = "dim3")]
+fn a_multibody_landing_on_its_forearm_keeps_the_forearm_at_its_stop() {
+    let mut failed = Vec::new();
+    for rate in [30.0 as Real, 60.0, 120.0] {
+        for height in [2.0 as Real, 4.0, 8.0] {
+            for tilt in [10.0 as Real, 20.0, 40.0] {
+                for root_mass in [40.0 as Real, 100.0, 200.0] {
+                    let past = arm_landing_past_its_stop(height, tilt, rate, root_mass);
+                    if past > 2.0 {
+                        failed.push(alloc::format!(
+                            "{rate} Hz, {height} m, {tilt}°, {root_mass} kg: {past}° past its stop"
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        failed.is_empty(),
+        "the forearm was bent past its stop: {failed:?}"
+    );
+}
