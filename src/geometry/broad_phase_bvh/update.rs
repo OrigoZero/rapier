@@ -56,6 +56,11 @@ impl BroadPhaseBvh {
             self.tree.remove(handle.into_raw_parts().0);
         }
 
+        // Pairs forgotten since the last update are deleted before this update reports
+        // any new pair, so a pair the traversal below finds again reaches the
+        // narrow-phase as a `DeletePair` followed by an `AddPair`.
+        let forgotten = self.delete_forgotten_pairs(colliders, events);
+
         let first_pass = self.tree.is_empty();
 
         self.updated_colliders.clear();
@@ -92,6 +97,31 @@ impl BroadPhaseBvh {
                 }
             }
         }
+        // A forgotten collider's leaf is re-inserted as brand-new too, so the traversal
+        // reports every pair it overlaps (the pair map no longer holds any of them).
+        for handle in &forgotten {
+            let leaf_index = handle.into_raw_parts().0;
+            if colliders[*handle].is_enabled() && self.tree.leaf_node(leaf_index).is_some() {
+                self.tree.remove(leaf_index);
+                forced_reinsertion = true;
+            }
+        }
+        // The forgotten colliders the user did not otherwise modify since the last
+        // update: their leaves are re-inserted after the modified colliders'.
+        let forgotten_unmodified: Vec<ColliderHandle> = forgotten
+            .iter()
+            .copied()
+            .filter(|handle| {
+                !colliders[*handle]
+                    .changes
+                    .contains(ColliderChanges::IN_MODIFIED_SET)
+            })
+            .collect();
+        let is_forgotten = |handle: &ColliderHandle| {
+            forgotten
+                .binary_search_by_key(&handle.into_raw_parts().0, |h| h.into_raw_parts().0)
+                .is_ok_and(|i| forgotten[i] == *handle)
+        };
 
         // The AABB (and margin) computation is the expensive part of the leaf-update
         // loop; precompute it in parallel and keep only the tree writes sequential.
@@ -107,7 +137,8 @@ impl BroadPhaseBvh {
                 || !(collider.changes.needs_broad_phase_update()
                     || collider.changes.intersects(
                         ColliderChanges::PARENT_EFFECTIVE_DOMINANCE | ColliderChanges::GROUPS,
-                    ))
+                    )
+                    || is_forgotten(modified))
             {
                 return None;
             }
@@ -135,6 +166,7 @@ impl BroadPhaseBvh {
         }
         #[cfg(not(feature = "parallel"))]
         update_workspace.extend(modified_colliders.iter().filter_map(compute_update));
+        update_workspace.extend(forgotten_unmodified.iter().filter_map(compute_update));
 
         // Small change volumes relocate moved leaves via SAH re-insertion (O(log n) per leaf):
         // tree quality maintains itself and the periodic O(tree) optimizer never runs — what keeps
@@ -602,5 +634,47 @@ impl BroadPhaseBvh {
                 }
             }
         }
+    }
+
+    /// Deletes every pair of the colliders forgotten since the last update, pushing a
+    /// `DeletePair` event for each (ordered by the pair's collider indices), and returns
+    /// the forgotten colliders that still exist, ordered by index.
+    fn delete_forgotten_pairs(
+        &mut self,
+        colliders: &ColliderSet,
+        events: &mut Vec<BroadPhasePairEvent>,
+    ) -> Vec<ColliderHandle> {
+        let mut forgotten = core::mem::take(&mut self.forgotten_colliders);
+        forgotten.retain(|handle| colliders.contains(*handle));
+
+        let mut deleted = Vec::new();
+        for handle in &forgotten {
+            let Some(others) = self.pair_adjacency.get_mut(handle.0) else {
+                continue;
+            };
+            for other in core::mem::take(others) {
+                let (h0, h1) = if handle.into_raw_parts().0 < other.into_raw_parts().0 {
+                    (*handle, other)
+                } else {
+                    (other, *handle)
+                };
+                if crate::utils::hashmap_remove(&mut self.pairs, &(h0, h1)).is_some() {
+                    if let Some(list) = self.pair_adjacency.get_mut(other.0) {
+                        if let Some(pos) = list.iter().position(|h| h == handle) {
+                            list.swap_remove(pos);
+                        }
+                    }
+                    deleted.push((h0, h1));
+                }
+            }
+        }
+
+        deleted.sort_unstable_by_key(|(h0, h1)| (h0.into_raw_parts().0, h1.into_raw_parts().0));
+        events.extend(
+            deleted
+                .into_iter()
+                .map(|(h0, h1)| BroadPhasePairEvent::DeletePair(ColliderPair::new(h0, h1))),
+        );
+        forgotten
     }
 }

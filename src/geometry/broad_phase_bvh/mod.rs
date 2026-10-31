@@ -100,6 +100,12 @@ pub struct BroadPhaseBvh {
     /// solver; consumed by [`Self::take_deferred_optimize`].
     #[cfg_attr(feature = "serde-serialize", serde(skip))]
     deferred_optimize_pending: bool,
+    /// Colliders whose pairs were forgotten through [`Self::forget_pairs_of`] since the
+    /// last `update` call, ordered by index. The next update deletes every pair each one
+    /// forms and re-inserts its leaf, so the pairs it still overlaps are reported as new
+    /// ones.
+    #[cfg_attr(feature = "serde-serialize", serde(default))]
+    forgotten_colliders: Vec<ColliderHandle>,
 }
 
 // TODO: would be interesting to try out:
@@ -228,6 +234,30 @@ impl BroadPhaseBvh {
         self.workspace = task.workspace;
     }
 
+    /// Forgets every pair the collider `handle` forms, as though it had just been added.
+    ///
+    /// The next [`Self::update`] reports each pair the collider formed as a
+    /// [`DeletePair`](crate::geometry::BroadPhasePairEvent::DeletePair), so the narrow-phase drops the pair with its
+    /// contacts and the impulses they carry into the next solve, and reports every
+    /// collider the collider's AABB overlaps then as a [`AddPair`](crate::geometry::BroadPhasePairEvent::AddPair),
+    /// which the narrow-phase builds afresh. The deletions come first, in the order of
+    /// the colliders' indices, whatever order the colliders were forgotten in.
+    ///
+    /// A body placed somewhere by the user (a teleport, a level put back where it
+    /// started) forgets the pairs of its colliders, so the step after the placement
+    /// finds its contacts the way the first step after the body was added finds them:
+    /// a scene whose every dynamic body is placed back steps as it did when it was built.
+    ///
+    /// A collider forgotten again before the next update is held once.
+    pub fn forget_pairs_of(&mut self, handle: ColliderHandle) {
+        if let Err(at) = self
+            .forgotten_colliders
+            .binary_search_by_key(&handle.into_raw_parts(), |h| h.into_raw_parts())
+        {
+            self.forgotten_colliders.insert(at, handle);
+        }
+    }
+
     /// Sets the AABB associated to the given collider.
     ///
     /// The change is immediately applied and propagated through the underlying BVH;
@@ -329,5 +359,112 @@ mod test {
                 "ball did not rest on the floor: y = {y}"
             );
         }
+    }
+
+    /// The bits of every dynamic body's pose and velocities, step after step, of a
+    /// stack of boxes struck by a ball: once from the scene as it was built, then
+    /// (in the same world) once more after every body was placed back where it
+    /// started, with or without its colliders' pairs forgotten.
+    fn stack_struck_twice(forget: bool) -> (Vec<Vec<u32>>, Vec<Vec<u32>>) {
+        let mut bodies = RigidBodySet::new();
+        let mut colliders = ColliderSet::new();
+        let mut impulse_joints = ImpulseJointSet::new();
+        let mut multibody_joints = MultibodyJointSet::new();
+        let mut soft_bodies = SoftBodySet::new();
+        let mut pipeline = PhysicsPipeline::new();
+        let mut islands = IslandManager::new();
+        let mut broad_phase = DefaultBroadPhase::new();
+        let mut narrow_phase = NarrowPhase::new();
+        let mut ccd = CCDSolver::new();
+
+        colliders.insert(ColliderBuilder::cuboid(8.0, 0.5, 8.0).translation(Vector::new(0.0, -0.5, 0.0)));
+        let mut start = Vec::new();
+        for row in 0..3 {
+            for col in 0..3 {
+                let at = Vector::new(col as f32 * 1.02 - 1.02, 0.5 + row as f32, 0.0);
+                let body = bodies.insert(RigidBodyBuilder::dynamic().translation(at).can_sleep(false));
+                colliders.insert_with_parent(ColliderBuilder::cuboid(0.5, 0.5, 0.5), body, &mut bodies);
+                start.push((body, at));
+            }
+        }
+        let ball_at = Vector::new(0.0, 1.0, 4.0);
+        let ball = bodies.insert(RigidBodyBuilder::dynamic().translation(ball_at).can_sleep(false));
+        colliders.insert_with_parent(ColliderBuilder::ball(0.4), ball, &mut bodies);
+        start.push((ball, ball_at));
+
+        let mut params = IntegrationParameters::default();
+        params.dt = 1.0 / 30.0;
+        let mut run = |bodies: &mut RigidBodySet,
+                       colliders: &mut ColliderSet,
+                       broad_phase: &mut DefaultBroadPhase| {
+            bodies[ball].set_linvel(Vector::new(0.0, 0.0, -8.0), true);
+            let mut record = Vec::new();
+            for _ in 0..90 {
+                pipeline.step(
+                    Vector::new(0.0, -9.81, 0.0),
+                    &params,
+                    &mut islands,
+                    broad_phase,
+                    &mut narrow_phase,
+                    bodies,
+                    colliders,
+                    &mut impulse_joints,
+                    &mut multibody_joints,
+                    &mut soft_bodies,
+                    &mut ccd,
+                    &(),
+                    &(),
+                );
+                let mut bits = Vec::new();
+                for (body, _) in &start {
+                    let rb = &bodies[*body];
+                    let pose = rb.position();
+                    let (t, r) = (pose.translation, pose.rotation);
+                    for v in [t.x, t.y, t.z, r.x, r.y, r.z, r.w] {
+                        bits.push(v.to_bits());
+                    }
+                    for v in [rb.linvel(), rb.angvel()] {
+                        bits.extend([v.x.to_bits(), v.y.to_bits(), v.z.to_bits()]);
+                    }
+                }
+                record.push(bits);
+            }
+            record
+        };
+
+        let first = run(&mut bodies, &mut colliders, &mut broad_phase);
+        for (body, at) in &start {
+            let rb = &mut bodies[*body];
+            rb.set_position(crate::math::Pose::from_translation(*at), true);
+            rb.set_linvel(Vector::ZERO, true);
+            rb.set_angvel(Vector::ZERO, true);
+            if forget {
+                for collider in rb.colliders() {
+                    broad_phase.forget_pairs_of(*collider);
+                }
+            }
+        }
+        let second = run(&mut bodies, &mut colliders, &mut broad_phase);
+        (first, second)
+    }
+
+    /// A scene whose every dynamic body is placed back where it started, with its
+    /// colliders' pairs forgotten, steps to the same bits as it did when it was built:
+    /// the contacts and their warm-start impulses left by the first run do not reach
+    /// the second.
+    #[test]
+    fn a_scene_placed_back_with_its_pairs_forgotten_steps_as_it_was_built() {
+        let (first, second) = stack_struck_twice(true);
+        let parted = first.iter().zip(&second).position(|(a, b)| a != b);
+        assert_eq!(parted, None, "the second run parted from the first at step {parted:?}");
+    }
+
+    /// The same scene placed back without forgetting its pairs carries the contacts
+    /// of the first run into the second, which parts from the first: what the test
+    /// above measures is the forgetting.
+    #[test]
+    fn a_scene_placed_back_keeping_its_pairs_steps_on_from_their_impulses() {
+        let (first, second) = stack_struck_twice(false);
+        assert_ne!(first, second);
     }
 }
