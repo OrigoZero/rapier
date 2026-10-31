@@ -15,7 +15,7 @@ use parry::query::sweep_toi::Sweep;
 use super::kinematic_sweeps::{KinematicPairs, KinematicStrike, solve_kinematic_sweeps};
 use super::sweeps::{
     BodyContinuousResult, CcdTargets, PseudoHitMode, SoftTies, collect_fixed_targets,
-    collect_soft_targets, is_bullet, map_bodies_parallel, sweep_fast_body,
+    collect_soft_targets, is_bullet, map_bodies_parallel, sweep_fast_body, swept_collider_aabbs,
 };
 
 /// Continuous Collision Detection solver preventing fast objects from tunneling:
@@ -23,8 +23,9 @@ use super::sweeps::{
 /// and `next_position` is clamped to the earliest impact — velocities untouched, no re-solve; the
 /// residual approach resolves next step via speculative contacts.
 ///
-/// Fast dynamic bodies sweep against fixed colliders and soft-body meshes (all but the meshes of a
-/// soft body tied to the body itself, by a particle attachment or a joint); `ccd_enabled` makes a
+/// Fast dynamic bodies sweep against fixed colliders and soft-body meshes (each where the solve
+/// left its particles; all but the meshes of a soft body tied to the body itself, by a particle
+/// attachment or a joint); `ccd_enabled` makes a
 /// bullet that also sweeps kinematic/dynamic bodies (never other bullets); mesh-like colliders are
 /// never the moving shape; compounds sweep per convex child; `max_ccd_substeps = 0` disables CCD.
 ///
@@ -208,24 +209,33 @@ impl CCDSolver {
         let (bvh, dispatcher) = (query_pipeline.bvh, query_pipeline.dispatcher);
 
         let linear_slop = params.allowed_linear_error();
+        // `next_position` isn't solved yet: each fast body sweeps to the forces/velocities
+        // integration.
+        let predicted_pose = |rb: &crate::dynamics::RigidBody| {
+            rb.pos
+                .integrate_forces_and_velocities(dt, &rb.forces, &rb.vels, &rb.mprops)
+        };
         let fast_bodies: Vec<_> = islands
             .active_bodies()
             .filter(|h| bodies[*h].ccd.ccd_active && bodies[*h].is_dynamic())
             .collect();
+        let swept: Vec<_> = fast_bodies
+            .iter()
+            .flat_map(|h| {
+                let rb = &bodies[*h];
+                swept_collider_aabbs(rb, colliders, predicted_pose(rb))
+            })
+            .collect();
+        let soft = collect_soft_targets(soft_bodies, colliders, params.prediction_distance(), &swept);
 
         let fractions = map_bodies_parallel(&fast_bodies, hooks, |handle, hooks| {
-            let rb1 = &bodies[handle];
-            // `next_position` isn't solved yet: sweep to the forces/velocities integration.
-            let predicted_body_pos =
-                rb1.pos
-                    .integrate_forces_and_velocities(dt, &rb1.forces, &rb1.vels, &rb1.mprops);
             sweep_fast_body(
                 handle,
                 bodies,
                 colliders,
                 ties,
-                predicted_body_pos,
-                CcdTargets::FullBvh(bvh),
+                predicted_pose(&bodies[handle]),
+                CcdTargets::FullBvh { bvh, soft: &soft },
                 dispatcher,
                 hooks,
                 dt,
@@ -281,8 +291,21 @@ impl CCDSolver {
 
         let mut all_results = Vec::new();
 
-        // Pass 1: fast non-bullet bodies vs fixed targets (all targets are stationary, so
-        // the bodies are independent and can run in parallel).
+        // The soft-body meshes deform every step without any scene change: gathered fresh, where
+        // the solve left their particles, for both passes.
+        let prediction = params.prediction_distance();
+        let swept: Vec<_> = non_bullets
+            .iter()
+            .chain(&bullets)
+            .flat_map(|h| {
+                let rb = &bodies[*h];
+                swept_collider_aabbs(rb, colliders, rb.pos.next_position)
+            })
+            .collect();
+        let soft = collect_soft_targets(soft_bodies, colliders, prediction, &swept);
+
+        // Pass 1: fast non-bullet bodies vs fixed targets and soft-body meshes (all targets
+        // stand still through the pass, so the bodies are independent and can run in parallel).
         {
             let query_pipeline = broad_phase.as_query_pipeline(
                 narrow_phase.query_dispatcher(),
@@ -291,9 +314,8 @@ impl CCDSolver {
                 QueryFilter::default(),
             );
             let (bvh, dispatcher) = (query_pipeline.bvh, query_pipeline.dispatcher);
-            // Non-bullet fast bodies only hit fixed targets: sweep against the (small) cached
+            // Non-bullet fast bodies only hit automatic targets: sweep against the (small) cached
             // fixed-collider list instead of the full BVH.
-            let prediction = params.prediction_distance();
             let cache_valid = self
                 .fixed_targets_cache
                 .as_ref()
@@ -304,12 +326,9 @@ impl CCDSolver {
                     collect_fixed_targets(bodies, colliders, prediction),
                 ));
             }
-            // Soft-body meshes deform every step without any scene change, so they are
-            // gathered fresh (one AABB per mesh, not a collider scan).
-            let soft = collect_soft_targets(soft_bodies, colliders, prediction);
             let targets = match &self.fixed_targets_cache.as_ref().unwrap().1 {
                 Some(fixed) => CcdTargets::Lists { fixed, soft: &soft },
-                None => CcdTargets::FullBvh(bvh),
+                None => CcdTargets::FullBvh { bvh, soft: &soft },
             };
             let results = map_bodies_parallel(&non_bullets, hooks, |handle, hooks| {
                 sweep_fast_body(
@@ -350,7 +369,7 @@ impl CCDSolver {
                         colliders,
                         ties,
                         bodies[handle].pos.next_position,
-                        CcdTargets::FullBvh(bvh),
+                        CcdTargets::FullBvh { bvh, soft: &soft },
                         dispatcher,
                         hooks,
                         dt,

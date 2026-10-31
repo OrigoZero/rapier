@@ -247,10 +247,35 @@ impl SoftCollisionMesh {
         pose: &Pose,
         shape: &mut dyn parry::shape::Shape,
     ) {
+        self.write_shape_vertices(pose, shape, |i| self.vertex(body, i));
+    }
+
+    /// Moves the vertices of `shape`, a copy of this mesh's collider shape expressed in the frame
+    /// `pose`, to where the particles of `body` stand right now ([`Self::particle_vertex`]):
+    /// parry refits the shape's BVH. The mesh's collider holds the shape the end of the last
+    /// step gave it until the end of this one; the continuous pass sweeps a fast body against
+    /// such a copy instead, so it meets the surface where the solver moved it.
+    pub(crate) fn deform_shape_to_particles(
+        &self,
+        body: &SoftBody,
+        pose: &Pose,
+        shape: &mut dyn parry::shape::Shape,
+    ) {
+        self.write_shape_vertices(pose, shape, |i| self.particle_vertex(body, i));
+    }
+
+    /// Writes `vertex(i)`, a world position, into the `i`-th vertex of `shape` (a triangle mesh
+    /// or a polyline expressed in the frame `pose`): parry refits the shape's BVH.
+    fn write_shape_vertices(
+        &self,
+        pose: &Pose,
+        shape: &mut dyn parry::shape::Shape,
+        vertex: impl Fn(usize) -> Vector,
+    ) {
         let write = |vertices: &mut [Vector]| {
             debug_assert_eq!(vertices.len(), self.vertex_count());
             for (i, v) in vertices.iter_mut().enumerate() {
-                *v = pose.inverse_transform_point(self.vertex(body, i));
+                *v = pose.inverse_transform_point(vertex(i));
             }
         };
         #[cfg(feature = "dim3")]

@@ -169,6 +169,26 @@ impl SoftCollisionMesh {
         }
     }
 
+    /// The world position the `i`-th vertex takes from the particles as they stand right now: a
+    /// direct mesh's particle, a skinned mesh's vertex blended from its cell's particles (the
+    /// position [`Self::vertex`] reads once the end of the step has moved the skin).
+    pub(crate) fn particle_vertex(&self, body: &SoftBody, i: usize) -> Vector {
+        match &self.binding {
+            SoftMeshMapping::Direct { particles } => body.particles[particles[i] as usize].position,
+            SoftMeshMapping::Skinned { bindings } => {
+                let binding = &bindings[i];
+                let Some(cell) = body.cells.get(binding.cell as usize) else {
+                    return self.vertices[i];
+                };
+                let mut position = Vector::ZERO;
+                for (vid, weight) in cell.vertices.iter().zip(&binding.weights) {
+                    position += body.particles[*vid as usize].position * *weight;
+                }
+                position
+            }
+        }
+    }
+
     /// The `i`-th vertex as cached by [`Self::refresh_vertex_cache`] (the narrow-phase passes
     /// read the cache, refreshed right before every narrow-phase update).
     #[inline]
