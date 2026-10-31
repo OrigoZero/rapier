@@ -573,15 +573,18 @@ impl GenericContactConstraintBuilder {
         jacobians: &mut DVector,
         constraint: &mut GenericContactConstraint,
     ) {
-        let link_of = |handle: RigidBodyHandle, ndofs: usize| {
-            if ndofs == 0 {
+        // A side is a multibody link when `generate` built it as one: the same rule `update`
+        // resolves its anchors with. A link of a multibody with no freedom answers no
+        // effective mass, as it did when the constraint was built.
+        let link_of = |handle: RigidBodyHandle, solver_vel: u32, mask: u8| {
+            if solver_vel == u32::MAX || constraint.generic_constraint_mask & mask == 0 {
                 return None;
             }
             let link = multibodies.rigid_body_link(handle)?;
             Some((&multibodies[link.multibody], link.id))
         };
-        let mb1 = link_of(self.handle1, constraint.ndofs1);
-        let mb2 = link_of(self.handle2, constraint.ndofs2);
+        let mb1 = link_of(self.handle1, constraint.solver_vel1, 0b01);
+        let mb2 = link_of(self.handle2, constraint.solver_vel2, 0b10);
         if mb1.is_none() && mb2.is_none() {
             return;
         }
