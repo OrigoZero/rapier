@@ -536,6 +536,44 @@ impl Multibody {
             .extend((0..num_jacobians).map(|_| Jacobian::zeros(0)));
     }
 
+    /// The velocity-dependent dynamics of the next substep, once a substep has moved this
+    /// multibody at the generalized velocity `moved` and left it at `self.velocities`: the
+    /// links' velocities, the mass matrix and the accelerations.
+    ///
+    /// The Coriolis, centrifugal and gyroscopic forces turn the velocity a multibody carries for
+    /// the change of its mass matrix along the motion that moved it, so they belong to both
+    /// velocities: the one the configuration moved at and the one carried on. A substep moves
+    /// the multibody at the velocity its biased solve left and ends it at the velocity its
+    /// stabilization pass leaves, which takes the constraints' corrective velocity out and
+    /// solves friction. These forces, and the implicit part of the mass matrix, are read from
+    /// the links' velocities at the mean of the two; the forces that act on the generalized
+    /// velocities alone (damping, springs) read the velocity carried on, and the links'
+    /// velocities are left at it.
+    pub(crate) fn update_dynamics_after_move(
+        &mut self,
+        moved: &DVector,
+        dt: Real,
+        bodies: &mut RigidBodySet,
+    ) {
+        if self.ndofs == 0 {
+            return;
+        }
+        if *moved == self.velocities {
+            self.update_velocities(bodies);
+            self.update_mass_matrix(dt, bodies);
+            self.update_acceleration(dt, bodies);
+            return;
+        }
+        let carried = core::mem::replace(&mut self.velocities, moved.clone());
+        self.velocities += &carried;
+        self.velocities *= 0.5;
+        self.update_velocities(bodies);
+        self.velocities = carried;
+        self.update_mass_matrix(dt, bodies);
+        self.update_acceleration(dt, bodies);
+        self.update_velocities(bodies);
+    }
+
     pub(crate) fn update_acceleration(&mut self, dt: Real, bodies: &RigidBodySet) {
         if self.ndofs == 0 {
             return; // Nothing to do.
@@ -550,11 +588,7 @@ impl Multibody {
         let check_implicit_coriolis_divergence = dt * self.velocities.amax() >= 1.0e-3;
         // Generalized forces that derive from positions or external inputs
         // (gravity, user forces, spring position terms).
-        let mut pos_forces = DVector::zeros(if check_implicit_coriolis_divergence {
-            self.ndofs
-        } else {
-            0
-        });
+        let mut pos_forces = DVector::zeros(self.ndofs);
 
         // Eqn 42 to 45
         for i in 0..self.links.len() {
@@ -617,15 +651,13 @@ impl Multibody {
                 1.0,
             );
 
-            if check_implicit_coriolis_divergence {
-                let applied_forces = Force::new(rb.forces.force, rb.forces.torque);
-                pos_forces.gemv_tr(
-                    1.0,
-                    &self.body_jacobians[i],
-                    applied_forces.as_vector(),
-                    1.0,
-                );
-            }
+            let applied_forces = Force::new(rb.forces.force, rb.forces.torque);
+            pos_forces.gemv_tr(
+                1.0,
+                &self.body_jacobians[i],
+                applied_forces.as_vector(),
+                1.0,
+            );
         }
 
         self.accelerations
@@ -645,9 +677,7 @@ impl Multibody {
                         let rest = self.links[li].joint.spring_ref[a];
                         let spring_pos_force = -k * (q - rest);
                         self.accelerations[idx] += spring_pos_force - k * dt * self.velocities[idx];
-                        if check_implicit_coriolis_divergence {
-                            pos_forces[idx] += spring_pos_force;
-                        }
+                        pos_forces[idx] += spring_pos_force;
                     }
                     idx += 1;
                 }
@@ -669,8 +699,8 @@ impl Multibody {
 
         if check_implicit_coriolis_divergence {
             self.free_velocity_energy_guard(dt, &gen_forces, &pos_forces);
-            self.workspace.position_forces = pos_forces;
         }
+        self.workspace.position_forces = pos_forces;
     }
 
     /// The kinetic energy of the links at the generalized `velocities`, at the configuration the
