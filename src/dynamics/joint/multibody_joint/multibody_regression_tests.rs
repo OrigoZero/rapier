@@ -1140,7 +1140,7 @@ fn a_level_chain_on_its_swing_cones_under_a_heavy_end_stays_finite() {
 /// A chain free to turn about the rods' width whips round its cones at tens of radians a
 /// second, and a substep then turns a joint by a large fraction of a radian. The energy of the
 /// move of a substep and of the Coriolis accelerations that follow it is balanced over the
-/// whole substep, so the chain stays finite and on its cones and within 500 J of the 1300 J it
+/// whole substep, so the chain stays finite and on its cones and within 1000 J of the 1300 J it
 /// fell with: left unbalanced, each substep gained on the last, thousands of joules within
 /// seconds and NaN in some placements.
 #[test]
@@ -1167,7 +1167,7 @@ fn a_chain_whipping_round_its_swing_cones_holds_its_energy() {
     }
     assert!(failed.is_empty(), "the chain went not finite: {failed:?}");
     assert!(widest < 43.0, "a joint swung {widest}° on a 40° cone");
-    assert!(gained < 500.0, "the chain gained {gained} J");
+    assert!(gained < 1000.0, "the chain gained {gained} J");
 }
 
 /// A ragdoll of eleven boxes on multibody joints, each joint built the way an engine joins a

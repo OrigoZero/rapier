@@ -23,9 +23,10 @@ use simba::simd::SimdComplexField as _;
 use crate::prelude::{GenericJoint, RigidBody};
 
 /// The largest step of its fastest coordinate over a substep (radians for an angle) at which a
-/// multibody's energy across the substep goes unread: its first-order error lies far inside
-/// [`ENERGY_HOLD_MARGIN`] below it.
-const ENERGY_HOLD_MIN_TURN: Real = 0.05;
+/// multibody's energy across the substep goes unread: its first-order error lies inside
+/// [`ENERGY_HOLD_MARGIN`] below it, and a limit stopping a joint there stops it as it would with
+/// nothing read.
+const ENERGY_HOLD_MIN_TURN: Real = 0.08;
 /// The fraction of its kinetic energy a multibody may gain over a substep past what the forces
 /// on it did, for the rounding and the first-order error of a healthy substep.
 const ENERGY_HOLD_MARGIN: Real = 1.0e-3;
