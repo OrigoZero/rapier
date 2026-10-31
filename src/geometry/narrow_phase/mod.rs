@@ -19,7 +19,7 @@ use crate::data::Coarena;
 use crate::dynamics::solver::solver_contact_graph::{
     GENERIC_BUCKET, SolverContactGraph, bucket_id,
 };
-use crate::dynamics::{IslandManager, RigidBodySet};
+use crate::dynamics::{IslandManager, RigidBodySet, SoftBodySet};
 use crate::geometry::{
     ColliderGraphIndex, ColliderHandle, ColliderSet, ContactData, ContactManifoldData, ContactPair,
     InteractionGraph, IntersectionPair, SolverFlags,
@@ -48,6 +48,29 @@ enum PairRemovalMode {
     FromContactGraph,
     FromIntersectionGraph,
     Auto,
+}
+
+/// Whether a contact between the bodies `h1` and `h2` begins because a soft body was put at rest
+/// in it (`SoftBody::rests_where_placed`) while neither side moves: nothing moved into that
+/// contact, so its start wakes neither side.
+fn placed_contact(
+    bodies: &RigidBodySet,
+    soft_bodies: Option<&SoftBodySet>,
+    h1: Option<crate::dynamics::RigidBodyHandle>,
+    h2: Option<crate::dynamics::RigidBodyHandle>,
+) -> bool {
+    let sides = [h1, h2].map(|h| h.and_then(|h| bodies.get(h)));
+    let moving = sides
+        .iter()
+        .flatten()
+        .any(|rb| !rb.is_fixed() && !rb.activation.sleeping);
+    let placed = sides.iter().flatten().any(|rb| {
+        rb.is_soft_frame()
+            && soft_bodies
+                .and_then(|soft_bodies| soft_bodies.get(rb.soft_body))
+                .is_some_and(|sb| sb.rests_where_placed)
+    });
+    placed && !moving
 }
 
 /// Strong-wakes whichever of the two bodies is a sleeping dynamic body.

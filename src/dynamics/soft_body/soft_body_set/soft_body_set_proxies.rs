@@ -223,6 +223,8 @@ pub(super) fn sync_soft_body(
     let dt = params.dt;
     // The next step's first solve starts a new contact history entry.
     sb.contact_approach_step_open = false;
+    // The step's collision detection found the contacts a placed body rests in.
+    sb.rests_where_placed = false;
     // Inactive: asleep, or disabled (then not asleep, just out of the simulation).
     let sleeping = inactive && sb.enabled;
     if sb.is_finite() {

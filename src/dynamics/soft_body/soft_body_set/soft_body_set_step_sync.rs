@@ -571,6 +571,7 @@ impl SoftBodySet {
         sb.modified = false;
         sb.positions_modified = true;
         sb.sleep_reference.clear();
+        sb.rests_where_placed = true;
         true
     }
 

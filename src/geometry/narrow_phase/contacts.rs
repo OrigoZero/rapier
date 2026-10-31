@@ -9,7 +9,7 @@ use super::pair_update::{
 use super::soft_contacts::SoftDetectionCtx;
 use super::{
     NarrowPhase, assign_pair_solver_color, clear_pair_solver_color, collect_pairs_to_update,
-    pack_color_body_info, strong_wake_sleeping_side, unpack_color_body_info,
+    pack_color_body_info, placed_contact, strong_wake_sleeping_side, unpack_color_body_info,
 };
 use crate::alloc_prelude::*;
 use crate::dynamics::{
@@ -180,7 +180,14 @@ impl NarrowPhase {
         }
 
         #[cfg(not(feature = "parallel"))]
-        self.apply_pair_transitions(&mut transitions, islands, bodies, colliders, events);
+        self.apply_pair_transitions(
+            &mut transitions,
+            islands,
+            bodies,
+            colliders,
+            soft_bodies.map(|(soft_bodies, _)| soft_bodies),
+            events,
+        );
 
         #[cfg(feature = "parallel")]
         {
@@ -293,7 +300,14 @@ impl NarrowPhase {
             // them so the apply pass can sort (it mutates persistent island and
             // coloring state whose layout must not depend on the schedule).
             let mut transitions: Vec<PairTransition> = rcv.iter().collect();
-            self.apply_pair_transitions(&mut transitions, islands, bodies, colliders, events);
+            self.apply_pair_transitions(
+                &mut transitions,
+                islands,
+                bodies,
+                colliders,
+                soft_bodies.map(|(soft_bodies, _)| soft_bodies),
+                events,
+            );
         }
 
         // The self contacts, once the transitions woke the bodies a new pair touches (the context
@@ -334,6 +348,7 @@ impl NarrowPhase {
         islands: &mut IslandManager,
         bodies: &mut RigidBodySet,
         colliders: &ColliderSet,
+        soft_bodies: Option<&SoftBodySet>,
         events: &dyn EventHandler,
     ) {
         transitions.sort_unstable_by_key(|&(edge_id, ..)| edge_id);
@@ -361,11 +376,16 @@ impl NarrowPhase {
                 }
             }
 
-            // Wake rule (whole-island sleep): starts wake unconditionally; stops
-            // never wake (touching implies same island, so a moving support means the
-            // island is already awake — support loss can't strand a sleeping body).
+            // Wake rule (whole-island sleep): starts wake, save one a soft body was put
+            // at rest in while neither side moves (`placed_contact`); stops never wake
+            // (touching implies same island, so a moving support means the island is
+            // already awake — support loss can't strand a sleeping body).
+            let wakes = any_active_contact
+                && !placed_contact(bodies, soft_bodies, parent1, parent2);
             if any_active_contact {
-                strong_wake_sleeping_side(islands, bodies, parent1, parent2);
+                if wakes {
+                    strong_wake_sleeping_side(islands, bodies, parent1, parent2);
+                }
                 let body_info = |h: Option<crate::dynamics::RigidBodyHandle>| {
                     h.map(|h| {
                         let rb = &bodies[h];
@@ -379,7 +399,7 @@ impl NarrowPhase {
                 ));
             }
 
-            islands.interaction_changed(bodies, parent1, parent2, any_active_contact);
+            islands.interaction_changed(bodies, parent1, parent2, wakes);
             // Persistent islands: a touching transition links/unlinks the
             // pair's contact edge (link merges the two islands).
             if any_active_contact {
