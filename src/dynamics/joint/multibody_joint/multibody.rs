@@ -17,9 +17,18 @@ use crate::utils::{AngularInertiaOps, CrossProduct, CrossProductMatrix, IndexMut
 use na::{
     self, DMatrix, DVectorView, DVectorViewMut, Dyn, LU, OMatrix, SMatrix, SVector, StorageMut,
 };
+use simba::simd::SimdComplexField as _;
 
 #[cfg(doc)]
 use crate::prelude::{GenericJoint, RigidBody};
+
+/// The largest step of its fastest coordinate over a substep (radians for an angle) at which a
+/// multibody's energy across the substep goes unread: its first-order error lies far inside
+/// [`ENERGY_HOLD_MARGIN`] below it.
+const ENERGY_HOLD_MIN_TURN: Real = 0.05;
+/// The fraction of its kinetic energy a multibody may gain over a substep past what the forces
+/// on it did, for the rounding and the first-order error of a healthy substep.
+const ENERGY_HOLD_MARGIN: Real = 1.0e-3;
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default)]
@@ -658,6 +667,73 @@ impl Multibody {
 
         if check_implicit_coriolis_divergence {
             self.free_velocity_energy_guard(dt, &gen_forces, &pos_forces);
+            self.workspace.position_forces = pos_forces;
+        }
+    }
+
+    /// The kinetic energy of the links at the generalized `velocities`, at the configuration the
+    /// body jacobians and the links' mass properties stand at.
+    fn kinetic_energy_at(&self, velocities: &DVector, bodies: &RigidBodySet) -> Real {
+        let mut energy = 0.0;
+        for i in 0..self.links.len() {
+            let rb = &bodies[self.links[i].rigid_body];
+            if !rb.is_dynamic() {
+                continue;
+            }
+            let spatial = &self.body_jacobians[i] * velocities;
+            let spatial = spatial.as_slice();
+            let linvel = Vector::from_slice(&spatial[..DIM]);
+            energy += linvel.dot(rb.mprops.effective_mass() * linvel);
+            #[cfg(feature = "dim2")]
+            {
+                energy += spatial[DIM] * spatial[DIM] * rb.mprops.effective_angular_inertia();
+            }
+            #[cfg(feature = "dim3")]
+            {
+                let angvel = Vector::from_slice(&spatial[DIM..]);
+                energy += angvel.dot(rb.mprops.effective_angular_inertia() * angvel);
+            }
+        }
+        0.5 * energy
+    }
+
+    /// The kinetic energy the links move through this substep with, at the configuration the
+    /// substep starts from, for [`Self::kinetic_energy_scale`] to hold the substep to: `None`
+    /// while the multibody turns too slowly for its discrete energy to drift, or while a
+    /// prescribed motion, which does work no generalized force states, drives it.
+    pub(crate) fn kinetic_energy_to_hold(&self, dt: Real, bodies: &RigidBodySet) -> Option<Real> {
+        if self.ndofs == 0 || dt * self.velocities.amax() < ENERGY_HOLD_MIN_TURN {
+            return None;
+        }
+        let prescribed = (0..self.links.len()).any(|i| {
+            let link = &self.links[i];
+            let rb = &bodies[link.rigid_body];
+            let held = link.joint.kinematic || !rb.is_dynamic();
+            held && (rb.vels.linvel != Vector::ZERO || rb.vels.angvel != AngVector::default())
+        });
+        (!prescribed).then(|| self.kinetic_energy_at(&self.velocities, bodies))
+    }
+
+    /// The factor that brings the free velocity of this substep (`velocities + dt · accelerations`)
+    /// down to the kinetic energy `held` the links moved through the substep before with, plus
+    /// the work of the position forces over `dt` and a margin; 1 while it stands within that.
+    ///
+    /// A step moves the links at a fixed generalized velocity and then lets the Coriolis
+    /// accelerations turn that velocity for the configuration it reached. Both are first order
+    /// in the rotation of a substep, so at a few tenths of a radian a substep they no longer cancel
+    /// and every substep leaves the chain with more energy than the last. This reads the balance
+    /// across the whole of a substep, the move included: `free_velocity_energy_guard` reads the
+    /// velocity update alone, at one configuration.
+    pub(crate) fn kinetic_energy_scale(&self, held: Real, dt: Real, bodies: &RigidBodySet) -> Real {
+        let mut free = self.velocities.clone();
+        free.axpy(dt, &self.accelerations, 1.0);
+        let energy = self.kinetic_energy_at(&free, bodies);
+        let work = dt * self.velocities.dot(&self.workspace.position_forces);
+        let allowed = (held + work.max(0.0)) * (1.0 + ENERGY_HOLD_MARGIN);
+        if energy > allowed {
+            (allowed / energy).simd_sqrt()
+        } else {
+            1.0
         }
     }
 
