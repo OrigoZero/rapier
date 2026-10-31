@@ -49,11 +49,9 @@ pub struct SoftBody {
     pub(crate) enabled: bool,
     /// Set by the setters that move particles between steps (positions, pinning): the colliders
     /// are updated at the start of the next step so the narrow phase sees the new geometry.
-    #[cfg_attr(feature = "serde-serialize", serde(skip))]
     pub(crate) positions_modified: bool,
     /// Set when the attachments changed since the last step: the island links are updated at
     /// the start of the next step.
-    #[cfg_attr(feature = "serde-serialize", serde(skip))]
     pub(crate) attachments_modified: bool,
     pub(crate) edges: Vec<SoftBodyEdge>,
     #[cfg(feature = "dim3")]
@@ -113,16 +111,13 @@ pub struct SoftBody {
     /// Set by the setters that change the dynamics (material, volume factor, shape matching...):
     /// the pipeline wakes the soft body up at the start of the next step so the change takes
     /// effect even if it was sleeping.
-    #[cfg_attr(feature = "serde-serialize", serde(skip))]
     pub(crate) modified: bool,
     /// Set by the solver when a cell flowed plastically by a significant amount during the last
     /// step: the body is kept awake so its creep goes on.
-    #[cfg_attr(feature = "serde-serialize", serde(skip))]
     pub(crate) plastic_flowing: bool,
     /// Set when the elements flowed plastically: the particles' rest positions are fitted to the
     /// flowed rest shapes at the end of the step, over the following steps until they settle
     /// (see `SoftBody::fit_rest_positions`).
-    #[cfg_attr(feature = "serde-serialize", serde(skip))]
     pub(crate) rest_fit_pending: bool,
     /// The speed the sleep rule reads for this body's cluster proxies: the farthest any particle
     /// moved over the last step, divided by the step's length, or `Real::MAX` while the body
@@ -135,11 +130,9 @@ pub struct SoftBody {
     /// [`Self::sleep_speed`] measures the next step's travel from. Empty until the body's first
     /// step, and after its particles were placed by `SoftBodySet::rest_at`; a reference whose
     /// length differs from the particles' (a tear or a cut changed them) is not read.
-    #[cfg_attr(feature = "serde-serialize", serde(skip))]
     pub(crate) sleep_reference: Vec<Vector>,
     /// Set when some edge or cell has a `torn` mark: the tearing pass at the end of the step
     /// removes them (see `SoftBodySet::tear`).
-    #[cfg_attr(feature = "serde-serialize", serde(skip))]
     pub(crate) tearing_pending: bool,
     /// Bumped whenever the topology changes (a tear removed elements or duplicated particles):
     /// renderers keying their meshes on the particles and elements rebuild them on change.
@@ -153,7 +146,6 @@ pub struct SoftBody {
     pub(crate) contact_approach_speeds: [Option<Real>; 2],
     /// Set by the first solve of a step, which shifted `contact_approach_speeds`: the step's later
     /// CCD passes merge into its entry. Cleared by the end-of-step sync.
-    #[cfg_attr(feature = "serde-serialize", serde(skip))]
     pub(crate) contact_approach_step_open: bool,
     /// Total normal impulse of the surface's contact constraints over the last step, and the extra
     /// substeps currently requested from that load (see `sync_particle_positions`).
@@ -163,19 +155,15 @@ pub struct SoftBody {
     pub(crate) load_extra_substeps: u8,
     /// The particles whose state the solver keeps at the end of every substep
     /// ([`Self::set_recorded_particles`]), sorted and unique.
-    #[cfg_attr(feature = "serde-serialize", serde(skip))]
     pub(crate) recorded_particles: Vec<u32>,
     /// The state each recorded particle ended each substep of the last step the solver moved
     /// this body in, substep-major: `substep_particles[k * recorded + r]` is the velocity and
     /// position of `recorded_particles[r]` after substep `k`.
-    #[cfg_attr(feature = "serde-serialize", serde(skip))]
     pub(crate) substep_particles: Vec<(Vector, Vector)>,
     /// The length of the substeps `substep_particles` holds.
-    #[cfg_attr(feature = "serde-serialize", serde(skip))]
     pub(crate) substep_particles_dt: Real,
     /// The velocity the impulses applied since [`Self::clear_impulse_particles`] gave each
     /// recorded particle, parallel to `recorded_particles` ([`Self::impulse_particles`]).
-    #[cfg_attr(feature = "serde-serialize", serde(skip))]
     pub(crate) impulse_particles: Vec<Vector>,
     /// The soft body this one was split off from by a tear or a cut (see
     /// [`Self::origin`]).
