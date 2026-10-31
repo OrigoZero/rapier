@@ -167,15 +167,29 @@ impl VelocitySolver {
                 .generic_solver_vels
                 .rows(multibody.solver_id as usize, multibody.ndofs());
             multibody.velocities.copy_from(&solver_vels);
+            let energy = multibody.kinetic_energy_to_hold(params.dt, bodies);
+            let refresh = !is_last_substep || energy.is_some();
             multibody.integrate(params.dt);
             multibody.forward_kinematics(bodies, false);
-            multibody.update_rigid_bodies_internal(bodies, !is_last_substep, true, false);
+            multibody.update_rigid_bodies_internal(bodies, refresh, true, false);
 
-            if !is_last_substep {
+            if refresh {
                 multibody.update_velocities(bodies);
                 multibody.update_mass_matrix(params.dt, bodies);
                 multibody.update_acceleration(params.dt, bodies);
-
+            }
+            if let Some(energy) = energy {
+                let scale = multibody.kinetic_energy_scale(energy, params.dt, bodies);
+                if scale < 1.0 {
+                    multibody.velocities *= scale;
+                    multibody.accelerations *= scale;
+                    let mut solver_vels = self
+                        .generic_solver_vels
+                        .rows_mut(multibody.solver_id as usize, multibody.ndofs());
+                    solver_vels *= scale;
+                }
+            }
+            if !is_last_substep {
                 let mut solver_vels_incr = self
                     .generic_solver_vels_increment
                     .rows_mut(multibody.solver_id as usize, multibody.ndofs());

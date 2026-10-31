@@ -1010,17 +1010,44 @@ fn multibody_contacts_step_the_same_whatever_contacts_elsewhere_were_removed() {
     assert_eq!(run(false), run(true), "a body removed elsewhere");
 }
 
+/// How a chain of [`level_coned_chain`] fell.
+#[cfg(feature = "dim3")]
+struct ConedChainFall {
+    /// The step a link's pose first read not finite at, if one did.
+    not_finite_at: Option<usize>,
+    /// The widest any joint swung before that, in degrees.
+    widest_swing: Real,
+    /// The most the links' kinetic and potential energy stood above where it started, in joules.
+    energy_gain: Real,
+}
+
+/// The kinetic and potential energy of `links` under `gravity`.
+#[cfg(feature = "dim3")]
+fn links_energy(bodies: &RigidBodySet, links: &[RigidBodyHandle], gravity: Vector) -> Real {
+    links
+        .iter()
+        .map(|link| {
+            let body = &bodies[*link];
+            let (linvel, angvel) = (body.linvel(), body.angvel());
+            let inertia = body.mass_properties().local_mprops;
+            let principal_axes = *body.rotation() * inertia.principal_inertia_local_frame;
+            let local = principal_axes.inverse() * angvel;
+            0.5 * body.mass() * linvel.dot(linvel)
+                + 0.5 * angvel.dot(principal_axes * (inertia.principal_inertia() * local))
+                - body.mass() * gravity.dot(body.mass_properties().world_com)
+        })
+        .sum()
+}
+
 /// A level chain of eight thin rods (0.4 m by 0.1 m along X, 1 kg each, 10 kg the last)
 /// joined by spherical joints whose swing is held to a 40° cone about the joint frames' X
 /// axis, which `frame` turns from the rods' length, hung from a fixed root at `at` and let fall
-/// for 5 s at `rate` steps a second. Returns the step a link's pose first read not finite at,
-/// if one did, and the widest any joint swung before it.
+/// for 5 s at `rate` steps a second under a gravity pulled `side` m/s² along Z.
 #[cfg(feature = "dim3")]
-fn level_coned_chain(at: Vector, rate: Real, frame: Rotation) -> (Option<usize>, Real) {
+fn level_coned_chain(at: Vector, rate: Real, frame: Rotation, side: Real) -> ConedChainFall {
     let mut world = PhysicsWorld::new();
     world.integration_parameters.dt = 1.0 / rate;
-    // A breath of sideways pull, so the chain does not fall in one exact plane.
-    world.gravity.z = 0.01;
+    world.gravity.z = side;
     let (root, _) = world.insert(
         RigidBodyBuilder::fixed().translation(at),
         ColliderBuilder::cuboid(0.2, 0.2, 0.2),
@@ -1052,21 +1079,30 @@ fn level_coned_chain(at: Vector, rate: Real, frame: Rotation) -> (Option<usize>,
         links.push(link);
         above = link;
     }
-    let mut widest: Real = 0.0;
+    let start = links_energy(&world.bodies, &links, world.gravity);
+    let mut fall = ConedChainFall {
+        not_finite_at: None,
+        widest_swing: 0.0,
+        energy_gain: 0.0,
+    };
     for step in 0..(5.0 * rate) as usize {
         world.step();
+        let energy = links_energy(&world.bodies, &links, world.gravity);
+        fall.energy_gain = fall.energy_gain.max(energy - start);
         for (k, link) in links.iter().enumerate() {
             let pose = *world.bodies[*link].position();
             if !pose.translation.is_finite() || !pose.rotation.is_finite() {
-                return (Some(step), widest);
+                fall.not_finite_at = Some(step);
+                return fall;
             }
             let parent = if k == 0 { root } else { links[k - 1] };
             let rel = world.bodies[parent].rotation().inverse() * pose.rotation;
             let axis = frame * Vector::X;
-            widest = widest.max(axis.dot(rel * axis).clamp(-1.0, 1.0).acos().to_degrees());
+            let swing = axis.dot(rel * axis).clamp(-1.0, 1.0).acos().to_degrees();
+            fall.widest_swing = fall.widest_swing.max(swing);
         }
     }
-    (None, widest)
+    fall
 }
 
 /// A chain lying on the swing cones of its joints under a heavy end load stays finite and
@@ -1086,9 +1122,10 @@ fn a_level_chain_on_its_swing_cones_under_a_heavy_end_stays_finite() {
         for rate in [60.0, 30.0] {
             for i in 0..8 {
                 let at = Vector::new(-30.0 + 5.0 * i as Real, 8.0 + (i % 3) as Real, 0.0);
-                let (nan, swing) = level_coned_chain(at, rate, frame);
-                widest = widest.max(swing);
-                if let Some(step) = nan {
+                // A breath of sideways pull, so the chain does not fall in one exact plane.
+                let fall = level_coned_chain(at, rate, frame, 0.01);
+                widest = widest.max(fall.widest_swing);
+                if let Some(step) = fall.not_finite_at {
                     failed.push(alloc::format!(
                         "cone {name} the rods, {rate} Hz at {at:?}: step {step}"
                     ));
@@ -1098,6 +1135,39 @@ fn a_level_chain_on_its_swing_cones_under_a_heavy_end_stays_finite() {
     }
     assert!(failed.is_empty(), "the chain went not finite: {failed:?}");
     assert!(widest < 43.0, "a joint swung {widest}° on a 40° cone");
+}
+
+/// A chain free to turn about the rods' width whips round its cones at tens of radians a
+/// second, and a substep then turns a joint by a large fraction of a radian. The energy of the
+/// move of a substep and of the Coriolis accelerations that follow it is balanced over the
+/// whole substep, so the chain stays finite and on its cones and within 500 J of the 1300 J it
+/// fell with: left unbalanced, each substep gained on the last, thousands of joules within
+/// seconds and NaN in some placements.
+#[test]
+#[cfg(feature = "dim3")]
+fn a_chain_whipping_round_its_swing_cones_holds_its_energy() {
+    let across = Rotation::from_axis_angle(Vector::Z, core::f32::consts::FRAC_PI_2 as Real);
+    let mut failed = Vec::new();
+    let mut widest: Real = 0.0;
+    let mut gained: Real = 0.0;
+    for side in [0.1, 0.3, 1.0] {
+        for rate in [30.0, 60.0] {
+            for i in 0..12 {
+                let at = Vector::new(-30.0 + 5.0 * i as Real, 8.0, 0.0);
+                let fall = level_coned_chain(at, rate, across, side);
+                widest = widest.max(fall.widest_swing);
+                gained = gained.max(fall.energy_gain);
+                if let Some(step) = fall.not_finite_at {
+                    failed.push(alloc::format!(
+                        "{side} m/s², {rate} Hz at {at:?}: step {step}"
+                    ));
+                }
+            }
+        }
+    }
+    assert!(failed.is_empty(), "the chain went not finite: {failed:?}");
+    assert!(widest < 43.0, "a joint swung {widest}° on a 40° cone");
+    assert!(gained < 500.0, "the chain gained {gained} J");
 }
 
 /// A ragdoll of eleven boxes on multibody joints, each joint built the way an engine joins a
