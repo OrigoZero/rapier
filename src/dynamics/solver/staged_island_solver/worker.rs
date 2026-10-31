@@ -559,7 +559,7 @@ pub(super) unsafe fn run_worker(ctx: &SharedCtx, worker_id: usize) {
                                     solver_bodies,
                                     multibodies,
                                     &mut contacts.generic_jacobians,
-                                    substep_id > 0,
+                                    substep_id == 0,
                                     constraint,
                                 );
                             }
@@ -671,7 +671,7 @@ pub(super) unsafe fn run_worker(ctx: &SharedCtx, worker_id: usize) {
                             &vs.solver_bodies,
                             multibodies,
                             &mut contacts.generic_jacobians,
-                            substep_id > 0,
+                            substep_id == 0,
                             c,
                         );
                         c.warmstart(

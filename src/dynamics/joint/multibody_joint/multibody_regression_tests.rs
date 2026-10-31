@@ -1312,3 +1312,78 @@ fn a_ragdoll_spawned_with_its_legs_inside_a_step_stays_finite_and_in_place() {
         "a body rose {highest} m above where the ragdoll was spawned"
     );
 }
+
+/// Five boxes stacked on a multibody's dynamic root, a slab lying on the ground with a link
+/// hinged to its side, stepped for `seconds` at `rate` steps a second in four substeps.
+/// Answers how far the top box moved over the last two seconds and how far it stands below
+/// where the stack's own heights put it, in metres.
+#[cfg(feature = "dim3")]
+fn stack_on_a_multibody(rate: Real, seconds: Real) -> (Real, Real) {
+    let mut world = PhysicsWorld::new();
+    world.integration_parameters.dt = 1.0 / rate;
+    world.integration_parameters.num_solver_iterations = 4;
+    world.insert(
+        RigidBodyBuilder::fixed().translation(Vector::new(0.0, -0.5, 0.0)),
+        ColliderBuilder::cuboid(20.0, 0.5, 20.0),
+    );
+    let (slab, _) = world.insert(
+        RigidBodyBuilder::dynamic()
+            .translation(Vector::new(0.0, 0.1, 0.0))
+            .can_sleep(false),
+        ColliderBuilder::cuboid(1.0, 0.1, 1.0).mass(10.0),
+    );
+    let (side, _) = world.insert(
+        RigidBodyBuilder::dynamic()
+            .translation(Vector::new(0.0, 0.1, 1.2))
+            .can_sleep(false),
+        ColliderBuilder::cuboid(0.1, 0.1, 0.1).mass(2.0),
+    );
+    let hinge: GenericJoint = RevoluteJointBuilder::new(Vector::X)
+        .local_anchor1(Vector::new(0.0, 0.0, 1.1))
+        .local_anchor2(Vector::new(0.0, 0.0, -0.1))
+        .contacts_enabled(false)
+        .build()
+        .into();
+    world.insert_multibody_joint(slab, side, hinge).unwrap();
+    let mut top = slab;
+    for i in 0..5 {
+        let (body, _) = world.insert(
+            RigidBodyBuilder::dynamic()
+                .translation(Vector::new(0.0, 0.45 + 0.5 * i as Real, 0.0))
+                .can_sleep(false),
+            ColliderBuilder::cuboid(0.25, 0.25, 0.25).mass(1.0),
+        );
+        top = body;
+    }
+    let steps = (seconds * rate) as usize;
+    let mut from = Vector::ZERO;
+    for step in 0..steps {
+        if step + (2.0 * rate) as usize == steps {
+            from = world.bodies[top].translation();
+        }
+        world.step();
+    }
+    let at = world.bodies[top].translation();
+    ((at - from).length(), 0.45 + 0.5 * 4.0 - at.y)
+}
+
+/// A stack of boxes resting on a multibody holds still, at 30 and 60 steps a second: its
+/// contacts with the multibody open each step with the impulses their points carry from the
+/// last, as the contacts between the boxes do. Started from no impulse at every step, the
+/// contacts holding the stack up gave way at the first substep of each one, and the top box
+/// crept 21 mm in two seconds and stood 23 mm low at 30 steps a second.
+#[test]
+#[cfg(feature = "dim3")]
+fn a_stack_resting_on_a_multibody_holds_still() {
+    for rate in [30.0 as Real, 60.0] {
+        let (moved, low) = stack_on_a_multibody(rate, 10.0);
+        assert!(
+            moved < 0.005,
+            "at {rate} Hz the top box moved {moved} m in its last two seconds"
+        );
+        assert!(
+            low < 0.01,
+            "at {rate} Hz the top box stands {low} m below the stack's height"
+        );
+    }
+}
