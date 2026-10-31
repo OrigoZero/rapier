@@ -29,8 +29,8 @@ fn is_fixed_target(rb: Option<&RigidBody>) -> bool {
 }
 
 /// Is `co` a target of the automatic (non-bullet) tier: fixed geometry, plus the deformable
-/// collision meshes of soft bodies (surfaces of no thickness, never swept, taken at their
-/// start-of-step geometry).
+/// collision meshes of soft bodies (surfaces of no thickness, never swept, taken where their
+/// particles stand as the pass runs: see [`SoftTarget`]).
 fn is_auto_target(rb: Option<&RigidBody>, co: &Collider) -> bool {
     is_fixed_target(rb) || co.is_deformable_collider()
 }
@@ -137,19 +137,26 @@ fn intersect_swept_aabb<'a>(
 }
 
 /// The targets a fast body sweeps against. Non-bullets only hit automatic targets, so flat AABB
-/// lists skip walking the shared BVH; bullets and fixed-heavy worlds use the full BVH.
+/// lists skip walking the shared BVH; bullets and fixed-heavy worlds use the full BVH. The soft
+/// targets are a list in both cases: the BVH holds a soft mesh's collider, whose shape trails its
+/// particles until the end of the step, and the sweep reads the mesh's [`SoftTarget`] instead.
 #[derive(Copy, Clone)]
 pub(super) enum CcdTargets<'a> {
-    /// Flat lists of the automatic targets and their (slightly fattened) AABBs: the cached
-    /// fixed colliders, and the soft-body collision meshes (rebuilt every step, as they deform).
+    /// Flat lists of the automatic targets: the cached fixed colliders with their (slightly
+    /// fattened) AABBs, and the soft-body collision meshes.
     Lists {
         /// The fixed colliders.
         fixed: &'a [(ColliderHandle, Aabb)],
         /// The soft-body collision meshes.
-        soft: &'a [(ColliderHandle, Aabb)],
+        soft: &'a [SoftTarget],
     },
-    /// The full broad-phase BVH.
-    FullBvh(&'a Bvh),
+    /// The full broad-phase BVH for every rigid target, and the soft-body collision meshes.
+    FullBvh {
+        /// The broad-phase BVH.
+        bvh: &'a Bvh,
+        /// The soft-body collision meshes.
+        soft: &'a [SoftTarget],
+    },
 }
 
 /// Maximum number of fixed colliders stored in the flat list before falling back to the
@@ -221,23 +228,80 @@ impl SoftTies<'_> {
     }
 }
 
-/// Collects the enabled soft-body collision meshes and their AABBs, fattened by the prediction
-/// (speculative) distance. Rebuilt every step: unlike the fixed targets, a mesh deforms with its
-/// particles without any scene change.
+/// A soft-body collision mesh as a target of the continuous pass: a copy of its collider's shape
+/// with every vertex where the particles stand as the pass runs. The collider's own shape follows
+/// the particles at the end of each step, so through the step it holds the surface where the
+/// step began; after the solve, the copy holds the surface where the solver moved it. A fast body
+/// pushing a soft body ahead of it then sweeps the surface its contacts left, as a bullet sweeps
+/// a moving rigid body at its solved pose, and a surface the solve left in its path still stops it.
+pub(super) struct SoftTarget {
+    /// The mesh's collider.
+    collider: ColliderHandle,
+    /// The AABB of the copy, fattened by the prediction (speculative) distance.
+    aabb: Aabb,
+    /// The pose of the mesh's collider, the frame the copy's vertices are expressed in.
+    pose: Pose,
+    /// The copy of the collider's shape, deformed to the particles.
+    shape: Box<dyn Shape>,
+}
+
+/// The AABBs a fast body's colliders sweep from its current pose to `end_body_pose`, the boxes
+/// [`sweep_fast_body`] gathers its candidate targets with.
+pub(super) fn swept_collider_aabbs<'a>(
+    rb: &'a RigidBody,
+    colliders: &'a ColliderSet,
+    end_body_pose: Pose,
+) -> impl Iterator<Item = Aabb> + 'a {
+    rb.colliders.0.iter().filter_map(move |ch| {
+        let co = &colliders[*ch];
+        let parent = co.parent.as_ref()?;
+        let start = rb.pos.position * parent.pos_wrt_parent;
+        let end = end_body_pose * parent.pos_wrt_parent;
+        Some(co.shape.compute_aabb(&start).merged(&co.shape.compute_aabb(&end)))
+    })
+}
+
+/// Collects the enabled soft-body collision meshes a fast body may reach as [`SoftTarget`]s,
+/// deformed to the particles as they stand: the meshes whose particles' AABB, fattened by the
+/// prediction (speculative) distance, meets one of the fast bodies' `swept` AABBs. Built for every
+/// pass: a mesh deforms with its particles without any scene change.
 pub(super) fn collect_soft_targets(
     soft_bodies: &SoftBodySet,
     colliders: &ColliderSet,
     prediction_distance: Real,
-) -> Vec<(ColliderHandle, Aabb)> {
+    swept: &[Aabb],
+) -> Vec<SoftTarget> {
     let mut soft = Vec::new();
+    if swept.is_empty() {
+        return soft;
+    }
     for (_, sb) in soft_bodies.iter() {
         for mesh in sb.meshes() {
             let ch = mesh.collider();
             let Some(co) = colliders.get(ch).filter(|co| co.is_enabled()) else {
                 continue;
             };
-            let aabb = co.shape.compute_aabb(&co.pos).loosened(prediction_distance);
-            soft.push((ch, aabb));
+            let count = mesh.vertex_count();
+            if count == 0 {
+                continue;
+            }
+            let mut aabb = Aabb::new_invalid();
+            for i in 0..count {
+                aabb.take_point(mesh.particle_vertex(sb, i));
+            }
+            let aabb = aabb.loosened(prediction_distance);
+            if !swept.iter().any(|b| b.intersects(&aabb)) {
+                continue;
+            }
+            let pose = co.pos.0;
+            let mut shape = co.shape.clone_dyn();
+            mesh.deform_shape_to_particles(sb, &pose, shape.as_mut());
+            soft.push(SoftTarget {
+                collider: ch,
+                aabb,
+                pose,
+                shape,
+            });
         }
     }
     soft
@@ -362,18 +426,18 @@ pub(super) struct BodyContinuousResult {
 /// Casts the fast collider against one target and returns the accepted impact fraction.
 /// Solid pairs stop only at strictly >0 fractions (on initial overlap, 2D retries with a core
 /// ball while 3D advances); pseudo pairs (sensors, mismatched groups) report any genuine impact.
+/// The target is `shape2` held at `target_pose`.
 #[allow(clippy::too_many_arguments)]
 fn cast_collider_pair(
     dispatcher: &dyn QueryDispatcher,
     fast: &FastColliderInfo,
-    co2: &Collider,
-    rb2: Option<&RigidBody>,
+    shape2: &dyn Shape,
+    target_pose: Pose,
     max_fraction: Real,
     dt: Real,
     linear_slop: Real,
     is_pseudo: bool,
 ) -> Option<Real> {
-    let target_pose = target_collider_pose(co2, rb2);
 
     let sub_shapes: &[FastSubShape] = match &fast.kind {
         FastShapeKind::Convex(sub) => core::slice::from_ref(sub),
@@ -382,7 +446,7 @@ fn cast_collider_pair(
             return fallback_nonlinear_fraction(
                 dispatcher,
                 fast,
-                co2,
+                shape2,
                 &target_pose,
                 max_fraction,
                 dt,
@@ -391,7 +455,6 @@ fn cast_collider_pair(
         }
     };
 
-    let shape2 = co2.shape.as_ref();
     let target = match ToiProxy::from_shape(shape2) {
         Some(proxy) => TargetKind::Proxy(proxy),
         None if is_composite_shape(shape2) => TargetKind::Composite,
@@ -401,7 +464,7 @@ fn cast_collider_pair(
             return fallback_nonlinear_fraction(
                 dispatcher,
                 fast,
-                co2,
+                shape2,
                 &target_pose,
                 max_fraction,
                 dt,
@@ -529,7 +592,7 @@ fn cast_sub_shape(
 fn fallback_nonlinear_fraction(
     dispatcher: &dyn QueryDispatcher,
     fast: &FastColliderInfo,
-    co2: &Collider,
+    shape2: &dyn Shape,
     target_pose: &Pose,
     max_fraction: Real,
     dt: Real,
@@ -555,7 +618,7 @@ fn fallback_nonlinear_fraction(
             &motion1,
             fast.collider.shape.as_ref(),
             &motion2,
-            co2.shape.as_ref(),
+            shape2,
             0.0,
             dt,
             is_pseudo, // Sensors stop at the first penetration.
@@ -585,7 +648,8 @@ pub(super) enum PseudoHitMode {
 /// pass (end pose = solved `next_position`) and the substep splitter (end pose = the
 /// forces/velocities integration, pseudo pairs ignored). Targets in `kinematic_pairs` with this
 /// body are left out: the kinematic sweeps of the pass resolved those contacts. So is the
-/// collision mesh of a soft body tied to this body (see [`SoftTies::tie`]).
+/// collision mesh of a soft body tied to this body (see [`SoftTies::tie`]). A soft-body
+/// collision mesh is swept as its [`SoftTarget`] holds it.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn sweep_fast_body(
     handle: RigidBodyHandle,
@@ -629,7 +693,9 @@ pub(super) fn sweep_fast_body(
         let end_aabb = co1.shape.compute_aabb(&end);
         let swept_aabb = start_aabb.merged(&end_aabb);
 
-        let mut handle_candidate = |ch2: ColliderHandle, co2: &Collider| {
+        // `soft`: the soft target of a soft-body collision mesh, whose shape and pose stand in
+        // for the collider's.
+        let mut handle_candidate = |ch2: ColliderHandle, co2: &Collider, soft: Option<&SoftTarget>| {
             if ch2 == *ch1 {
                 return;
             }
@@ -665,11 +731,15 @@ pub(super) fn sweep_fast_body(
             ) {
                 return;
             }
+            let (shape2, target_pose) = match soft {
+                Some(target) => (target.shape.as_ref(), target.pose),
+                None => (co2.shape.as_ref(), target_collider_pose(co2, rb2)),
+            };
             if let Some(hit_fraction) = cast_collider_pair(
                 dispatcher,
                 &fast,
-                co2,
-                rb2,
+                shape2,
+                target_pose,
                 fraction,
                 dt,
                 linear_slop,
@@ -687,18 +757,27 @@ pub(super) fn sweep_fast_body(
             }
         };
 
-        match targets {
+        let soft = match targets {
             CcdTargets::Lists { fixed, soft } => {
-                for (ch2, aabb2) in fixed.iter().chain(soft.iter()) {
+                for (ch2, aabb2) in fixed {
                     if aabb2.intersects(&swept_aabb) {
-                        handle_candidate(*ch2, &colliders[*ch2]);
+                        handle_candidate(*ch2, &colliders[*ch2], None);
                     }
                 }
+                soft
             }
-            CcdTargets::FullBvh(bvh) => {
+            CcdTargets::FullBvh { bvh, soft } => {
                 for (ch2, co2) in intersect_swept_aabb(bvh, colliders, swept_aabb) {
-                    handle_candidate(ch2, co2);
+                    if !co2.is_deformable_collider() {
+                        handle_candidate(ch2, co2, None);
+                    }
                 }
+                soft
+            }
+        };
+        for target in soft {
+            if target.aabb.intersects(&swept_aabb) {
+                handle_candidate(target.collider, &colliders[target.collider], Some(target));
             }
         }
     }
