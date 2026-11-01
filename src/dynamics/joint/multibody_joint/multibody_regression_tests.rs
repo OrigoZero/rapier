@@ -1967,3 +1967,308 @@ fn a_multibody_whose_legs_strike_a_thin_plate_first_stops_as_a_whole() {
         );
     }
 }
+
+/// The ragdoll of [`ragdoll_by_stairs`] (its knees and elbows bending the other way, 0.7
+/// friction), its pelvis' centre `height` + 0.2 m above a flight of eight stairs whose foot is at
+/// `at`, pushed by `push` N·s on its chest and stepped for five seconds at `rate` steps a second
+/// in `substeps` substeps, with `ccd_substeps` continuous-collision passes. Answers how far, in
+/// degrees, any joint went past its limit, read from the bodies' poses after every step, and how
+/// deep, in metres, any of its boxes stood in a step at the end of any step.
+#[cfg(feature = "dim3")]
+fn ragdoll_landing_on_stairs(
+    at: Vector,
+    rate: Real,
+    substeps: usize,
+    ccd_substeps: usize,
+    height: Real,
+    push: Real,
+) -> (Real, Real) {
+    let mut world = PhysicsWorld::new();
+    world.integration_parameters.dt = 1.0 / rate;
+    world.integration_parameters.num_solver_iterations = substeps;
+    world.integration_parameters.max_ccd_substeps = ccd_substeps;
+    world.integration_parameters.normalized_max_linear_velocity = Real::MAX;
+    let mut stairs = Vec::new();
+    for step in 0..8 {
+        let top = 1.6 - 0.2 * step as Real;
+        let (_, stair) = world.insert(
+            RigidBodyBuilder::fixed()
+                .translation(at + Vector::new(0.0, top * 0.5, 0.3 * step as Real + 0.15)),
+            ColliderBuilder::cuboid(1.5, top * 0.5, 0.15).friction(0.7),
+        );
+        stairs.push(stair);
+    }
+    let base = at + Vector::new(0.0, height, 0.15);
+    let mut boxes = Vec::new();
+    let mut part = |world: &mut PhysicsWorld, offset: Vector, half: Vector, mass: Real| {
+        let (body, collider) = world.insert(
+            RigidBodyBuilder::dynamic()
+                .translation(base + offset)
+                .allow_fast_rotation(true)
+                .can_sleep(false),
+            ColliderBuilder::cuboid(half.x, half.y, half.z)
+                .mass(mass)
+                .friction(0.7),
+        );
+        boxes.push(collider);
+        body
+    };
+    let frame = |axis: Vector| Rotation::from_rotation_arc(Vector::X, axis);
+    // Each joint with its swing cone (none for a hinge) and its twist or hinge range.
+    type Held = (GenericJoint, Option<Real>, [Real; 2]);
+    let ball =
+        |axis: Vector, on_parent: Vector, on_child: Vector, swing: Real, twist: Real| -> Held {
+            let mut joint: GenericJoint = SphericalJointBuilder::new()
+                .local_anchor1(on_parent)
+                .local_anchor2(on_child)
+                .contacts_enabled(false)
+                .build()
+                .into();
+            joint.local_frame1.rotation = frame(axis);
+            joint.local_frame2.rotation = frame(axis);
+            let (swing, twist) = (swing.to_radians(), twist.to_radians());
+            joint.coupled_axes |= JointAxesMask::ANG_Y | JointAxesMask::ANG_Z;
+            joint.set_limits(JointAxis::AngY, [-swing, swing]);
+            joint.set_limits(JointAxis::AngZ, [-swing, swing]);
+            joint.set_limits(JointAxis::AngX, [-twist, twist]);
+            (joint, Some(swing), [-twist, twist])
+        };
+    let hinge = |axis: Vector, on_parent: Vector, on_child: Vector| -> Held {
+        let mut joint: GenericJoint = RevoluteJointBuilder::new(Vector::X)
+            .local_anchor1(on_parent)
+            .local_anchor2(on_child)
+            .contacts_enabled(false)
+            .build()
+            .into();
+        joint.local_frame1.rotation = frame(axis);
+        joint.local_frame2.rotation = frame(axis);
+        let range = [-140.0_f32.to_radians() as Real, 0.0];
+        joint.set_limits(JointAxis::AngX, range);
+        (joint, None, range)
+    };
+    let v = Vector::new;
+    let pelvis = part(&mut world, v(0.0, 0.2, 0.0), v(0.15, 0.1, 0.1), 10.0);
+    let chest = part(&mut world, v(0.0, 0.5, 0.0), v(0.15, 0.2, 0.1), 15.0);
+    let head = part(&mut world, v(0.0, 0.8, 0.0), v(0.1, 0.1, 0.1), 5.0);
+    let mut joints = vec![
+        (
+            pelvis,
+            chest,
+            ball(Vector::Y, v(0.0, 0.1, 0.0), v(0.0, -0.2, 0.0), 30.0, 20.0),
+        ),
+        (
+            chest,
+            head,
+            ball(Vector::Y, v(0.0, 0.2, 0.0), v(0.0, -0.1, 0.0), 40.0, 30.0),
+        ),
+    ];
+    for side in [-1.0 as Real, 1.0] {
+        let upper = part(
+            &mut world,
+            v(0.3 * side, 0.65, 0.0),
+            v(0.15, 0.05, 0.05),
+            2.0,
+        );
+        let fore = part(
+            &mut world,
+            v(0.6 * side, 0.65, 0.0),
+            v(0.15, 0.04, 0.04),
+            1.5,
+        );
+        let thigh = part(
+            &mut world,
+            v(0.1 * side, -0.1, 0.0),
+            v(0.06, 0.2, 0.06),
+            6.0,
+        );
+        let shin = part(
+            &mut world,
+            v(0.1 * side, -0.5, 0.0),
+            v(0.05, 0.2, 0.05),
+            4.0,
+        );
+        joints.push((
+            chest,
+            upper,
+            ball(
+                v(side, 0.0, 0.0),
+                v(0.15 * side, 0.15, 0.0),
+                v(-0.15 * side, 0.0, 0.0),
+                70.0,
+                40.0,
+            ),
+        ));
+        joints.push((
+            upper,
+            fore,
+            hinge(
+                Vector::Z,
+                v(0.15 * side, 0.0, 0.0),
+                v(-0.15 * side, 0.0, 0.0),
+            ),
+        ));
+        joints.push((
+            pelvis,
+            thigh,
+            ball(
+                -Vector::Y,
+                v(0.1 * side, -0.1, 0.0),
+                v(0.0, 0.2, 0.0),
+                60.0,
+                30.0,
+            ),
+        ));
+        joints.push((
+            thigh,
+            shin,
+            hinge(Vector::X, v(0.0, -0.2, 0.0), v(0.0, 0.2, 0.0)),
+        ));
+    }
+    for (parent, child, (joint, _, _)) in &joints {
+        world
+            .insert_multibody_joint(*parent, *child, *joint)
+            .unwrap();
+    }
+    let link = *world.multibody_joints.rigid_body_link(chest).unwrap();
+    world
+        .multibody_joints
+        .get_multibody_mut(link.multibody)
+        .unwrap()
+        .apply_link_impulse(
+            &world.bodies,
+            link.id,
+            Vector::new(0.0, 0.0, push),
+            AngVector::ZERO,
+        );
+    let (mut past_limits, mut deepest): (Real, Real) = (0.0, 0.0);
+    for _ in 0..(5.0 * rate) as usize {
+        world.step();
+        for (parent, child, (joint, swing, range)) in &joints {
+            let f1 = *world.bodies[*parent].position() * joint.local_frame1;
+            let f2 = *world.bodies[*child].position() * joint.local_frame2;
+            let mut relative = f1.rotation.inverse() * f2.rotation;
+            if relative.w < 0.0 {
+                relative = -relative;
+            }
+            let angle = 2.0 * relative.x.atan2(relative.w);
+            let mut past = (range[0] - angle).max(angle - range[1]);
+            if let Some(cone) = swing {
+                let axis1 = f1.rotation * Vector::X;
+                let axis2 = f2.rotation * Vector::X;
+                past = past.max(axis1.dot(axis2).clamp(-1.0, 1.0).acos() - cone);
+            }
+            past_limits = past_limits.max(past.to_degrees());
+        }
+        for part in &boxes {
+            for stair in &stairs {
+                let (a, b) = (&world.colliders[*part], &world.colliders[*stair]);
+                if let Ok(Some(contact)) =
+                    parry::query::contact(a.position(), a.shape(), b.position(), b.shape(), 0.0)
+                {
+                    deepest = deepest.max(-contact.dist);
+                }
+            }
+        }
+    }
+    (past_limits, deepest)
+}
+
+/// The ragdoll of [`ragdoll_landing_on_stairs`] landing on the stairs from three heights under
+/// three pushes, at 30 steps a second in 2 substeps, with the continuous-collision pass and
+/// without it. The pass stops the ragdoll as a whole where its first box strikes a step, its
+/// joints at the same share of their motion as its root: every box ends the step where the
+/// ragdoll stood then, and none of them deeper in a step than the ragdoll's boxes go with the
+/// pass off, nor any joint further past its limit. With the pass clamping the root alone and
+/// carrying the other boxes rigidly with it, the joints' motion over the whole step stood on the
+/// stopped root: a box went 0.22 m into a step, where it went 0.155 m with the pass off, and a
+/// joint 18.4 degrees past its limit, where it went 13.1.
+#[test]
+#[cfg(feature = "dim3")]
+fn a_ragdoll_landing_on_stairs_with_the_continuous_pass_goes_no_deeper_into_them_nor_further_past_its_limits()
+ {
+    let at = Vector::new(1837.0, 20.0, 6.0);
+    let mut with = (0.0 as Real, 0.0 as Real);
+    let mut without = (0.0 as Real, 0.0 as Real);
+    for height in [2.45 as Real, 2.65, 2.85] {
+        for push in [40.0 as Real, 60.0, 80.0] {
+            let (past, deep) = ragdoll_landing_on_stairs(at, 30.0, 2, 1, height, push);
+            with = (with.0.max(past), with.1.max(deep));
+            let (past, deep) = ragdoll_landing_on_stairs(at, 30.0, 2, 0, height, push);
+            without = (without.0.max(past), without.1.max(deep));
+        }
+    }
+    assert!(
+        with.1 < without.1,
+        "with the pass a box stood {} m in a step, without it {} m",
+        with.1,
+        without.1
+    );
+    assert!(
+        with.0 < without.0,
+        "with the pass a joint went {} degrees past its limit, without it {}",
+        with.0,
+        without.0
+    );
+}
+
+/// A ball of radius 0.2 at x = -3 sliding right at `speed` on a prismatic joint from a fixed
+/// root, toward a fixed wall 0.05 m thick at x = 0, stepped for one second at 60 Hz, on a
+/// multibody joint or an impulse joint. Answers the ball's x at the end.
+#[cfg(feature = "dim3")]
+fn ball_sliding_into_a_thin_wall(multibody: bool, speed: Real) -> Real {
+    let mut world = PhysicsWorld::new();
+    world.gravity = Vector::ZERO;
+    world.integration_parameters.dt = 1.0 / 60.0;
+    world.insert(
+        RigidBodyBuilder::fixed(),
+        ColliderBuilder::cuboid(0.025, 2.0, 2.0),
+    );
+    let root =
+        world.insert_body(RigidBodyBuilder::fixed().translation(Vector::new(-3.0, 0.0, 0.0)));
+    let (ball, _) = world.insert(
+        RigidBodyBuilder::dynamic()
+            .translation(Vector::new(-3.0, 0.0, 0.0))
+            .linvel(Vector::new(speed, 0.0, 0.0))
+            .can_sleep(false),
+        ColliderBuilder::ball(0.2),
+    );
+    let joint = PrismaticJointBuilder::new(Vector::X).contacts_enabled(false);
+    if multibody {
+        world.insert_multibody_joint(root, ball, joint).unwrap();
+        let link = *world.multibody_joints.rigid_body_link(ball).unwrap();
+        let multibody = world
+            .multibody_joints
+            .get_multibody_mut(link.multibody)
+            .unwrap();
+        let id = multibody.link(link.id).unwrap().assembly_id();
+        multibody.generalized_velocity_mut()[id] = speed;
+    } else {
+        world.insert_impulse_joint(root, ball, joint);
+    }
+    for _ in 0..60 {
+        world.step();
+    }
+    world.bodies[ball].translation().x
+}
+
+/// A ball on a prismatic multibody joint from a fixed root, sliding at 30, 120 and 400 m/s into
+/// a fixed wall 0.05 m thick, ends the second in front of the wall, as the same ball on an
+/// impulse joint does: the continuous pass stops the multibody at the fraction the ball strikes,
+/// its joint at that share of its motion. With the root alone clamped, a root that does not move
+/// stopped nothing, and the ball went through the wall at every speed.
+#[test]
+#[cfg(feature = "dim3")]
+fn a_multibody_link_sliding_into_a_thin_wall_stops_in_front_of_it() {
+    for speed in [30.0 as Real, 120.0, 400.0] {
+        let impulse = ball_sliding_into_a_thin_wall(false, speed);
+        let multibody = ball_sliding_into_a_thin_wall(true, speed);
+        assert!(
+            impulse < -0.2,
+            "{speed} m/s on an impulse joint: x = {impulse}"
+        );
+        assert!(
+            multibody < -0.2,
+            "{speed} m/s on a multibody joint: x = {multibody}"
+        );
+    }
+}

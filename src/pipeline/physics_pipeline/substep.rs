@@ -59,7 +59,7 @@ impl PhysicsPipeline {
         colliders: &mut ColliderSet,
         soft_bodies: &SoftBodySet,
         impulse_joints: &ImpulseJointSet,
-        multibody_joints: &MultibodyJointSet,
+        multibody_joints: &mut MultibodyJointSet,
         broad_phase: &mut BroadPhaseBvh,
         narrow_phase: &NarrowPhase,
         ccd_solver: &mut CCDSolver,
@@ -602,6 +602,9 @@ impl PhysicsPipeline {
                 ccd_is_enabled.then(|| integration_parameters.allowed_linear_error()),
             );
             self.counters.custom.pause();
+            if ccd_is_enabled {
+                ccd_solver.record_multibody_pass_start(multibody_joints);
+            }
             self.build_islands_and_solve_velocity_constraints(
                 gravity,
                 &integration_parameters,
