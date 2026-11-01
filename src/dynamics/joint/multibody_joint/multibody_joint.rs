@@ -179,6 +179,41 @@ impl MultibodyJoint {
         }
     }
 
+    /// Sets this joint's coordinates to the share `t` of the way from `start` (its coordinates
+    /// and rotation as some motion began) to the coordinates it holds: `t = 0` puts it back at
+    /// `start`, `t = 1` leaves it as it stands. The coordinates are interpolated linearly; the
+    /// rotation of a joint free about one axis follows its angle, and of one free about more
+    /// turns along the shortest arc between the two rotations.
+    pub(crate) fn interpolate_from(&mut self, start: (SpatialVector, Rotation), t: Real) {
+        let (coords, rotation) = start;
+        for i in 0..SPATIAL_DIM {
+            self.coords[i] = coords[i] + (self.coords[i] - coords[i]) * t;
+        }
+        let locked_ang_bits = self.data.locked_axes.bits() >> DIM;
+        match ANG_DIM - locked_ang_bits.count_ones() as usize {
+            0 => {}
+            1 => {
+                let dof_id = (!locked_ang_bits).trailing_zeros() as usize;
+                #[cfg(feature = "dim2")]
+                {
+                    let _ = rotation;
+                    self.joint_rot = rotation_from_angle(self.coords[DIM + dof_id]);
+                }
+                #[cfg(feature = "dim3")]
+                {
+                    self.joint_rot = Rotation::from_axis_angle(
+                        Vector::ith(dof_id, 1.0),
+                        self.coords[DIM + dof_id],
+                    );
+                }
+            }
+            #[cfg(feature = "dim3")]
+            _ => self.joint_rot = rotation.slerp(self.joint_rot, t),
+            #[cfg(feature = "dim2")]
+            _ => unreachable!(),
+        }
+    }
+
     /// Apply a displacement to the multibody_joint.
     pub fn apply_displacement(&mut self, disp: &[Real]) {
         self.integrate(1.0, disp);

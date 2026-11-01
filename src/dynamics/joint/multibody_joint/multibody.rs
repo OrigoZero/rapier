@@ -7,8 +7,8 @@ use crate::dynamics::{
     IntegrationParameters, RigidBodyHandle, RigidBodySet, RigidBodyType, RigidBodyVelocity,
 };
 use crate::math::{
-    ANG_DIM, AngDim, AngVector, DIM, DVector, Dim, Jacobian, Pose, Real, SPATIAL_DIM,
-    SimdAngVector, Vector,
+    ANG_DIM, AngDim, AngVector, DIM, DVector, Dim, Jacobian, Pose, Real, Rotation, SPATIAL_DIM,
+    SimdAngVector, SpatialVector, Vector,
 };
 use crate::prelude::MultibodyJoint;
 #[cfg(feature = "dim3")]
@@ -1538,6 +1538,41 @@ impl Multibody {
                 }
             }
         }
+    }
+
+    /// The coordinates and rotation of every link's joint, in link order: what
+    /// [`Self::rewind_joints`] takes back to.
+    pub(crate) fn joint_states(&self) -> impl Iterator<Item = (SpatialVector, Rotation)> + '_ {
+        self.links
+            .iter()
+            .map(|link| (link.joint.coords, link.joint.joint_rot))
+    }
+
+    /// Puts this multibody where it stood `fraction` of the way through the motion that began
+    /// with its joints at `start` (from [`Self::joint_states`], one entry per link): every
+    /// joint below the root goes back to that share of its motion, a dynamic root takes the
+    /// pose its body's `next_position` holds, and every link's body ends the motion where the
+    /// multibody then stands (`next_position`).
+    pub(crate) fn rewind_joints(
+        &mut self,
+        bodies: &mut RigidBodySet,
+        start: &[(SpatialVector, Rotation)],
+        fraction: Real,
+    ) {
+        for (link, start) in self.links.iter_mut().zip(start).skip(1) {
+            link.joint.interpolate_from(*start, fraction);
+        }
+        if self.root_is_dynamic {
+            let root_pose = bodies[self.links[0].rigid_body].pos.next_position;
+            let root = &mut self.links[0].joint;
+            if root.data.locked_axes.is_empty() {
+                root.set_free_pos(root_pose);
+            } else {
+                root.data.local_frame1 = root_pose;
+            }
+        }
+        self.forward_kinematics(bodies, false);
+        self.update_rigid_bodies_internal(bodies, false, true, false);
     }
 
     // TODO: make a version that doesn’t write back to bodies and doesn’t update the jacobians
