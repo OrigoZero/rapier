@@ -1,4 +1,5 @@
 use super::LinkOrBodyRef;
+use crate::dynamics::solver::coupled_multibody_rows::RowSide;
 use crate::dynamics::solver::joint_constraint::joint_velocity_constraint::WritebackId;
 use crate::dynamics::solver::joint_constraint::{JointConstraintHelper, JointSolverBody};
 use crate::dynamics::solver::solver_body::SolverBodies;
@@ -292,6 +293,26 @@ impl GenericJointConstraint {
         solver_vels: &mut SolverBodies,
         generic_solver_vels: &mut DVector,
     ) {
+        let dvel = self.velocity_error(jacobians, solver_vels, generic_solver_vels);
+        let total_impulse = na::clamp(
+            self.impulse + self.inv_lhs * (dvel - self.cfm_gain * self.impulse),
+            self.impulse_bounds[0],
+            self.impulse_bounds[1],
+        );
+        let delta_impulse = total_impulse - self.impulse;
+        self.impulse = total_impulse;
+        self.apply_to_velocities(delta_impulse, jacobians, solver_vels, generic_solver_vels);
+    }
+
+    /// `rhs` plus the relative velocity the row's jacobians read: the value [`Self::solve`]
+    /// drives to `cfm_gain * impulse`. A positive impulse lowers it by `1 / inv_lhs - cfm_gain`
+    /// per unit.
+    pub fn velocity_error(
+        &self,
+        jacobians: &DVector,
+        solver_vels: &SolverBodies,
+        generic_solver_vels: &DVector,
+    ) -> Real {
         let jacobians = jacobians.as_slice();
 
         let solver_vel1 = self.solver_vel1(solver_vels, generic_solver_vels);
@@ -302,14 +323,30 @@ impl GenericJointConstraint {
         let j2 = DVectorView::from_slice(&jacobians[self.j_id2..], self.ndofs2);
         let vel2 = j2.dot(&solver_vel2);
 
-        let dvel = self.rhs + (vel2 - vel1);
-        let total_impulse = na::clamp(
-            self.impulse + self.inv_lhs * (dvel - self.cfm_gain * self.impulse),
-            self.impulse_bounds[0],
-            self.impulse_bounds[1],
-        );
-        let delta_impulse = total_impulse - self.impulse;
-        self.impulse = total_impulse;
+        self.rhs + (vel2 - vel1)
+    }
+
+    /// Adds `delta_impulse` to the row's impulse and applies it to the velocities it acts on.
+    pub fn apply_impulse_delta(
+        &mut self,
+        delta_impulse: Real,
+        jacobians: &DVector,
+        solver_vels: &mut SolverBodies,
+        generic_solver_vels: &mut DVector,
+    ) {
+        self.impulse += delta_impulse;
+        self.apply_to_velocities(delta_impulse, jacobians, solver_vels, generic_solver_vels);
+    }
+
+    /// Applies an impulse of `delta_impulse` along the row to the velocities it acts on.
+    fn apply_to_velocities(
+        &self,
+        delta_impulse: Real,
+        jacobians: &DVector,
+        solver_vels: &mut SolverBodies,
+        generic_solver_vels: &mut DVector,
+    ) {
+        let jacobians = jacobians.as_slice();
 
         let mut solver_vel1 = self.solver_vel1_mut(solver_vels, generic_solver_vels);
         let wj1 = DVectorView::from_slice(&jacobians[self.wj_id1()..], self.ndofs1);
@@ -318,6 +355,30 @@ impl GenericJointConstraint {
         let mut solver_vel2 = self.solver_vel2_mut(solver_vels, generic_solver_vels);
         let wj2 = DVectorView::from_slice(&jacobians[self.wj_id2()..], self.ndofs2);
         solver_vel2.axpy(-delta_impulse, &wj2, 1.0);
+    }
+
+    /// The sides of the row that act on a multibody's generalized velocities, in the form
+    /// [`crate::dynamics::solver::coupled_multibody_rows`] couples rows by: the row's error
+    /// there is `cfm_gain * impulse` minus [`Self::velocity_error`], so a positive impulse
+    /// raises it.
+    pub(crate) fn multibody_sides(&self) -> [Option<RowSide>; 2] {
+        let side1 = (self.solver_vel1 != u32::MAX && !self.is_rigid_body1).then_some(RowSide {
+            slot: self.solver_vel1,
+            ndofs: self.ndofs1,
+            j_id: self.j_id1,
+            wj_id: self.wj_id1(),
+            error_sign: 1.0,
+            impulse_sign: 1.0,
+        });
+        let side2 = (self.solver_vel2 != u32::MAX && !self.is_rigid_body2).then_some(RowSide {
+            slot: self.solver_vel2,
+            ndofs: self.ndofs2,
+            j_id: self.j_id2,
+            wj_id: self.wj_id2(),
+            error_sign: -1.0,
+            impulse_sign: -1.0,
+        });
+        [side1, side2]
     }
 
     /// Applies the impulse the row starts with to the velocities it acts on, before the row is

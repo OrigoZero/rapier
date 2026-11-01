@@ -8,6 +8,7 @@ use solver_body::SolverVel;
 
 mod categorization;
 mod contact_constraint;
+pub(crate) mod coupled_multibody_rows;
 mod interaction_groups;
 mod joint_constraint;
 pub(crate) mod manifold_store;

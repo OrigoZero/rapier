@@ -1461,12 +1461,19 @@ fn a_stack_resting_on_a_multibody_holds_still() {
 /// A heavy box (`root_mass` kg, 0.3 m by 0.2 m by 0.2 m) with a 1.5 kg forearm hinged to its end
 /// about Z, the hinge held to bend down only (its range -140° to 0°, the arm straight at its
 /// stop), dropped from `height` m onto fixed ground tilted `tilt` degrees forearm first, and
-/// stepped for 2 s at `rate` steps a second. Answers how far, in degrees, the forearm was ever
-/// bent up past its stop.
+/// stepped for 2 s at `rate` steps a second in `substeps` substeps. Answers how far, in degrees,
+/// the forearm was ever bent up past its stop.
 #[cfg(feature = "dim3")]
-fn arm_landing_past_its_stop(height: Real, tilt: Real, rate: Real, root_mass: Real) -> Real {
+fn arm_landing_past_its_stop(
+    height: Real,
+    tilt: Real,
+    rate: Real,
+    substeps: usize,
+    root_mass: Real,
+) -> Real {
     let mut world = PhysicsWorld::new();
     world.integration_parameters.dt = 1.0 / rate;
+    world.integration_parameters.num_solver_iterations = substeps;
     world.insert(
         RigidBodyBuilder::fixed().translation(Vector::new(0.0, -0.5, 0.0)),
         ColliderBuilder::cuboid(5.0, 0.5, 5.0).friction(0.7),
@@ -1512,23 +1519,29 @@ fn arm_landing_past_its_stop(height: Real, tilt: Real, rate: Real, root_mass: Re
 }
 
 /// A heavy multibody landing on its light forearm keeps the forearm's hinge at its stop, from
-/// every height, tilt and mass tried, at 30, 60 and 120 steps a second. The ground's contact on
-/// the forearm changes every coordinate of the multibody, and it was solved after the hinge's
-/// limit in each pass with nothing solving the limit again: the forearm was driven up to 29°
-/// past its stop as the box came down on it.
+/// every height, tilt and mass tried, at 30, 60 and 120 steps a second, in 2 substeps as in 4.
+/// The ground's contact on the forearm changes every coordinate of the multibody, and it was
+/// solved after the hinge's limit in each pass with nothing solving the limit again: the forearm
+/// was driven up to 29° past its stop as the box came down on it. Solved against each other row
+/// by row, the contact and the limit then passed the error between them on the forearm's share of
+/// the mass a round, and in 2 substeps a 200 kg box still drove its forearm up to 7° past.
 #[test]
 #[cfg(feature = "dim3")]
 fn a_multibody_landing_on_its_forearm_keeps_the_forearm_at_its_stop() {
     let mut failed = Vec::new();
-    for rate in [30.0 as Real, 60.0, 120.0] {
-        for height in [2.0 as Real, 4.0, 8.0] {
-            for tilt in [10.0 as Real, 20.0, 40.0] {
-                for root_mass in [40.0 as Real, 100.0, 200.0] {
-                    let past = arm_landing_past_its_stop(height, tilt, rate, root_mass);
-                    if past > 2.0 {
-                        failed.push(alloc::format!(
-                            "{rate} Hz, {height} m, {tilt}°, {root_mass} kg: {past}° past its stop"
-                        ));
+    for substeps in [2, 4] {
+        for rate in [30.0 as Real, 60.0, 120.0] {
+            for height in [2.0 as Real, 4.0, 8.0] {
+                for tilt in [10.0 as Real, 20.0, 40.0] {
+                    for root_mass in [40.0 as Real, 100.0, 200.0] {
+                        let past =
+                            arm_landing_past_its_stop(height, tilt, rate, substeps, root_mass);
+                        if past > 2.0 {
+                            failed.push(alloc::format!(
+                                "{rate} Hz x {substeps}, {height} m, {tilt}°, {root_mass} kg: \
+                                 {past}° past its stop"
+                            ));
+                        }
                     }
                 }
             }
