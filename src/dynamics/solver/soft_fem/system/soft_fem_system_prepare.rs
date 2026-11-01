@@ -100,6 +100,7 @@ impl SoftFemSystem {
                 plastic_stretch: c.plastic_stretch,
                 rest0,
                 retained: 1.0,
+                flow_work: 0.0,
             });
         }
 
@@ -212,6 +213,7 @@ impl SoftFemSystem {
                 },
                 initial_rest_length: e.initial_rest_length(),
                 material: e.material,
+                flow_work: 0.0,
             });
         }
     }
@@ -242,6 +244,7 @@ impl SoftFemSystem {
                 beta,
                 initial_rest_angle: d.initial_rest_angle(),
                 material: d.material,
+                flow_work: 0.0,
             });
         }
     }

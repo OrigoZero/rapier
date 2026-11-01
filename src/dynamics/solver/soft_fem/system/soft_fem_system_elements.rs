@@ -4,7 +4,7 @@ use super::super::soft_fem_sparse::{BlockMatrix, ConjugateGradient};
 use crate::alloc_prelude::*;
 use crate::dynamics::SoftBodyMaterial;
 use crate::dynamics::solver::soft_constraint::soft_element_constraint::{
-    MAX_CONSTRAINT_PARTICLES, StrainMatrix, StrainVector,
+    MAX_CONSTRAINT_PARTICLES, StrainMatrix, StrainVector, strain_matrix,
 };
 use crate::math::{Matrix, Real, Rotation, Vector};
 
@@ -53,6 +53,30 @@ pub(super) struct FemCell {
     /// The share of the cell's strain its substeps' flow left elastic this step: the product of
     /// `1 − share` over the flows.
     pub(super) retained: Real,
+    /// The elastic energy this step's plastic flows took out of the cell (see
+    /// [`Self::energy`]): at each flow, its energy at the substep's strain against the rest shape
+    /// it flowed from, less its energy against the one it flowed to.
+    pub(super) flow_work: Real,
+}
+
+impl FemCell {
+    /// The elastic energy `V₀ Ψ` the cell holds at the corotated strain `strain`: `½ εᵀ T ε`
+    /// with the corotational model's constant tangent, or the stable Neo-Hookean energy
+    /// `½ μ (‖S‖² − d) − μ (J − 1) + ½ λ' (J − 1)²`, `S = I + ε`, `J = det S`, `λ' = λ + μ`,
+    /// whose gradient the assembly applies (both zero at rest).
+    pub(super) fn energy(&self, strain: &StrainVector) -> Real {
+        if self.neo_hookean {
+            let s = Matrix::IDENTITY + strain_matrix(strain);
+            let norm2: Real = (0..crate::math::DIM)
+                .map(|j| s.col(j).length_squared())
+                .sum();
+            let j = s.determinant() - 1.0;
+            let lambda = self.lambda + self.mu;
+            0.5 * self.mu * (norm2 - crate::math::DIM as Real) - self.mu * j + 0.5 * lambda * j * j
+        } else {
+            0.5 * strain.dot(&(self.tangent * strain))
+        }
+    }
 }
 
 /// One volume element of a FEM soft body with the [`SoftBodyCellModel::Volume`] cell model: energy
@@ -96,6 +120,11 @@ pub(super) struct FemSpring {
     /// Index of the element's material in [`SoftFemSystem::materials`], whose edge yield and
     /// creep rate flow its rest length at every substep (see [`Self::creep`]).
     pub(super) material: u16,
+    /// The work this step's plastic flows took out of the element: its yield force times the
+    /// way each return mapping moved its rest length, and for each creep its elastic energy
+    /// `f² / 2k` at the substep's length against the rest length it flowed from, less against
+    /// the one it flowed to.
+    pub(super) flow_work: Real,
 }
 
 impl FemSpring {
@@ -125,13 +154,26 @@ impl FemSpring {
         let (push, pull) = self.yield_limits;
         let (shortest, longest) = self.rest_range;
         let trial = self.stiffness * (length - self.rest_length);
+        let from = self.rest_length;
         if trial > pull && self.rest_length < longest {
             let rest = (length - pull / self.stiffness).min(longest);
             self.rest_length = self.rest_length.max(rest);
+            self.flow_work += pull * (self.rest_length - from);
         } else if trial < -push && self.rest_length > shortest {
             let rest = (length + push / self.stiffness).max(shortest);
             self.rest_length = self.rest_length.min(rest);
+            self.flow_work += push * (from - self.rest_length);
         }
+    }
+
+    /// The elastic energy `f² / 2k` the element holds at length error `c`, its force within its
+    /// bounds (see [`Self::force`]).
+    pub(super) fn energy(&self, c: Real) -> Real {
+        if self.stiffness <= 0.0 {
+            return 0.0;
+        }
+        let force = self.force(c).0;
+        0.5 * force * force / self.stiffness
     }
 
     /// Flows the element's rest length toward `length` for the substep `dt` past `material`'s
@@ -144,7 +186,9 @@ impl FemSpring {
             material,
             dt,
         ) {
+            let held = self.energy(length - self.rest_length);
             self.rest_length = rest;
+            self.flow_work += (held - self.energy(length - rest)).max(0.0);
         }
     }
 }
@@ -165,6 +209,10 @@ pub(super) struct FemDihedral {
     /// Index of the element's material in [`SoftFemSystem::materials`], whose edge yield and
     /// creep rate flow its rest angle at every substep.
     pub(super) material: u16,
+    /// The elastic energy this step's plastic flows took out of the element: at each flow,
+    /// `½ k (θ − θ₀)²` at the substep's angle against the rest angle it flowed from, less against
+    /// the one it flowed to.
+    pub(super) flow_work: Real,
 }
 
 /// The FEM system of one soft body: the block-sparse `A`, its conjugate-gradient workspace, and
