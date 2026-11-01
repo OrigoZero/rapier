@@ -5198,15 +5198,22 @@ fn a_box_swinging_on_a_rope_tied_to_it_stays_tied() {
     }
 }
 
-/// A plastic FEM block thrown onto the ground at 8 m/s crumples and rebounds the same way at
-/// every step length that divides into the same substep: 30 steps of 8 substeps a second, 60 of
-/// 4, 120 of 2 and 240 of 1 all solve 240 substeps a second, and the block's flow follows its
-/// strain through those substeps at its creep rate, so its rebound, the permanent set it keeps
-/// and the work its flow took out of it (the cells' `flow_work`, summed over the steps) agree
-/// across them, that work less than the kinetic energy the block struck with.
+/// A plastic block thrown onto the ground at 8 m/s crumples and rebounds the same way at every
+/// step length that divides into the same substep, on either solver: 30 steps of 8 substeps a
+/// second, 60 of 4, 120 of 2 and 240 of 1 all solve 240 substeps a second, and the block's flow
+/// follows its strain through those substeps at its creep rate, so its rebound, the permanent set
+/// it keeps and the work its flow took out of it (the cells' `flow_work`, summed over the steps)
+/// agree across them, that work less than the kinetic energy the block struck with.
 #[cfg(feature = "fem")]
 #[test]
 fn plastic_flow_follows_the_substeps_at_every_step_length() {
+    for solver in [SoftBodySolver::Fem, SoftBodySolver::Constraints] {
+        plastic_flow_follows_the_substeps_on(solver);
+    }
+}
+
+#[cfg(feature = "fem")]
+fn plastic_flow_follows_the_substeps_on(solver: SoftBodySolver) {
     let crash = |rate: Real, substeps: usize| {
         let mut world = world_with_ground();
         world.integration_parameters.dt = 1.0 / rate;
@@ -5223,7 +5230,7 @@ fn plastic_flow_follows_the_substeps_at_every_step_length() {
             3,
         )
         .cell_model(SoftBodyCellModel::Corotational)
-        .solver(SoftBodySolver::Fem)
+        .solver(solver)
         .material(SoftBodyMaterial {
             young_modulus: 3.0e4,
             poisson_ratio: 0.3,
@@ -5280,14 +5287,14 @@ fn plastic_flow_follows_the_substeps_at_every_step_length() {
         .collect();
     assert!(
         works.iter().all(|&(work, kinetic)| work > 0.0 && work < kinetic),
-        "the flow work against the kinetic energy of the throw (J): {works:?}"
+        "{solver:?}: the flow work against the kinetic energy of the throw (J): {works:?}"
     );
     let (least, most) = works
         .iter()
         .fold((Real::MAX, Real::MIN), |(a, b), &(w, _)| (a.min(w), b.max(w)));
     assert!(
         (most - least) / most < 0.05,
-        "the flow work depends on the step length (J, by run): {works:?}"
+        "{solver:?}: the flow work depends on the step length (J, by run): {works:?}"
     );
     let spread = |pick: fn(&(Real, usize, Real, Real)) -> Real| {
         let (min, max) = runs
@@ -5298,14 +5305,14 @@ fn plastic_flow_follows_the_substeps_at_every_step_length() {
     };
     assert!(
         runs.iter().all(|r| r.3 > 0.02),
-        "the block kept no permanent set: {runs:?}"
+        "{solver:?}: the block kept no permanent set: {runs:?}"
     );
     assert!(
         spread(|r| r.3) < 0.1,
-        "the permanent set depends on the step length: (rate, substeps, rebound, set) {runs:?}"
+        "{solver:?}: the permanent set depends on the step length: (rate, substeps, rebound, set) {runs:?}"
     );
     assert!(
         spread(|r| r.2) < 0.15,
-        "the rebound depends on the step length: (rate, substeps, rebound, set) {runs:?}"
+        "{solver:?}: the rebound depends on the step length: (rate, substeps, rebound, set) {runs:?}"
     );
 }

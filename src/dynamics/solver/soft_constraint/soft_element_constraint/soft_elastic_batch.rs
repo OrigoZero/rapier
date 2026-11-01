@@ -192,8 +192,6 @@ pub(crate) struct SoftElasticBatch {
     rotation: Lanes33,
     /// The strain of the last update (cell frame, clamped).
     strain: [SimdReal; STRAIN_ROWS],
-    /// Whether each cell was inverted at the last update.
-    inverted: SimdBool,
     grad_vol: [Lanes3; MAX_CONSTRAINT_PARTICLES],
     rhs_vol: SimdReal,
     cfm_gain_vol: SimdReal,
@@ -326,7 +324,6 @@ impl SoftElasticBatch {
             quaternion,
             rotation: [zero3; 3],
             strain: [zero; STRAIN_ROWS],
-            inverted: SimdBool::splat(false),
             grad_vol: [zero3; MAX_CONSTRAINT_PARTICLES],
             rhs_vol: zero,
             cfm_gain_vol: zero,
@@ -336,6 +333,42 @@ impl SoftElasticBatch {
             strain_impulse,
             vol_impulse,
         }
+    }
+
+    /// Takes lane `l`'s rest shape, strain coefficients and rows from its cell `c` after the cell
+    /// flowed plastically, its strain rows keeping `retained` of their impulses (see
+    /// `flow_elastic_cell`).
+    pub fn refit_lane(&mut self, l: usize, c: &SoftElasticConstraint, retained: Real) {
+        let SoftElasticModel::Corotational(model) = &c.model else {
+            return;
+        };
+        for j in 0..3 {
+            let column = c.inv_rest_matrix.col(j);
+            for k in 0..3 {
+                self.inv_rest[j][k].replace(l, column[k]);
+            }
+        }
+        for p in 0..MAX_CONSTRAINT_PARTICLES {
+            for k in 0..3 {
+                self.coeffs[p][k].replace(l, c.coeffs[p][k]);
+            }
+        }
+        for i in 0..STRAIN_ROWS {
+            for j in i..STRAIN_ROWS {
+                self.inv_a[packed(i, j)].replace(l, c.inv_a[(i, j)]);
+            }
+        }
+        for r in 0..STRAIN_ROWS {
+            self.erp_strain[r].replace(l, model.erp_strain[r]);
+            self.cfm_strain[r].replace(l, model.cfm_strain[r]);
+            self.strain_cap[r].replace(l, c.strain_cap[r]);
+            let impulse = self.strain_impulse[r].extract(l);
+            self.strain_impulse[r].replace(l, impulse * retained);
+        }
+        self.erp_vol.replace(l, model.erp_vol);
+        self.cfm_coeff_vol.replace(l, model.cfm_coeff_vol);
+        self.vol_cap.replace(l, model.vol_cap);
+        self.volumetric.replace(l, model.volumetric);
     }
 
     /// The substep's update of every lane's cell from the particles' positions: its rotation,
@@ -368,7 +401,6 @@ impl SoftElasticBatch {
         self.rotation = r;
         let det = determinant(&f);
         let inverted = det.simd_lt(splat(0.0));
-        self.inverted = inverted;
         let one = splat(1.0);
         // `Rᵀ F - I` in strain rows, clamped: at the snap-back caps while the cell is inverted,
         // at 100 % strain (or the cap when larger) otherwise.
@@ -585,7 +617,6 @@ impl SoftElasticBatch {
         ElasticEndState {
             rotation: Rotation::from_xyzw(q[0], q[1], q[2], q[3]),
             strain: StrainVector::from_fn(|r, _| self.strain[r].extract(l)),
-            inverted: self.inverted.extract(l),
             strain_impulse: StrainVector::from_fn(|r, _| self.strain_impulse[r].extract(l)),
             vol_impulse: self.vol_impulse.extract(l),
         }
@@ -665,6 +696,7 @@ mod tests {
                 z: StrainVector::zeros(),
                 inv_s: 0.0,
             }),
+            flow: None,
         }
     }
 
@@ -731,7 +763,6 @@ mod tests {
                 c.rotation.dot(end.rotation).abs() > 1.0 - 1.0e-5,
                 "lane {l} rotation"
             );
-            assert_eq!(c.inverted, end.inverted);
         }
         for (a, b) in scalar_bodies.vels.iter().zip(&batch_bodies.vels) {
             for k in 0..3 {

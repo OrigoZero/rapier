@@ -1,6 +1,9 @@
 //! Soft-body constraints solved by the staged island solver alongside joints and contacts.
 
 pub(crate) use self::soft_constraints_set::SoftConstraintsSet;
+pub(crate) use self::soft_element_constraint_assembly::{
+    ElasticCellRows, ElasticCellTerms, elastic_cell_rows, elastic_cell_weight,
+};
 
 pub(crate) mod soft_attachment;
 pub(crate) mod soft_constraints_set;

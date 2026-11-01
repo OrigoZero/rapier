@@ -1,9 +1,7 @@
 //! Soft-body plasticity: edge flow modes, the rest-length and rest-angle flow rules, the fit of
 //! the rest positions to the flowed rest shapes, and the reset. The cells' flow rule runs on the
-//! solver's strain rows (`soft_constraints_set::plastic_flow`).
+//! solver's strain rows (`soft_constraints_set::flowed_rest_shape`).
 use crate::alloc_prelude::*;
-#[cfg(feature = "dim3")]
-use crate::dynamics::SoftBodyDihedral;
 use crate::dynamics::{SoftBody, SoftBodyCellModel, SoftBodyEdge, SoftBodyMaterial};
 use crate::math::{DIM, Matrix, Real, Vector};
 #[cfg(not(feature = "std"))]
@@ -46,34 +44,6 @@ impl SoftBodyEdge {
         self.rest_length / (1.0 + self.plastic_strain)
     }
 
-    /// Flows the rest length toward `length` when the strain exceeds the material's edge yield
-    /// ([`SoftBodyMaterial::edge_plastic_yield`]) for `dt` (see [`edge_flowed_rest_length`]).
-    /// Returns whether the edge flowed significantly (such a body is kept awake). An edge
-    /// carrying its yield force ([`SoftBodyMaterial::edge_yield_force`]) flows within the
-    /// solver's substeps instead.
-    pub(crate) fn plastic_flow(
-        &mut self,
-        length: Real,
-        material: &SoftBodyMaterial,
-        dt: Real,
-    ) -> bool {
-        let initial = self.initial_rest_length();
-        let Some(new_rest) =
-            edge_flowed_rest_length(self.rest_length, initial, length, material, dt)
-        else {
-            return false;
-        };
-        let increment = (new_rest - self.rest_length).abs() / initial;
-        // The warm-start impulse followed the old length error; it scales with what is left of it.
-        let error = length - self.rest_length;
-        if error != 0.0 {
-            self.impulse *= ((length - new_rest) / error).clamp(0.0, 1.0);
-        }
-        self.rest_length = new_rest;
-        self.plastic_strain = new_rest / initial - 1.0;
-        increment > 1.0e-4
-    }
-
     /// Moves the rest length of an actuated edge toward its target by its speed over a step of
     /// length `dt`, keeping its permanent set. Returns whether it moved.
     pub(crate) fn advance_actuator(&mut self, dt: Real) -> bool {
@@ -102,33 +72,6 @@ impl SoftBodyEdge {
 /// The share of its target an actuated edge's length may stand from it and count as there: a few
 /// ulps, what reading the length back through its permanent set rounds by.
 const ACTUATOR_REACHED: Real = 4.0 * Real::EPSILON;
-
-#[cfg(feature = "dim3")]
-impl SoftBodyDihedral {
-    /// Flows the rest angle toward the current `angle` when the fold exceeds the material's
-    /// edge yield, read in radians, for `dt` (see [`dihedral_flowed_rest_angle`]). Returns
-    /// whether the dihedral flowed by a significant amount.
-    pub(crate) fn plastic_flow(
-        &mut self,
-        angle: Real,
-        material: &SoftBodyMaterial,
-        dt: Real,
-    ) -> bool {
-        let initial = self.initial_rest_angle();
-        let Some(new_rest) =
-            dihedral_flowed_rest_angle(self.rest_angle, initial, angle, material, dt)
-        else {
-            return false;
-        };
-        let deviation = angle - self.rest_angle;
-        let increment = (new_rest - self.rest_angle).abs();
-        // The warm-start impulse followed the old angle error; it scales with what is left of it.
-        self.impulse *= ((angle - new_rest) / deviation).clamp(0.0, 1.0);
-        self.rest_angle = new_rest;
-        self.plastic_set = new_rest - initial;
-        increment > 1.0e-4
-    }
-}
 
 /// The share of the strain past the yield that becomes permanent over `dt` at `creep` per second:
 /// `1 - e^(-creep dt)`, the exact solution of a flow at that rate over the interval. Flowing in
@@ -224,7 +167,7 @@ pub struct SoftBodyPlasticState {
     pub cell_stretches: Vec<Matrix>,
     /// Each edge's plastic strain (see [`crate::dynamics::SoftBodyEdge::plastic_strain`]).
     pub edge_strains: Vec<Real>,
-    /// Each dihedral's plastic set, in radians (see [`SoftBodyDihedral::plastic_set`]).
+    /// Each dihedral's plastic set, in radians (see `SoftBodyDihedral::plastic_set`).
     pub dihedral_sets: Vec<Real>,
 }
 

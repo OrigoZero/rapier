@@ -12,15 +12,21 @@ use crate::dynamics::solver::velocity_solver::SubstepRecord;
 use crate::math::{DIM, Real, Vector};
 
 use super::super::soft_element_constraint::SoftScalarConstraintWriteback;
-#[cfg(feature = "dim3")]
-use super::super::soft_element_constraint::dihedral_gradients;
 use super::*;
 
 impl SoftConstraintsSet {
     /// Writes the accumulated impulses (and shape-matching rotations) back to the soft bodies,
-    /// applies the elastic cells' plastic flow (`dt`: the step length) and updates the elements'
-    /// smoothed tear load. SAFETY: `range` constraints write disjoint elements, one worker each.
-    pub unsafe fn writeback_constraints(&self, range: Range<usize>, dt: Real) {
+    /// with the rest shapes the substeps' plastic flow left: the last substep flows here, at the
+    /// particles' positions in `bodies` (each earlier substep flowed as the next one began, see
+    /// `solve_color_constraint`), and each element states the work its flows took out of it. It
+    /// also updates the elements' smoothed tear load (`dt`: the step length). SAFETY: `range`
+    /// constraints write disjoint elements, one worker each.
+    pub unsafe fn writeback_constraints(
+        &self,
+        range: Range<usize>,
+        bodies: &SolverBodies,
+        dt: Real,
+    ) {
         // Virtual index space: the scalar constraints first, then the elastic-cell block constraints.
         let num_scalar_constraints = self.scalar_constraints.len();
         for idx in range {
@@ -29,6 +35,13 @@ impl SoftConstraintsSet {
                 let awake = &self.awake[constraint.soft_body as usize];
                 let sb = unsafe { &mut *awake.ptr };
                 let impulse = crate::utils::canonicalize_zero(constraint.impulse);
+                // The last substep's creep, at the positions it ended at.
+                let mut flowed = *constraint;
+                if constraint.creeps
+                    && let Some(creep) = element_creep(sb, constraint)
+                {
+                    flowed.creep_at(bodies, creep, awake.substep_dt);
+                }
                 match constraint.writeback {
                     SoftScalarConstraintWriteback::Edge => {
                         let ei = constraint.element as usize;
@@ -41,24 +54,22 @@ impl SoftConstraintsSet {
                             1.0
                         };
                         let edge = &mut sb.edges[ei];
-                        edge.impulse = impulse;
-                        edge.flow_work = 0.0;
+                        edge.impulse = crate::utils::canonicalize_zero(flowed.impulse);
+                        edge.flow_work = flowed.flow_work;
                         edge.force = impulse * crate::utils::inv(awake.substep_dt);
-                        // The rest length the substeps' flow at the yield force left.
-                        if constraint.rest != edge.rest_length {
+                        // The rest length the substeps' flow left, at the yield force and past
+                        // the strain yield.
+                        if flowed.rest != edge.rest_length {
                             let initial = edge.initial_rest_length();
-                            if (constraint.rest - edge.rest_length).abs() > 1.0e-4 * initial {
+                            if (flowed.rest - edge.rest_length).abs() > 1.0e-4 * initial {
                                 awake.plastic_flow.store(true, Ordering::Relaxed);
                             }
-                            edge.rest_length = constraint.rest;
-                            edge.plastic_strain = constraint.rest / initial - 1.0;
-                        }
-                        // Length as seen at the last substep's update.
-                        let len = (constraint.pos[1] - constraint.pos[0]).length();
-                        if edge.plastic_flow(len, &material, dt) {
-                            awake.plastic_flow.store(true, Ordering::Relaxed);
+                            edge.rest_length = flowed.rest;
+                            edge.plastic_strain = flowed.rest / initial - 1.0;
                         }
                         if tears {
+                            // Length as seen at the last substep's update.
+                            let len = (constraint.pos[1] - constraint.pos[0]).length();
                             // The force is the step's peak substep impulse over the substep length
                             // (a spike must not hide behind the last substep), the pull's for the
                             // tear force and the push's for the crush force; the stretch is
@@ -80,17 +91,17 @@ impl SoftConstraintsSet {
                     }
                     #[cfg(feature = "dim3")]
                     SoftScalarConstraintWriteback::Dihedral => {
-                        let material =
-                            *sb.element_material(sb.dihedrals[constraint.element as usize].material);
                         let dihedral = &mut sb.dihedrals[constraint.element as usize];
-                        dihedral.impulse = impulse;
-                        dihedral.flow_work = 0.0;
-                        // Angle as seen at the last substep's update.
-                        let mut grad = [Vector::ZERO; 4];
-                        let angle = dihedral.rest_angle
-                            + dihedral_gradients(&constraint.pos, dihedral.rest_angle, &mut grad);
-                        if dihedral.plastic_flow(angle, &material, dt) {
-                            awake.plastic_flow.store(true, Ordering::Relaxed);
+                        dihedral.impulse = crate::utils::canonicalize_zero(flowed.impulse);
+                        dihedral.flow_work = flowed.flow_work;
+                        // The rest angle the substeps' flow left.
+                        if flowed.rest != dihedral.rest_angle {
+                            if (flowed.rest - dihedral.rest_angle).abs() > 1.0e-4 {
+                                awake.plastic_flow.store(true, Ordering::Relaxed);
+                            }
+                            let initial = dihedral.initial_rest_angle();
+                            dihedral.rest_angle = flowed.rest;
+                            dihedral.plastic_set = flowed.rest - initial;
                         }
                     }
                     SoftScalarConstraintWriteback::CellVolume => {
@@ -102,9 +113,30 @@ impl SoftConstraintsSet {
             } else {
                 let constraint = &self.elastic_constraints[idx - num_scalar_constraints];
                 let end = self.elastic_end_state(idx - num_scalar_constraints);
-                let (strain_impulse, vol_impulse) = (end.strain_impulse, end.vol_impulse);
+                let mut strain_impulse = end.strain_impulse;
                 let awake = &self.awake[constraint.soft_body as usize];
                 let sb = unsafe { &mut *awake.ptr };
+                // The last substep's flow, at the positions it ended at.
+                let mut flowed = *constraint;
+                if constraint.flow.is_some() {
+                    let mut x = constraint.pos;
+                    for (k, &id) in constraint.solver_ids.iter().enumerate() {
+                        if id != u32::MAX {
+                            x[k] = bodies.get_pose(id).translation;
+                        }
+                    }
+                    if let Some(flow) = flow_elastic_cell(
+                        &mut flowed,
+                        sb,
+                        &x,
+                        &end.strain_impulse,
+                        awake.substep_dt,
+                        self.max_corrective_velocity,
+                        false,
+                    ) {
+                        strain_impulse *= 1.0 - flow.share;
+                    }
+                }
                 let material = *sb.element_material(sb.cells[constraint.element as usize].material);
                 let resistance = if material.tear_strain.is_some() {
                     let c = &sb.cells[constraint.element as usize];
@@ -112,30 +144,41 @@ impl SoftConstraintsSet {
                 } else {
                     1.0
                 };
+                let rest0: [Vector; DIM + 1] = {
+                    let vertices = sb.cells[constraint.element as usize].vertices;
+                    core::array::from_fn(|k| {
+                        sb.particles[vertices[k] as usize].initial_rest_position
+                    })
+                };
                 let cell = &mut sb.cells[constraint.element as usize];
-                let impulses = (strain_impulse.iter()).chain(core::iter::once(&vol_impulse));
+                let impulses = (strain_impulse.iter()).chain(core::iter::once(&end.vol_impulse));
                 for (dst, src) in cell.impulses.iter_mut().zip(impulses) {
                     *dst = crate::utils::canonicalize_zero(*src);
                 }
                 cell.rotation = end.rotation;
                 cell.flow_work = 0.0;
-                // The tear strain counts the plastic stretch, as it stood before this step's flow.
+                // The tear strain counts the plastic stretch the last substep's strain is read
+                // against.
+                let read_against = constraint
+                    .flow
+                    .map_or(cell.plastic_stretch, |flow| flow.plastic_stretch);
                 let tensile = material
                     .tear_strain
                     .is_some()
-                    .then(|| total_tensile_strain(&end.strain, &cell.plastic_stretch));
-                if material.plastic_yield > 0.0 && material.plastic_creep > 0.0 {
-                    let rest0: [Vector; DIM + 1] = core::array::from_fn(|k| {
-                        sb.particles[cell.vertices[k] as usize].initial_rest_position
-                    });
-                    // The flow reads the strain the cell carries as stress (its last substep's
-                    // impulses over the row stiffness), not the geometric strain: the sweep's
-                    // unconverged residual is geometric but transmits no load.
-                    let stress_strain =
-                        strain_impulse.component_mul(&constraint.strain_per_impulse);
-                    if plastic_flow(cell, &stress_strain, end.inverted, &rest0, &material, dt) {
+                    .then(|| total_tensile_strain(&end.strain, &read_against));
+                if let Some(flow) = flowed.flow {
+                    if stretch_moved(&cell.plastic_stretch, &flow.plastic_stretch) {
                         awake.plastic_flow.store(true, Ordering::Relaxed);
                     }
+                    if flow.plastic_stretch != cell.plastic_stretch {
+                        let dm = flow.plastic_stretch
+                            * crate::dynamics::SoftBody::cell_edge_matrix(rest0);
+                        let factorial = if DIM == 2 { 2.0 } else { 6.0 };
+                        cell.plastic_stretch = flow.plastic_stretch;
+                        cell.inv_rest_matrix = flowed.inv_rest_matrix;
+                        cell.rest_volume = dm.determinant() / factorial;
+                    }
+                    cell.flow_work = flow.work;
                 }
                 if let Some(tensile) = tensile {
                     let load = material.cell_tear_load(tensile) * crate::utils::inv(resistance);

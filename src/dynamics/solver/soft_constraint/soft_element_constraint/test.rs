@@ -53,6 +53,10 @@ fn gradients_match_finite_differences() {
         load_bounds: [Real::MAX, Real::MAX],
         yield_bounds: [Real::MAX, Real::MAX],
         rest_range: [0.0, Real::MAX],
+        omega_sq: 0.0,
+        creeps: false,
+        creep_pending: false,
+        flow_work: 0.0,
     };
     #[cfg(feature = "dim2")]
     let kinds = [
@@ -132,6 +136,7 @@ fn elastic_cell_gradients_match_finite_differences() {
             z: StrainVector::zeros(),
             inv_s: 0.0,
         }),
+        flow: None,
     };
     let grad_vol_of = |r: &SoftElasticConstraint| match &r.model {
         SoftElasticModel::Corotational(c) => c.grad_vol,
