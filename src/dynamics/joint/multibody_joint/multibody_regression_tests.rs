@@ -1671,3 +1671,70 @@ fn a_chain_sliding_on_its_anchors_body_swings_as_the_free_chain_does() {
         "the chain swung faster or higher: {failed:?}"
     );
 }
+
+/// A heavy box with a forearm hinged to its end, dropped forearm first onto fixed ground fast
+/// enough that the continuous-collision pass stops the box's body at its moment of impact, ends
+/// every step with the forearm's body where the multibody holds it on the box's body: the turn
+/// between the two bodies the hinge's own angle. The pass clamped the root's body alone, about
+/// 0.15 m short of where the multibody stood, and the hinge read from the two bodies was up to
+/// 25° from the angle the multibody held, which the next step went on from.
+#[test]
+#[cfg(feature = "dim3")]
+fn a_multibody_whose_root_the_continuous_pass_stops_ends_the_step_where_its_links_stand() {
+    for (rate, root_mass) in [(30.0 as Real, 100.0 as Real), (30.0, 200.0), (60.0, 200.0)] {
+        let mut world = PhysicsWorld::new();
+        world.integration_parameters.dt = 1.0 / rate;
+        world.insert(
+            RigidBodyBuilder::fixed().translation(Vector::new(0.0, -0.5, 0.0)),
+            ColliderBuilder::cuboid(2.5, 0.5, 2.5).friction(0.7),
+        );
+        let turn = Rotation::from_axis_angle(Vector::Z, -40.0_f32.to_radians() as Real);
+        let at = Vector::new(0.0, 2.0, 0.0);
+        let (root, _) = world.insert(
+            RigidBodyBuilder::dynamic()
+                .translation(at)
+                .rotation(turn.to_scaled_axis())
+                .can_sleep(false),
+            ColliderBuilder::cuboid(0.15, 0.1, 0.1)
+                .mass(root_mass)
+                .friction(0.7),
+        );
+        let (forearm, _) = world.insert(
+            RigidBodyBuilder::dynamic()
+                .translation(at + turn * Vector::new(0.3, 0.0, 0.0))
+                .rotation(turn.to_scaled_axis())
+                .can_sleep(false),
+            ColliderBuilder::cuboid(0.15, 0.04, 0.04)
+                .mass(1.5)
+                .friction(0.7),
+        );
+        let elbow = RevoluteJointBuilder::new(Vector::Z)
+            .local_anchor1(Vector::new(0.15, 0.0, 0.0))
+            .local_anchor2(Vector::new(-0.15, 0.0, 0.0))
+            .limits([-140.0_f32.to_radians() as Real, 0.0])
+            .contacts_enabled(false);
+        world.insert_multibody_joint(root, forearm, elbow).unwrap();
+        let mut widest_gap: Real = 0.0;
+        let mut widest_turn: Real = 0.0;
+        for _ in 0..(2.0 * rate) as usize {
+            world.step();
+            let link = *world.multibody_joints.rigid_body_link(forearm).unwrap();
+            let multibody = &world.multibody_joints[link.multibody];
+            let held = multibody.link(0).unwrap().local_to_world.inverse()
+                * multibody.link(link.id).unwrap().local_to_world;
+            let angle = multibody.link(link.id).unwrap().joint.coords[3];
+            let bodies = world.bodies[root].position().inverse() * *world.bodies[forearm].position();
+            widest_gap = widest_gap.max((bodies.translation - held.translation).length());
+            let between =
+                world.bodies[root].rotation().inverse() * *world.bodies[forearm].rotation();
+            let read = 2.0 * between.z.atan2(between.w);
+            widest_turn = widest_turn.max((read - angle).abs().to_degrees());
+        }
+        assert!(
+            widest_gap < 1.0e-3 && widest_turn < 0.05,
+            "{rate} Hz, {root_mass} kg: the forearm's body stood {widest_gap} m from where the \
+             multibody holds it on the box's body, and the bodies read the hinge {widest_turn}° \
+             from the multibody's angle"
+        );
+    }
+}
