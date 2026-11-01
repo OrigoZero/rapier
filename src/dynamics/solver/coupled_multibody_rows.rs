@@ -13,30 +13,83 @@
 //! rate `K[a][b]` at which an impulse on row `b` changes the error of row `a`. A contact's error is
 //! its velocity error plus its softness term, and a joint row's is its softness term minus its
 //! velocity error, so a positive impulse raises the error of the row it is applied on in both.
+//!
+//! `K[a][b]` sums, over every velocity the two rows both act on, the jacobian of `a` there times
+//! the weighted jacobian of `b`: a multibody's generalized velocities, and a rigid body's velocity
+//! where a row acts on one (a joint holding a rigid body to a link, a contact's rigid body). Two
+//! rows that act on no velocity in common do not couple.
 
 use crate::alloc_prelude::*;
 use crate::dynamics::solver::GenericJointConstraint;
-use crate::math::{DVector, Real};
+use crate::math::{DVector, Real, SPATIAL_DIM};
+use na::DVectorView;
 
-/// One side of a row acting on a multibody's generalized velocities.
+/// The velocities one side of a row acts on.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum SideVelocities {
+    /// A multibody's generalized velocities, from this index of the generic solver velocities.
+    Multibody(u32),
+    /// A rigid body's velocity, the solver body at this index.
+    Body(u32),
+}
+
+/// Where one side of a row reads its jacobian and its weighted jacobian (the jacobian times the
+/// inverse mass).
+#[derive(Copy, Clone, Debug)]
+pub(crate) enum SideJacobian {
+    /// In the row's jacobian buffer: `ndofs` entries from `j_id`, and as many from `wj_id`.
+    Buffer {
+        ndofs: usize,
+        j_id: usize,
+        wj_id: usize,
+    },
+    /// Held with the side, over a rigid body's linear then angular velocity.
+    Inline {
+        j: [Real; SPATIAL_DIM],
+        wj: [Real; SPATIAL_DIM],
+    },
+}
+
+impl SideJacobian {
+    fn jacobian<'a>(&'a self, buffer: &'a DVector) -> &'a [Real] {
+        match self {
+            SideJacobian::Buffer { ndofs, j_id, .. } => &buffer.as_slice()[*j_id..*j_id + *ndofs],
+            SideJacobian::Inline { j, .. } => &j[..],
+        }
+    }
+
+    fn weighted<'a>(&'a self, buffer: &'a DVector) -> &'a [Real] {
+        match self {
+            SideJacobian::Buffer { ndofs, wj_id, .. } => {
+                &buffer.as_slice()[*wj_id..*wj_id + *ndofs]
+            }
+            SideJacobian::Inline { wj, .. } => &wj[..],
+        }
+    }
+}
+
+/// One side of a row: the velocities it acts on and its jacobian there.
 #[derive(Copy, Clone, Debug)]
 pub(crate) struct RowSide {
-    /// The index of the multibody's first generalized velocity in the generic solver velocities.
-    pub slot: u32,
-    /// The multibody's number of degrees of freedom.
-    pub ndofs: usize,
-    /// Where the side's jacobian starts in the row's jacobian buffer.
-    pub j_id: usize,
-    /// Where the side's weighted jacobian (the jacobian times the inverse mass) starts.
-    pub wj_id: usize,
+    /// The velocities the side acts on.
+    pub velocities: SideVelocities,
+    /// Where the side's jacobian and weighted jacobian are read.
+    pub jacobian: SideJacobian,
     /// The sign the side's jacobian times the velocities enters the row's error with.
     pub error_sign: Real,
     /// The sign a positive impulse on the row is applied to the side's velocities with.
     pub impulse_sign: Real,
 }
 
-/// The rate at which an impulse on row `b` changes the error of row `a`, through the multibodies
-/// the two rows both act on. Each side is read from the jacobian buffer of its own row.
+impl RowSide {
+    /// Whether the side acts on a multibody's generalized velocities.
+    pub fn is_multibody(&self) -> bool {
+        matches!(self.velocities, SideVelocities::Multibody(_))
+    }
+}
+
+/// The rate at which an impulse on row `b` changes the error of row `a`, through every velocity
+/// the two rows both act on. A side held in a buffer is read from the buffer of its own row.
 pub(crate) fn coupling(
     a: &[Option<RowSide>; 2],
     a_jacobians: &DVector,
@@ -46,9 +99,11 @@ pub(crate) fn coupling(
     let mut k = 0.0;
     for sa in a.iter().flatten() {
         for sb in b.iter().flatten() {
-            if sa.slot == sb.slot {
-                let j = a_jacobians.rows(sa.j_id, sa.ndofs);
-                let wj = b_jacobians.rows(sb.wj_id, sb.ndofs);
+            if sa.velocities == sb.velocities {
+                let j = sa.jacobian.jacobian(a_jacobians);
+                let wj = sb.jacobian.weighted(b_jacobians);
+                let j = DVectorView::from_slice(j, j.len());
+                let wj = DVectorView::from_slice(wj, wj.len());
                 k += sa.error_sign * sb.impulse_sign * j.dot(&wj);
             }
         }
@@ -60,7 +115,7 @@ pub(crate) fn coupling(
 fn share_a_multibody(a: &[Option<RowSide>; 2], b: &[Option<RowSide>; 2]) -> bool {
     a.iter()
         .flatten()
-        .any(|sa| b.iter().flatten().any(|sb| sa.slot == sb.slot))
+        .any(|sa| sa.is_multibody() && b.iter().flatten().any(|sb| sa.velocities == sb.velocities))
 }
 
 /// The multibody joint rows a pass's contacts are solved together with, and the buffers each
@@ -69,9 +124,9 @@ fn share_a_multibody(a: &[Option<RowSide>; 2], b: &[Option<RowSide>; 2]) -> bool
 pub(crate) struct CoupledRows {
     /// The index, among the generic joint constraints, of each joint row that acts on a
     /// multibody and bears an impulse strictly inside its bounds: a limit pushing on its stop,
-    /// a motor not at its force bound, a coupling.
+    /// a motor not at its force bound, a coupling, a joint holding a body to a link.
     pub engaged: Vec<usize>,
-    /// The multibody sides of each engaged row, indexed like `engaged`.
+    /// The sides of each engaged row, indexed like `engaged`.
     pub sides: Vec<[Option<RowSide>; 2]>,
     /// `K` between the engaged rows, row-major, `engaged.len()` square; the diagonal holds each
     /// row's own `1 / inv_lhs`, its softness included.
@@ -111,8 +166,8 @@ impl CoupledRows {
             if row.impulse <= lo || row.impulse >= hi {
                 continue;
             }
-            let sides = row.multibody_sides();
-            if sides.iter().all(Option::is_none) {
+            let sides = row.sides();
+            if !sides.iter().flatten().any(RowSide::is_multibody) {
                 continue;
             }
             self.engaged.push(i);
@@ -321,6 +376,57 @@ fn solve_dense(n: usize, matrix: &mut [Real], rhs: &mut [Real]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rows_couple_through_a_rigid_body_they_both_act_on_and_through_nothing_else() {
+        // A joint row's side on solver body 3, read from its buffer, and a contact row's side on
+        // the same body, held with the side.
+        let mut buffer = DVector::zeros(2 * SPATIAL_DIM);
+        for k in 0..SPATIAL_DIM {
+            buffer[k] = (k + 1) as Real;
+            buffer[SPATIAL_DIM + k] = 0.5 * (k + 1) as Real;
+        }
+        let joint = [
+            Some(RowSide {
+                velocities: SideVelocities::Body(3),
+                jacobian: SideJacobian::Buffer {
+                    ndofs: SPATIAL_DIM,
+                    j_id: 0,
+                    wj_id: SPATIAL_DIM,
+                },
+                error_sign: -1.0,
+                impulse_sign: -1.0,
+            }),
+            None,
+        ];
+        let contact_on = |velocities| {
+            [
+                Some(RowSide {
+                    velocities,
+                    jacobian: SideJacobian::Inline {
+                        j: [1.0; SPATIAL_DIM],
+                        wj: [2.0; SPATIAL_DIM],
+                    },
+                    error_sign: 1.0,
+                    impulse_sign: 1.0,
+                }),
+                None,
+            ]
+        };
+        let none = DVector::zeros(0);
+        let sum: Real = (1..=SPATIAL_DIM).map(|k| k as Real).sum();
+        let contact = contact_on(SideVelocities::Body(3));
+        // The joint row's jacobian times the contact's weighted jacobian, and the contact's
+        // jacobian times the joint row's weighted jacobian, each with the joint side's sign.
+        assert_eq!(coupling(&joint, &buffer, &contact, &none), -2.0 * sum);
+        assert_eq!(coupling(&contact, &none, &joint, &buffer), -0.5 * sum);
+        // Another body, and a multibody whose generic velocities start at the same index.
+        for velocities in [SideVelocities::Body(4), SideVelocities::Multibody(3)] {
+            let other = contact_on(velocities);
+            assert_eq!(coupling(&joint, &buffer, &other, &none), 0.0);
+            assert_eq!(coupling(&other, &none, &joint, &buffer), 0.0);
+        }
+    }
 
     #[test]
     fn a_block_with_no_row_at_a_bound_zeroes_every_error() {

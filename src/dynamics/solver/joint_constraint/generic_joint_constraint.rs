@@ -1,5 +1,5 @@
 use super::LinkOrBodyRef;
-use crate::dynamics::solver::coupled_multibody_rows::RowSide;
+use crate::dynamics::solver::coupled_multibody_rows::{RowSide, SideJacobian, SideVelocities};
 use crate::dynamics::solver::joint_constraint::joint_velocity_constraint::WritebackId;
 use crate::dynamics::solver::joint_constraint::{JointConstraintHelper, JointSolverBody};
 use crate::dynamics::solver::solver_body::SolverBodies;
@@ -357,28 +357,46 @@ impl GenericJointConstraint {
         solver_vel2.axpy(-delta_impulse, &wj2, 1.0);
     }
 
-    /// The sides of the row that act on a multibody's generalized velocities, in the form
-    /// [`crate::dynamics::solver::coupled_multibody_rows`] couples rows by: the row's error
-    /// there is `cfm_gain * impulse` minus [`Self::velocity_error`], so a positive impulse
-    /// raises it.
-    pub(crate) fn multibody_sides(&self) -> [Option<RowSide>; 2] {
-        let side1 = (self.solver_vel1 != u32::MAX && !self.is_rigid_body1).then_some(RowSide {
-            slot: self.solver_vel1,
-            ndofs: self.ndofs1,
-            j_id: self.j_id1,
-            wj_id: self.wj_id1(),
-            error_sign: 1.0,
-            impulse_sign: 1.0,
-        });
-        let side2 = (self.solver_vel2 != u32::MAX && !self.is_rigid_body2).then_some(RowSide {
-            slot: self.solver_vel2,
-            ndofs: self.ndofs2,
-            j_id: self.j_id2,
-            wj_id: self.wj_id2(),
-            error_sign: -1.0,
-            impulse_sign: -1.0,
-        });
-        [side1, side2]
+    /// The sides of the row, each on a multibody's generalized velocities or a rigid body's
+    /// velocity, in the form [`crate::dynamics::solver::coupled_multibody_rows`] couples rows by:
+    /// the row's error there is `cfm_gain * impulse` minus [`Self::velocity_error`], so a positive
+    /// impulse raises it.
+    pub(crate) fn sides(&self) -> [Option<RowSide>; 2] {
+        let side = |solver_vel: u32,
+                    is_rigid_body: bool,
+                    ndofs: usize,
+                    j_id: usize,
+                    wj_id: usize,
+                    sign: Real| {
+            (solver_vel != u32::MAX).then_some(RowSide {
+                velocities: if is_rigid_body {
+                    SideVelocities::Body(solver_vel)
+                } else {
+                    SideVelocities::Multibody(solver_vel)
+                },
+                jacobian: SideJacobian::Buffer { ndofs, j_id, wj_id },
+                error_sign: sign,
+                impulse_sign: sign,
+            })
+        };
+        [
+            side(
+                self.solver_vel1,
+                self.is_rigid_body1,
+                self.ndofs1,
+                self.j_id1,
+                self.wj_id1(),
+                1.0,
+            ),
+            side(
+                self.solver_vel2,
+                self.is_rigid_body2,
+                self.ndofs2,
+                self.j_id2,
+                self.wj_id2(),
+                -1.0,
+            ),
+        ]
     }
 
     /// Applies the impulse the row starts with to the velocities it acts on, before the row is
