@@ -1738,3 +1738,98 @@ fn a_multibody_whose_root_the_continuous_pass_stops_ends_the_step_where_its_link
         );
     }
 }
+
+/// A 10 kg box with two legs hanging below it (a thigh and a shin each, on revolute multibody
+/// joints), falling at 20, 40 and 80 m/s onto a fixed plate 0.05 m thick at 30 Hz, ends with
+/// every link above the plate's underside, as the same bodies falling free or on impulse joints
+/// do. The legs strike the plate first: the continuous pass stops the multibody as a whole at the
+/// fraction its first link strikes. With the pass sweeping only the multibody's root, 4 of its 5
+/// links ended below the plate at every speed, the legs having passed through it before the box
+/// reached it; with each link's body clamped on its own, 2 of 5 at 20 and 40 m/s and 4 at 80.
+#[test]
+#[cfg(feature = "dim3")]
+fn a_multibody_whose_legs_strike_a_thin_plate_first_stops_as_a_whole() {
+    let thick: Real = 0.05;
+    for speed in [20.0 as Real, 40.0, 80.0] {
+        let mut world = PhysicsWorld::new();
+        world.integration_parameters.dt = 1.0 / 30.0;
+        world.insert(
+            RigidBodyBuilder::fixed().translation(Vector::new(0.0, -thick / 2.0, 0.0)),
+            ColliderBuilder::cuboid(2.5, thick / 2.0, 2.5).friction(0.7),
+        );
+        let mut part = |at: Vector, half: Vector, mass: Real| {
+            world
+                .insert(
+                    RigidBodyBuilder::dynamic().translation(at).can_sleep(false),
+                    ColliderBuilder::cuboid(half.x, half.y, half.z)
+                        .mass(mass)
+                        .friction(0.7),
+                )
+                .0
+        };
+        let top = 2.0;
+        let root = part(
+            Vector::new(0.0, top, 0.0),
+            Vector::new(0.15, 0.1, 0.1),
+            10.0,
+        );
+        let mut links = vec![root];
+        let mut joints = Vec::new();
+        for side in [-1.0 as Real, 1.0] {
+            let thigh = part(
+                Vector::new(0.1 * side, top - 0.3, 0.0),
+                Vector::new(0.06, 0.2, 0.06),
+                6.0,
+            );
+            let shin = part(
+                Vector::new(0.1 * side, top - 0.7, 0.0),
+                Vector::new(0.05, 0.2, 0.05),
+                4.0,
+            );
+            joints.push((
+                root,
+                thigh,
+                RevoluteJointBuilder::new(Vector::X)
+                    .local_anchor1(Vector::new(0.1 * side, -0.1, 0.0))
+                    .local_anchor2(Vector::new(0.0, 0.2, 0.0))
+                    .limits([-1.0, 1.0])
+                    .contacts_enabled(false),
+            ));
+            joints.push((
+                thigh,
+                shin,
+                RevoluteJointBuilder::new(Vector::X)
+                    .local_anchor1(Vector::new(0.0, -0.2, 0.0))
+                    .local_anchor2(Vector::new(0.0, 0.2, 0.0))
+                    .limits([0.0, 2.4])
+                    .contacts_enabled(false),
+            ));
+            links.push(thigh);
+            links.push(shin);
+        }
+        for (parent, child, joint) in joints {
+            world.insert_multibody_joint(parent, child, joint).unwrap();
+        }
+        let link = *world.multibody_joints.rigid_body_link(root).unwrap();
+        let multibody = world
+            .multibody_joints
+            .get_multibody_mut(link.multibody)
+            .unwrap();
+        let mut velocity = multibody.generalized_velocity_mut();
+        velocity.fill(0.0);
+        velocity[1] = -speed;
+        for _ in 0..30 {
+            world.step();
+        }
+        let below: Vec<_> = links
+            .iter()
+            .map(|h| world.bodies[*h].translation().y)
+            .filter(|y| *y < -thick)
+            .collect();
+        assert!(
+            below.is_empty(),
+            "{speed} m/s: {} of the multibody's 5 links ended below the plate, at {below:?}",
+            below.len()
+        );
+    }
+}
