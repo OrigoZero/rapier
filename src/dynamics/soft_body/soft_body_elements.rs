@@ -272,9 +272,22 @@ pub struct SoftBodyEdge {
     /// particles together (resisting a stretch), negative pushing them apart.
     #[cfg_attr(feature = "serde-serialize", serde(default))]
     pub(crate) force: Real,
+    /// The work the plastic flow of the last step's FEM substeps took out of the edge (see
+    /// [`Self::flow_work`]).
+    #[cfg_attr(feature = "serde-serialize", serde(skip))]
+    pub(crate) flow_work: Real,
 }
 
 impl SoftBodyEdge {
+    /// The work plastic flow took out of this edge within the last step, in joules, on the FEM
+    /// solver ([`crate::dynamics::SoftBodySolver::Fem`]), which flows it at every substep: at each
+    /// flow, the elastic energy it held at that substep's configuration against the rest length it
+    /// flowed from, less against the one it flowed to; for a yield force, that force times the way
+    /// its rest length moved. A body the constraint solver stepped reads `0.0`.
+    pub fn flow_work(&self) -> Real {
+        self.flow_work
+    }
+
     /// An edge between `vertices` at rest length `rest_length`, of `kind`, with every per-edge
     /// setting at its default (the material's softness, no bound, no tag).
     pub(crate) fn new(vertices: [u32; 2], rest_length: Real, kind: SoftBodyEdgeKind) -> Self {
@@ -298,6 +311,7 @@ impl SoftBodyEdge {
             torn: false,
             stress: 0.0,
             force: 0.0,
+            flow_work: 0.0,
         }
     }
 
@@ -387,10 +401,23 @@ pub struct SoftBodyDihedral {
     /// Which material of the body the dihedral takes (see [`SoftBodyEdge::material`]).
     #[cfg_attr(feature = "serde-serialize", serde(default))]
     pub material: u16,
+    /// The work the plastic flow of the last step's FEM substeps took out of the dihedral (see
+    /// [`Self::flow_work`]).
+    #[cfg_attr(feature = "serde-serialize", serde(skip))]
+    pub(crate) flow_work: Real,
 }
 
 #[cfg(feature = "dim3")]
 impl SoftBodyDihedral {
+    /// The work plastic flow took out of this dihedral within the last step, in joules, on the FEM
+    /// solver ([`crate::dynamics::SoftBodySolver::Fem`]), which flows it at every substep: at each
+    /// flow, the elastic energy it held at that substep's configuration against the rest angle it
+    /// flowed from, less against the one it flowed to. A body the constraint solver stepped reads
+    /// `0.0`.
+    pub fn flow_work(&self) -> Real {
+        self.flow_work
+    }
+
     /// The permanent set of this dihedral: how far its rest angle has flowed from the angle it
     /// was created with, in radians (see [`SoftBodyMaterial::edge_plastic_yield`]).
     pub fn plastic_set(&self) -> Real {
@@ -486,6 +513,10 @@ pub struct SoftBodyCell {
     /// material's `tear_smoothing` (see [`Self::stress`]).
     #[cfg_attr(feature = "serde-serialize", serde(default))]
     pub(crate) stress: Real,
+    /// The work the plastic flow of the last step's FEM substeps took out of the cell (see
+    /// [`Self::flow_work`]).
+    #[cfg_attr(feature = "serde-serialize", serde(skip))]
+    pub(crate) flow_work: Real,
 }
 
 #[cfg(feature = "serde-serialize")]
@@ -494,6 +525,15 @@ fn identity_matrix() -> Matrix {
 }
 
 impl SoftBodyCell {
+    /// The work plastic flow took out of this cell within the last step, in joules, on the FEM
+    /// solver ([`crate::dynamics::SoftBodySolver::Fem`]), which flows it at every substep: at each
+    /// flow, the elastic energy it held at that substep's configuration against the rest shape it
+    /// flowed from, less against the one it flowed to. A body the constraint solver stepped reads
+    /// `0.0`.
+    pub fn flow_work(&self) -> Real {
+        self.flow_work
+    }
+
     /// The accumulated plastic stretch of this cell's rest shape (material frame, unit
     /// determinant): its current rest shape is this stretch applied to the shape it was created
     /// with (see [`SoftBodyMaterial::plastic_yield`]); the identity before any flow.

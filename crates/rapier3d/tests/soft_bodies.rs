@@ -5201,8 +5201,9 @@ fn a_box_swinging_on_a_rope_tied_to_it_stays_tied() {
 /// A plastic FEM block thrown onto the ground at 8 m/s crumples and rebounds the same way at
 /// every step length that divides into the same substep: 30 steps of 8 substeps a second, 60 of
 /// 4, 120 of 2 and 240 of 1 all solve 240 substeps a second, and the block's flow follows its
-/// strain through those substeps at its creep rate, so its rebound and the permanent set it keeps
-/// agree across them.
+/// strain through those substeps at its creep rate, so its rebound, the permanent set it keeps
+/// and the work its flow took out of it (the cells' `flow_work`, summed over the steps) agree
+/// across them, that work less than the kinetic energy the block struck with.
 #[cfg(feature = "fem")]
 #[test]
 fn plastic_flow_follows_the_substeps_at_every_step_length() {
@@ -5244,9 +5245,15 @@ fn plastic_flow_follows_the_substeps_at_every_step_length() {
             (0..n).map(|i| sb.particle_velocity(i).y).sum::<Real>() / n as Real
         };
         let mut rebound: Real = 0.0;
+        let mut work: Real = 0.0;
         for _ in 0..(rate as usize) {
             world.step();
             rebound = rebound.max(mean_vy(&world));
+            work += world.soft_bodies[handle]
+                .cells()
+                .iter()
+                .map(|c| c.flow_work())
+                .sum::<Real>();
         }
         assert_finite(&world, handle);
         let sb = &world.soft_bodies[handle];
@@ -5260,15 +5267,28 @@ fn plastic_flow_follows_the_substeps_at_every_step_length() {
             })
             .sum::<Real>()
             / sb.cells().len() as Real;
-        (rebound, set)
+        (rebound, set, work, 0.5 * 0.5 * n as Real * 8.0 * 8.0)
     };
+    let mut works = Vec::new();
     let runs: Vec<(Real, usize, Real, Real)> = [(30.0, 8), (60.0, 4), (120.0, 2), (240.0, 1)]
         .into_iter()
         .map(|(rate, substeps)| {
-            let (rebound, set) = crash(rate, substeps);
+            let (rebound, set, work, kinetic) = crash(rate, substeps);
+            works.push((work, kinetic));
             (rate, substeps, rebound, set)
         })
         .collect();
+    assert!(
+        works.iter().all(|&(work, kinetic)| work > 0.0 && work < kinetic),
+        "the flow work against the kinetic energy of the throw (J): {works:?}"
+    );
+    let (least, most) = works
+        .iter()
+        .fold((Real::MAX, Real::MIN), |(a, b), &(w, _)| (a.min(w), b.max(w)));
+    assert!(
+        (most - least) / most < 0.05,
+        "the flow work depends on the step length (J, by run): {works:?}"
+    );
     let spread = |pick: fn(&(Real, usize, Real, Real)) -> Real| {
         let (min, max) = runs
             .iter()

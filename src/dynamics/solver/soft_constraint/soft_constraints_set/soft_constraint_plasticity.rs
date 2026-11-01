@@ -168,6 +168,7 @@ mod tests {
             color: 0,
             torn: false,
             stress: 0.0,
+            flow_work: 0.0,
         };
         (cell, rest0)
     }

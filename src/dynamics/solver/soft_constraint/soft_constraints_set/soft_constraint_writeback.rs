@@ -42,6 +42,7 @@ impl SoftConstraintsSet {
                         };
                         let edge = &mut sb.edges[ei];
                         edge.impulse = impulse;
+                        edge.flow_work = 0.0;
                         edge.force = impulse * crate::utils::inv(awake.substep_dt);
                         // The rest length the substeps' flow at the yield force left.
                         if constraint.rest != edge.rest_length {
@@ -83,6 +84,7 @@ impl SoftConstraintsSet {
                             *sb.element_material(sb.dihedrals[constraint.element as usize].material);
                         let dihedral = &mut sb.dihedrals[constraint.element as usize];
                         dihedral.impulse = impulse;
+                        dihedral.flow_work = 0.0;
                         // Angle as seen at the last substep's update.
                         let mut grad = [Vector::ZERO; 4];
                         let angle = dihedral.rest_angle
@@ -92,7 +94,9 @@ impl SoftConstraintsSet {
                         }
                     }
                     SoftScalarConstraintWriteback::CellVolume => {
-                        sb.cells[constraint.element as usize].impulses[0] = impulse
+                        let cell = &mut sb.cells[constraint.element as usize];
+                        cell.impulses[0] = impulse;
+                        cell.flow_work = 0.0;
                     }
                 }
             } else {
@@ -114,6 +118,7 @@ impl SoftConstraintsSet {
                     *dst = crate::utils::canonicalize_zero(*src);
                 }
                 cell.rotation = end.rotation;
+                cell.flow_work = 0.0;
                 // The tear strain counts the plastic stretch, as it stood before this step's flow.
                 let tensile = material
                     .tear_strain

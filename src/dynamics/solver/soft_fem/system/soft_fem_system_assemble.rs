@@ -79,6 +79,7 @@ impl SoftFemSystem {
                 ) {
                     // The rest shape the substep flowed to; the strain is read against it. The
                     // flow keeps the rest volume, so the cell's material constants stand.
+                    let held = cell.energy(&cell.strain);
                     cell.plastic_stretch = flowed.plastic_stretch;
                     cell.inv_rest_matrix = flowed.inv_rest_matrix;
                     cell.coeffs = SoftElasticConstraint::coefficients(&cell.inv_rest_matrix);
@@ -88,6 +89,9 @@ impl SoftFemSystem {
                     cell.rotation = extract_rotation(f, cell.rotation);
                     let s = cell.rotation.inverse().to_mat() * f;
                     cell.strain = strain_rows_of(&(s - Matrix::IDENTITY));
+                    // A flow the plastic bound turns back raises what the cell holds, and takes
+                    // nothing.
+                    cell.flow_work += (held - cell.energy(&cell.strain)).max(0.0);
                 }
             }
 
@@ -297,8 +301,10 @@ impl SoftFemSystem {
                 material,
                 dt,
             ) {
+                let held = 0.5 * dihedral.stiffness * c * c;
                 dihedral.rest_angle = rest;
                 c = angle - rest;
+                dihedral.flow_work += (held - 0.5 * dihedral.stiffness * c * c).max(0.0);
             }
             for k in 0..4 {
                 self.force[dihedral.vertices[k] as usize] -= grad[k] * (dihedral.stiffness * c);
@@ -397,6 +403,7 @@ impl SoftFemSystem {
             .collect();
         for ((cell, out), ci) in self.cells.iter().zip(sb.cells.iter_mut()).zip(0..) {
             out.rotation = cell.rotation;
+            out.flow_work = cell.flow_work;
             if cell.mu <= 0.0 {
                 continue;
             }
@@ -440,6 +447,7 @@ impl SoftFemSystem {
                 .zip(sb.dihedrals.iter_mut())
                 .zip(&dihedral_materials)
             {
+                d.flow_work = dihedral.flow_work;
                 // The rest angle the substeps' flow left.
                 if material.edge_plastic_yield <= 0.0 || dihedral.rest_angle == d.rest_angle {
                     continue;
@@ -458,6 +466,7 @@ impl SoftFemSystem {
             .map(|e| *sb.element_material(e.material))
             .collect();
         for ((spring, edge), ei) in self.springs.iter().zip(sb.edges.iter_mut()).zip(0..) {
+            edge.flow_work = spring.flow_work;
             let d = self.position[spring.vertices[1] as usize]
                 - self.position[spring.vertices[0] as usize];
             let length = d.length();

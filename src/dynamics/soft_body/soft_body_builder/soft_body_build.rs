@@ -105,6 +105,7 @@ impl SoftBodyBuilder {
                 color: 0,
                 torn: false,
                 stress: 0.0,
+                flow_work: 0.0,
             });
         }
 
@@ -187,6 +188,7 @@ impl SoftBodyBuilder {
                 impulse: 0.0,
                 color: 0,
                 material: 0,
+                flow_work: 0.0,
             })
             .collect();
 
