@@ -239,9 +239,9 @@ int main(void) {
     // Strain beyond which a constraint is re-solved after the contacts of every substep.
     // Default: 0.75
     r2SoftBodiesSetResweepStrain(world, 0.75);
-    // Extra substeps a soft-body requests while it is hit fast; 0 disables them.
-    // Default: 4
-    r2SoftBodiesSetMaxExtraSubsteps(world, 4);
+    // Most extra substeps a second a soft body adds while it is hit fast or loaded hard; 0 disables them.
+    // Default: 120
+    r2SoftBodiesSetMaxExtraSubstepRate(world, 120.0f);
     // Stiffening of the soft-body contacts relative to the rigid ones.
     // Default: 4.0
     r2SoftBodiesSetContactStiffening(world, 4.0);

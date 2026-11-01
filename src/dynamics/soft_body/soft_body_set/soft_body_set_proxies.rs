@@ -319,26 +319,44 @@ pub(super) fn sync_soft_body(
     let radius = sb.particle_radius.max(1.0e-6);
     let needed = (speed * dt / radius).ceil().max(0.0) as usize;
     let impact_extra = needed.saturating_sub(params.num_solver_iterations);
-    // Load-adaptive substeps: +1 past 20 g of contact load per unit mass, +2 past 60 g (g taken
-    // as 10 length units/s^2), released with hysteresis at half those loads so the island's
-    // partition does not flicker.
+    // Load-adaptive substeps: level 1 past 20 g of contact load per unit mass, level 2 past 60 g
+    // (g taken as 10 length units/s^2), released with hysteresis at half those loads so the
+    // island's partition does not flicker. Each level asks for a substep rate, so a step already
+    // divided that finely adds nothing.
     let mass: Real = sb.particles.iter().map(|p| p.mass).sum();
     // The load is the impulse of the last pass's solve: averaged over that pass.
     let load = sb.contact_load / (last_pass_dt * mass.max(1.0e-9) * 10.0 * params.length_unit);
-    let load_extra = match sb.load_extra_substeps {
+    let load_level = match sb.load_level {
         0 if load > 20.0 => 1,
         1 if load > 60.0 => 2,
         1 if load < 10.0 => 0,
         2 if load < 30.0 => 1,
         current => current,
     };
-    sb.load_extra_substeps = load_extra;
+    sb.load_level = load_level;
+    let load_extra = match load_level {
+        0 => 0,
+        level => substeps_at_rate(LOAD_SUBSTEP_RATES[level as usize - 1], dt)
+            .saturating_sub(params.num_solver_iterations),
+    };
     let extra = impact_extra
-        .max(load_extra as usize)
-        .min(params.soft_bodies.max_extra_substeps);
+        .max(load_extra)
+        .min(params.soft_bodies.max_extra_substeps(dt));
     outcome.additional_solver_iterations =
         sb.particle_settings.additional_solver_iterations.max(extra);
     outcome
+}
+
+/// The substeps a second a soft body asks its island to run while the body's contact load holds
+/// it at level 1 (past 20 g per unit of its mass) and at level 2 (past 60 g): substeps of 1/300 s
+/// and 1/360 s, 5 and 6 substeps a step at 60 steps a second.
+pub(super) const LOAD_SUBSTEP_RATES: [Real; 2] = [300.0, 360.0];
+
+/// The fewest substeps a step of `dt` seconds is divided into to run at least `rate` substeps a
+/// second.
+pub(super) fn substeps_at_rate(rate: Real, dt: Real) -> usize {
+    // A rate the step divides evenly (360 a second over 1/60 s) takes exactly that many.
+    (rate * dt - 1.0e-4).ceil().max(0.0) as usize
 }
 
 /// The range of `sb`'s particles' travel over a step of `dt` at their velocities, along each

@@ -181,7 +181,7 @@ problems:
 
 | Problem | What to change |
 |---------|----------------|
-| Thin or fast objects pass through a surface. | Raise the particle radius (<notjs>`particle_radius`</notjs><js>`setParticleRadius`</js><c>`particleRadius`</c><py>`particle_radius`</py>). Let the body request more substeps while it is hit fast (<notjs>`max_extra_substeps`</notjs><js>`softBodiesMaxExtraSubsteps`</js><c>`maxExtraSubsteps`</c><py>`max_extra_substeps`</py>). |
+| Thin or fast objects pass through a surface. | Raise the particle radius (<notjs>`particle_radius`</notjs><js>`setParticleRadius`</js><c>`particleRadius`</c><py>`particle_radius`</py>). Let the body add more substeps a second while it is hit fast (<notjs>`max_extra_substep_rate`</notjs><js>`softBodiesMaxExtraSubstepRate`</js><c>`maxExtraSubstepRate`</c><py>`max_extra_substep_rate`</py>). |
 | Two bodies crossing corner-first don't collide. | Enable <notjs>`edge_speculation`</notjs><js>`edgeSpeculation`</js><c>`edgeSpeculation`</c><py>`edge_speculation`</py> (note that it can leave pressed 3D piles crossed). |
 | A body stays tangled with itself. | Keep <notjs>`self_stand_down`</notjs><js>`selfStandDown`</js><c>`selfStandDown`</c><py>`self_stand_down`</py> enabled (the default), which lets the elasticity untangle it, or push the crossed features apart with <notjs>`crossing_repulsion`</notjs><js>`crossingRepulsion`</js><c>`crossingRepulsion`</c><py>`crossing_repulsion`</py>. |
 | The recovery from a penetration is too slow, or too violent. | Change the <notjs>`recovery_pace`</notjs><js>`recoveryPace`</js><c>`recoveryPace`</c><py>`recovery_pace`</py>, i.e., the corrective speed allowed to the recovery (in length units per second). |
@@ -191,7 +191,7 @@ problems:
 <c>
 
 :::info
-Each of these settings has its own setter (and getter), named after its field: `r3SoftBodiesSetMaxExtraSubsteps` and
+Each of these settings has its own setter (and getter), named after its field: `r3SoftBodiesSetMaxExtraSubstepRate` and
 `r3SoftBodiesSetContactStiffening` for the settings of the soft-bodies, and `r3RecoverySetEdgeSpeculation`,
 `r3RecoverySetSelfStandDown`, `r3RecoverySetCrossingRepulsion`, etc. for the recovery settings. See the
 [global settings](./soft_bodies.mdx#global-settings) for an example.

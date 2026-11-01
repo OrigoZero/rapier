@@ -191,7 +191,7 @@ impl SoftBody {
         self.contact_approach_speeds = [None; 2];
         self.contact_approach_step_open = false;
         self.contact_load = 0.0;
-        self.load_extra_substeps = 0;
+        self.load_level = 0;
         self.sleep_speed = 0.0;
         self.sleep_reference.clear();
         self.modified = true;

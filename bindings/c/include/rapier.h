@@ -1556,9 +1556,9 @@ typedef struct R2SoftBodiesSettings {
    */
   R2Real resweepStrain;
   /**
-   * Maximum additional substeps requested by soft-body motion.
+   * Most extra substeps a second a soft body hit fast or loaded hard adds to its island.
    */
-  size_t maxExtraSubsteps;
+  R2Real maxExtraSubstepRate;
   /**
    * Multiplier on contact natural frequency for soft-body contacts.
    */
@@ -6083,16 +6083,16 @@ RAPIER_API R2Status RAPIER_CALL r2SoftBodiesSetContactStiffening(struct R2World 
 RAPIER_API R2Real RAPIER_CALL r2SoftBodiesContactStiffening(const struct R2World *world);
 
 /**
- * Set the world setting documented by R2SoftBodiesSettings::maxExtraSubsteps.
+ * Set the world setting documented by R2SoftBodiesSettings::maxExtraSubstepRate.
  * @ingroup soft_bodies
  */
-RAPIER_API R2Status RAPIER_CALL r2SoftBodiesSetMaxExtraSubsteps(struct R2World *world, size_t value);
+RAPIER_API R2Status RAPIER_CALL r2SoftBodiesSetMaxExtraSubstepRate(struct R2World *world, R2Real value);
 
 /**
- * Return the world setting documented by R2SoftBodiesSettings::maxExtraSubsteps.
+ * Return the world setting documented by R2SoftBodiesSettings::maxExtraSubstepRate.
  * @ingroup soft_bodies
  */
-RAPIER_API size_t RAPIER_CALL r2SoftBodiesMaxExtraSubsteps(const struct R2World *world);
+RAPIER_API R2Real RAPIER_CALL r2SoftBodiesMaxExtraSubstepRate(const struct R2World *world);
 
 /**
  * Set the world setting documented by R2SoftRecoverySettings::authoredVelocityMargin.
@@ -12458,9 +12458,9 @@ typedef struct R3SoftBodiesSettings {
    */
   R3Real resweepStrain;
   /**
-   * Maximum additional substeps requested by soft-body motion.
+   * Most extra substeps a second a soft body hit fast or loaded hard adds to its island.
    */
-  size_t maxExtraSubsteps;
+  R3Real maxExtraSubstepRate;
   /**
    * Multiplier on contact natural frequency for soft-body contacts.
    */
@@ -16985,16 +16985,16 @@ RAPIER_API R3Status RAPIER_CALL r3SoftBodiesSetContactStiffening(struct R3World 
 RAPIER_API R3Real RAPIER_CALL r3SoftBodiesContactStiffening(const struct R3World *world);
 
 /**
- * Set the world setting documented by R3SoftBodiesSettings::maxExtraSubsteps.
+ * Set the world setting documented by R3SoftBodiesSettings::maxExtraSubstepRate.
  * @ingroup soft_bodies
  */
-RAPIER_API R3Status RAPIER_CALL r3SoftBodiesSetMaxExtraSubsteps(struct R3World *world, size_t value);
+RAPIER_API R3Status RAPIER_CALL r3SoftBodiesSetMaxExtraSubstepRate(struct R3World *world, R3Real value);
 
 /**
- * Return the world setting documented by R3SoftBodiesSettings::maxExtraSubsteps.
+ * Return the world setting documented by R3SoftBodiesSettings::maxExtraSubstepRate.
  * @ingroup soft_bodies
  */
-RAPIER_API size_t RAPIER_CALL r3SoftBodiesMaxExtraSubsteps(const struct R3World *world);
+RAPIER_API R3Real RAPIER_CALL r3SoftBodiesMaxExtraSubstepRate(const struct R3World *world);
 
 /**
  * Set the world setting documented by R3SoftRecoverySettings::authoredVelocityMargin.

@@ -85,11 +85,12 @@ export class IntegrationParameters {
     }
 
     /**
-     * Maximum number of extra substeps a soft body requests for its island while it is hit
-     * fast (default: `4`; `0` disables the impact-adaptive substeps).
+     * Most extra substeps a second a soft body adds to its island while it is hit fast or
+     * loaded hard (default: `120`; `0` disables the adaptive substeps): 4 a step at 30 steps a
+     * second, 2 at 60, 1 at 120 and none from 240.
      */
-    get softBodiesMaxExtraSubsteps(): number {
-        return this.raw.softBodiesMaxExtraSubsteps;
+    get softBodiesMaxExtraSubstepRate(): number {
+        return this.raw.softBodiesMaxExtraSubstepRate;
     }
 
     /**
@@ -141,8 +142,8 @@ export class IntegrationParameters {
         this.raw.softBodiesResweepStrain = value;
     }
 
-    set softBodiesMaxExtraSubsteps(value: number) {
-        this.raw.softBodiesMaxExtraSubsteps = value;
+    set softBodiesMaxExtraSubstepRate(value: number) {
+        this.raw.softBodiesMaxExtraSubstepRate = value;
     }
 
     set softBodiesContactStiffening(value: number) {

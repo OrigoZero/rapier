@@ -3112,7 +3112,7 @@ class SoftBodiesSettings:
     recovery: SoftRecoverySettings
     fem: SoftFemParameters
     resweep_strain: float
-    max_extra_substeps: int
+    max_extra_substep_rate: float
     contact_stiffening: float
     def __init__(self) -> None: ...
     def copy(self) -> SoftBodiesSettings: ...

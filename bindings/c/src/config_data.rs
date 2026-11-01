@@ -377,8 +377,8 @@ pub struct RprSoftBodiesSettings {
     pub recovery: RprSoftRecoverySettings,
     /// Strain threshold for re-solving soft constraints after contacts within a substep.
     pub resweepStrain: RprReal,
-    /// Maximum additional substeps requested by soft-body motion.
-    pub maxExtraSubsteps: usize,
+    /// Most extra substeps a second a soft body hit fast or loaded hard adds to its island.
+    pub maxExtraSubstepRate: RprReal,
     /// Multiplier on contact natural frequency for soft-body contacts.
     pub contactStiffening: RprReal,
     #[cfg(feature = "fem")]
@@ -390,7 +390,7 @@ impl From<SoftBodiesSettings> for RprSoftBodiesSettings {
         Self {
             recovery: value.recovery.into(),
             resweepStrain: value.resweep_strain,
-            maxExtraSubsteps: value.max_extra_substeps,
+            maxExtraSubstepRate: value.max_extra_substep_rate,
             contactStiffening: value.contact_stiffening,
             #[cfg(feature = "fem")]
             fem: value.fem.into(),
@@ -402,7 +402,7 @@ impl RprSoftBodiesSettings {
         Ok(SoftBodiesSettings {
             recovery: self.recovery.raw()?,
             resweep_strain: nonnegative(self.resweepStrain)?,
-            max_extra_substeps: self.maxExtraSubsteps,
+            max_extra_substep_rate: nonnegative(self.maxExtraSubstepRate)?,
             contact_stiffening: nonnegative(self.contactStiffening)?,
             #[cfg(feature = "fem")]
             fem: self.fem.raw()?,

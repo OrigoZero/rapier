@@ -2084,7 +2084,11 @@ fn fast_impacts_request_extra_substeps() {
         "a free-falling body requested substeps"
     );
     assert_eq!(
-        max_extra, world.integration_parameters.soft_bodies.max_extra_substeps,
+        max_extra,
+        world
+            .integration_parameters
+            .soft_bodies
+            .max_extra_substeps(dt),
         "the impact (about 24 m/s: 8 substeps to travel one radius per substep) must request the maximum"
     );
     assert_eq!(
@@ -2113,6 +2117,52 @@ fn fast_impacts_request_extra_substeps() {
     }
     assert_eq!(world.bodies[root].additional_solver_iterations(), 0);
     assert_finite(&world, handle);
+}
+
+/// The impact-adaptive substeps a step may add are a rate: the soft cube of
+/// `fast_impacts_request_extra_substeps`, hitting the ground at about 24 m/s, asks for more
+/// substeps than any of these steps allows, and adds the extra substeps
+/// `max_extra_substep_rate` (120 a second) allows over each: 4 a step at 30 steps a second, 2 at
+/// 60, 1 at 120 and none at 240, the same extra substeps a second at each.
+#[test]
+fn impact_extra_substeps_are_a_rate() {
+    for (rate, iterations, expected) in [(30.0, 4, 4), (60.0, 2, 2), (120.0, 1, 1), (240.0, 1, 0)] {
+        let mut world = world_with_ground();
+        world.integration_parameters.dt = 1.0 / rate;
+        world.integration_parameters.num_solver_iterations = iterations;
+        let cube =
+            SoftBodyBuilder::cuboid(Vector::new(0.0, 30.0, 0.0), Vector::splat(0.5), 3, 3, 3)
+                .cell_model(SoftBodyCellModel::Corotational)
+                .material(SoftBodyMaterial {
+                    young_modulus: 1.0e4,
+                    poisson_ratio: 0.3,
+                    elastic_damping_ratio: 0.5,
+                    ..Default::default()
+                })
+                .particle_radius(0.05)
+                .surface_collider(ColliderBuilder::ball(0.05));
+        let handle = world.insert_soft_body(cube);
+        let root = world.soft_bodies[handle].root_body();
+        let mut max_extra = 0;
+        for _ in 0..(3.0 * rate) as usize {
+            world.step();
+            max_extra = max_extra.max(world.bodies[root].additional_solver_iterations());
+        }
+        assert_eq!(
+            world
+                .integration_parameters
+                .soft_bodies
+                .max_extra_substeps(1.0 / rate),
+            expected,
+            "{rate} Hz: the extra substeps 120 a second allow over a step"
+        );
+        assert_eq!(
+            max_extra, expected,
+            "{rate} Hz x {iterations}: the 24 m/s impact added {max_extra} substeps a step, \
+             where 120 extra substeps a second allow {expected}"
+        );
+        assert_finite(&world, handle);
+    }
 }
 
 /// A fully pinned cloth (every particle kinematic) still collides: a box dropped on it rests on
@@ -2523,12 +2573,15 @@ fn torn_soft_bodies_serialize() {
     );
 }
 
-/// Load-adaptive substeps: a soft cube supporting a box many times its own weight requests
-/// extra substeps for its island (the solve is under-converged under a heavy load), and drops
-/// the request once the box is removed.
-#[test]
-fn heavy_load_requests_extra_substeps() {
+/// A world stepped at `rate` steps a second in `iterations` substeps, with a soft cube of
+/// 1.35 kg settled on its ground for 2 s: the world, the cube and the cube's root body.
+fn settled_loadable_cube(
+    rate: Real,
+    iterations: usize,
+) -> (PhysicsWorld, SoftBodyHandle, RigidBodyHandle) {
     let mut world = world_with_ground();
+    world.integration_parameters.dt = 1.0 / rate;
+    world.integration_parameters.num_solver_iterations = iterations;
     let cube = SoftBodyBuilder::cuboid(Vector::new(0.0, 0.5, 0.0), Vector::splat(0.5), 3, 3, 3)
         .cell_model(SoftBodyCellModel::Corotational)
         .material(SoftBodyMaterial {
@@ -2542,20 +2595,35 @@ fn heavy_load_requests_extra_substeps() {
         .surface_collider(ColliderBuilder::ball(0.05));
     let handle = world.insert_soft_body(cube);
     let root = world.soft_bodies[handle].root_body();
-    let dt = world.integration_parameters.dt;
-    for _ in 0..(2.0 / dt) as usize {
+    for _ in 0..(2.0 * rate) as usize {
         world.step();
     }
+    (world, handle, root)
+}
+
+/// A 100 kg box (the cube weighs 1.35 kg) set down on the cube of `settled_loadable_cube`.
+fn load_cube(world: &mut PhysicsWorld) -> RigidBodyHandle {
+    world
+        .insert(
+            RigidBodyBuilder::dynamic().translation(Vector::new(0.0, 1.5, 0.0)),
+            ColliderBuilder::cuboid(0.4, 0.4, 0.4).density(100.0 / 0.512),
+        )
+        .0
+}
+
+/// Load-adaptive substeps: a soft cube supporting a box many times its own weight requests
+/// extra substeps for its island (the solve is under-converged under a heavy load), and drops
+/// the request once the box is removed.
+#[test]
+fn heavy_load_requests_extra_substeps() {
+    let (mut world, handle, root) = settled_loadable_cube(60.0, 4);
+    let dt = world.integration_parameters.dt;
     assert_eq!(
         world.bodies[root].additional_solver_iterations(),
         0,
         "a cube under its own weight only must not request substeps"
     );
-    // A 100 kg box (the cube weighs 1.35 kg) set down on it.
-    let (rb, _) = world.insert(
-        RigidBodyBuilder::dynamic().translation(Vector::new(0.0, 1.5, 0.0)),
-        ColliderBuilder::cuboid(0.4, 0.4, 0.4).density(100.0 / 0.512),
-    );
+    let rb = load_cube(&mut world);
     let mut max_extra = 0;
     for _ in 0..(3.0 / dt) as usize {
         world.step();
@@ -2575,6 +2643,45 @@ fn heavy_load_requests_extra_substeps() {
         world.step();
     }
     assert_eq!(world.bodies[root].additional_solver_iterations(), 0);
+}
+
+/// The load-adaptive substeps are a rate: the cube of `heavy_load_requests_extra_substeps`,
+/// loaded past 60 g, asks for 360 substeps a second whatever the step length, and a step already
+/// divided that finely adds none. Over the 3 s under the box, with no bound on the extra
+/// substeps it runs at most 12 substeps a step at 30 steps a second in 4, 6 at 60 in 2, 3 at 120
+/// in 1 and 2 at 240 in 1; under the default bound of 120 extra substeps a second it runs 8, 4,
+/// 2 and 1, 240 substeps a second at each.
+#[test]
+fn heavy_load_extra_substeps_are_a_rate() {
+    for (rate, iterations, unbounded, bounded) in [
+        (30.0, 4, 12, 8),
+        (60.0, 2, 6, 4),
+        (120.0, 1, 3, 2),
+        (240.0, 1, 2, 1),
+    ] {
+        for (max_rate, expected) in [(Real::MAX, unbounded), (120.0, bounded)] {
+            let (mut world, handle, root) = settled_loadable_cube(rate, iterations);
+            world
+                .integration_parameters
+                .soft_bodies
+                .max_extra_substep_rate = max_rate;
+            load_cube(&mut world);
+            let mut most = 0;
+            for _ in 0..(3.0 * rate) as usize {
+                world.step();
+                most = most.max(world.bodies[root].additional_solver_iterations());
+            }
+            let substeps = iterations + most;
+            assert_eq!(
+                substeps,
+                expected,
+                "{rate} Hz x {iterations}, at most {max_rate} extra substeps a second: the loaded \
+                 cube ran at most {substeps} substeps a step ({} a second), where it asks for 360 a second",
+                substeps as Real * rate
+            );
+            assert_finite(&world, handle);
+        }
+    }
 }
 
 /// A cloth thrown at 15 m/s onto a resting balloon (a pressurized soft sphere) neither tunnels

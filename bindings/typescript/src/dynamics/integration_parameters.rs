@@ -63,13 +63,13 @@ impl RawIntegrationParameters {
     }
 
     #[wasm_bindgen(getter)]
-    pub fn softBodiesMaxExtraSubsteps(&self) -> usize {
-        self.0.soft_bodies.max_extra_substeps
+    pub fn softBodiesMaxExtraSubstepRate(&self) -> f32 {
+        self.0.soft_bodies.max_extra_substep_rate
     }
 
     #[wasm_bindgen(setter)]
-    pub fn set_softBodiesMaxExtraSubsteps(&mut self, value: usize) {
-        self.0.soft_bodies.max_extra_substeps = value;
+    pub fn set_softBodiesMaxExtraSubstepRate(&mut self, value: f32) {
+        self.0.soft_bodies.max_extra_substep_rate = value;
     }
 
     #[wasm_bindgen(getter)]

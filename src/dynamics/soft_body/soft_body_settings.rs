@@ -20,10 +20,15 @@ pub struct SoftBodiesSettings {
     /// constraint's relative error) is re-solved after the contacts inside every substep, so a
     /// light body buried under heavier ones is not torn (default: `0.75`; `Real::MAX` to disable).
     pub resweep_strain: Real,
-    /// Maximum number of extra substeps a soft body requests for its island component while it
-    /// is hit fast (default: `4`; `0` disables the impact-adaptive substeps): enough substeps to
-    /// bound the per-substep travel of its particles and approaching rigid bodies by one radius.
-    pub max_extra_substeps: usize,
+    /// Most extra substeps a second a soft body adds to its island component while it is hit
+    /// fast or loaded hard (default: `120`; `0` disables the adaptive substeps). A body hit fast
+    /// asks for enough substeps to bound the per-substep travel of its particles and of the rigid
+    /// bodies approaching it by one particle radius, and a body loaded hard for the substep rate
+    /// its load calls for; whatever the step length, the extra substeps a step runs are at most
+    /// this many a second ([`Self::max_extra_substeps`]): 4 a step at 30 steps a second, 2 at 60,
+    /// 1 at 120 and none from 240, so a hit costs about the same soft body work per simulated
+    /// second at every tick rate.
+    pub max_extra_substep_rate: Real,
     /// Factor applied to the [`IntegrationParameters`](crate::dynamics::IntegrationParameters)
     /// contact softness natural frequencies for the soft-body contacts (default: `4.0`); they run
     /// stiffer because a contact's effective mass is a few particles' worth, not the whole body's.
@@ -40,11 +45,20 @@ impl Default for SoftBodiesSettings {
         Self {
             recovery: SoftRecoverySettings::default(),
             resweep_strain: 0.75,
-            max_extra_substeps: 4,
+            max_extra_substep_rate: 120.0,
             contact_stiffening: 4.0,
             #[cfg(feature = "fem")]
             fem: SoftFemParameters::default(),
         }
+    }
+}
+
+impl SoftBodiesSettings {
+    /// The most extra substeps a step of `dt` seconds may add to a soft body's island:
+    /// [`Self::max_extra_substep_rate`] over that step, rounded down.
+    pub fn max_extra_substeps(&self, dt: Real) -> usize {
+        // A rate the step divides evenly (120 a second over 1/30 s) allows exactly that many.
+        (self.max_extra_substep_rate * dt + 1.0e-4).floor().max(0.0) as usize
     }
 }
 

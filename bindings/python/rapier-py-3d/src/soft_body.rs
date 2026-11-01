@@ -1366,15 +1366,16 @@ impl SoftBodiesSettings {
     fn set_resweep_strain(&mut self, v: Real) -> PyResult<()> {
         self.write(|s| s.resweep_strain = v)
     }
-    /// Maximum number of extra substeps a soft body requests while it is hit fast (default
-    /// ``4``; ``0`` disables them).
+    /// Most extra substeps a second a soft body adds to its island while it is hit fast or
+    /// loaded hard (default ``120``; ``0`` disables them): 4 a step at 30 steps a second, 2 at
+    /// 60, 1 at 120 and none from 240.
     #[getter]
-    fn max_extra_substeps(&self) -> PyResult<usize> {
-        self.read(|s| s.max_extra_substeps)
+    fn max_extra_substep_rate(&self) -> PyResult<Real> {
+        self.read(|s| s.max_extra_substep_rate)
     }
     #[setter]
-    fn set_max_extra_substeps(&mut self, v: usize) -> PyResult<()> {
-        self.write(|s| s.max_extra_substeps = v)
+    fn set_max_extra_substep_rate(&mut self, v: Real) -> PyResult<()> {
+        self.write(|s| s.max_extra_substep_rate = v)
     }
     /// Factor applied to the contact softness natural frequencies for the soft-body contacts
     /// (default ``4.0``).

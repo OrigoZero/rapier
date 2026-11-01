@@ -592,9 +592,9 @@ fn configure_soft_bodies(
     // Strain beyond which a constraint is re-solved after the contacts of every substep.
     // Default: 0.75
     settings.resweep_strain = 0.75;
-    // Extra substeps a soft-body requests while it is hit fast; 0 disables them.
-    // Default: 4
-    settings.max_extra_substeps = 4;
+    // Most extra substeps a second a soft body adds while it is hit fast or loaded hard; 0 disables them.
+    // Default: 120
+    settings.max_extra_substep_rate = 120.0;
     // Stiffening of the soft-body contacts relative to the rigid ones.
     // Default: 4.0
     settings.contact_stiffening = 4.0;

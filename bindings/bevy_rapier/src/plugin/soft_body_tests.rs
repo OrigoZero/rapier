@@ -957,7 +957,7 @@ fn soft_body_settings_wrappers_serde_round_trip() {
     use crate::reflect::{SoftBodiesSettingsWrapper, SoftRecoverySettingsWrapper};
 
     let mut settings = SoftBodiesSettings {
-        max_extra_substeps: 7,
+        max_extra_substep_rate: 70.0,
         ..Default::default()
     };
     settings.recovery.recovery_pace = 0.25;
@@ -982,10 +982,10 @@ fn soft_body_settings_are_reflected() {
         .path_mut::<Real>("soft_bodies.recovery.recovery_pace")
         .unwrap() = 0.125;
     *params
-        .path_mut::<usize>("soft_bodies.max_extra_substeps")
-        .unwrap() = 2;
+        .path_mut::<Real>("soft_bodies.max_extra_substep_rate")
+        .unwrap() = 60.0;
     assert_eq!(params.0.soft_bodies.recovery.recovery_pace, 0.125);
-    assert_eq!(params.0.soft_bodies.max_extra_substeps, 2);
+    assert_eq!(params.0.soft_bodies.max_extra_substep_rate, 60.0);
     assert!(params.as_reflect().reflect_ref().as_struct().is_ok());
 
     let mut material = SoftBodyMaterial::default();

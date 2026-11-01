@@ -94,7 +94,10 @@ fn soft_contact_history_covers_steps_not_ccd_passes() {
     let mut world = PhysicsWorld::new();
     world.gravity = Vector::ZERO;
     world.integration_parameters.max_ccd_substeps = 2;
-    let max_extra = world.integration_parameters.soft_bodies.max_extra_substeps;
+    let max_extra = world
+        .integration_parameters
+        .soft_bodies
+        .max_extra_substeps(world.integration_parameters.dt);
     // Splits the second step, far from the cube.
     wall_and_ccd_ball(&mut world, 1.8);
     let cube = SoftBodyBuilder::cuboid(Vector::new(0.0, 1.0, 0.0), Vector::splat(0.5), 3, 3, 3)
