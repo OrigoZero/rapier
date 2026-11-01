@@ -2,6 +2,7 @@
 
 use super::super::soft_fem_sparse::{BlockMatrix, ConjugateGradient};
 use crate::alloc_prelude::*;
+use crate::dynamics::SoftBodyMaterial;
 use crate::dynamics::solver::soft_constraint::soft_element_constraint::{
     MAX_CONSTRAINT_PARTICLES, StrainMatrix, StrainVector,
 };
@@ -39,6 +40,19 @@ pub(super) struct FemCell {
     /// re-linearizes when the strain moved by more than `STIFFNESS_UPDATE_STRAIN`.
     pub(super) tangent: StrainMatrix,
     pub(super) tangent_strain: StrainVector,
+    /// Index of the cell's material in [`SoftFemSystem::materials`].
+    pub(super) material: u16,
+    /// Whether the cell's material flows plastically (a cell yield and a creep rate): its rest
+    /// shape then flows at every substep it is assembled in.
+    pub(super) plastic: bool,
+    /// The plastic stretch `P` of the cell's rest shape, `Dm = P Dm₀`, as the substeps' flow has
+    /// left it.
+    pub(super) plastic_stretch: Matrix,
+    /// The cell's vertices' rest positions as the body was created (`Dm₀`'s vertices).
+    pub(super) rest0: [Vector; MAX_CONSTRAINT_PARTICLES],
+    /// The share of the cell's strain its substeps' flow left elastic this step: the product of
+    /// `1 − share` over the flows.
+    pub(super) retained: Real,
 }
 
 /// One volume element of a FEM soft body with the [`SoftBodyCellModel::Volume`] cell model: energy
@@ -77,6 +91,11 @@ pub(super) struct FemSpring {
     pub(super) yield_limits: (Real, Real),
     /// The shortest and the longest rest length the element's plastic bounds allow.
     pub(super) rest_range: (Real, Real),
+    /// The rest length the element was created with, before any plastic flow.
+    pub(super) initial_rest_length: Real,
+    /// Index of the element's material in [`SoftFemSystem::materials`], whose edge yield and
+    /// creep rate flow its rest length at every substep (see [`Self::creep`]).
+    pub(super) material: u16,
 }
 
 impl FemSpring {
@@ -114,6 +133,20 @@ impl FemSpring {
             self.rest_length = self.rest_length.min(rest);
         }
     }
+
+    /// Flows the element's rest length toward `length` for the substep `dt` past `material`'s
+    /// edge yield, at its creep rate (see `edge_flowed_rest_length`).
+    pub(super) fn creep(&mut self, length: Real, material: &SoftBodyMaterial, dt: Real) {
+        if let Some(rest) = crate::dynamics::soft_body::edge_flowed_rest_length(
+            self.rest_length,
+            self.initial_rest_length,
+            length,
+            material,
+            dt,
+        ) {
+            self.rest_length = rest;
+        }
+    }
 }
 
 /// One dihedral bending element of a FEM soft body (3D): energy `½ k (θ − θ₀)²`, Gauss-Newton
@@ -127,6 +160,11 @@ pub(super) struct FemDihedral {
     pub(super) rest_angle: Real,
     pub(super) stiffness: Real,
     pub(super) beta: Real,
+    /// The rest angle the element was created with, before any plastic flow.
+    pub(super) initial_rest_angle: Real,
+    /// Index of the element's material in [`SoftFemSystem::materials`], whose edge yield and
+    /// creep rate flow its rest angle at every substep.
+    pub(super) material: u16,
 }
 
 /// The FEM system of one soft body: the block-sparse `A`, its conjugate-gradient workspace, and
@@ -145,6 +183,8 @@ pub(crate) struct SoftFemSystem {
     pub(super) springs: Vec<FemSpring>,
     #[cfg(feature = "dim3")]
     pub(super) dihedrals: Vec<FemDihedral>,
+    /// The body's materials, by element material index (see `SoftBody::element_material`).
+    pub(super) materials: Vec<SoftBodyMaterial>,
     /// Particle masses (`0` for a pinned particle: its constraint is a Dirichlet constraint).
     pub(super) mass: Vec<Real>,
     /// Solver-body slot of every particle.

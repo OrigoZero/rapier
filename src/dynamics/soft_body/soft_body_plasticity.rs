@@ -9,7 +9,6 @@ use crate::math::{DIM, Matrix, Real, Vector};
 #[cfg(not(feature = "std"))]
 #[allow(unused_imports)]
 use simba::scalar::{ComplexField as _, RealField as _};
-#[cfg(feature = "dim3")]
 use simba::simd::SimdComplexField as _;
 
 /// Which strains make a soft-body edge flow plastically (see
@@ -48,45 +47,22 @@ impl SoftBodyEdge {
     }
 
     /// Flows the rest length toward `length` when the strain exceeds the material's edge yield
-    /// ([`SoftBodyMaterial::edge_plastic_yield`]); `dt`: the step length. Returns whether the
-    /// edge flowed significantly (such a body is kept awake). An edge carrying its yield force
-    /// ([`SoftBodyMaterial::edge_yield_force`]) flows within the solver's substeps instead.
+    /// ([`SoftBodyMaterial::edge_plastic_yield`]) for `dt` (see [`edge_flowed_rest_length`]).
+    /// Returns whether the edge flowed significantly (such a body is kept awake). An edge
+    /// carrying its yield force ([`SoftBodyMaterial::edge_yield_force`]) flows within the
+    /// solver's substeps instead.
     pub(crate) fn plastic_flow(
         &mut self,
         length: Real,
         material: &SoftBodyMaterial,
         dt: Real,
     ) -> bool {
-        let yield_strain = material.edge_plastic_yield;
-        if yield_strain <= 0.0 || material.edge_plastic_creep <= 0.0 || self.rest_length <= 0.0 {
-            return false;
-        }
-        let strain = length / self.rest_length - 1.0;
-        let allowed = match material.edge_plastic_flow {
-            SoftEdgePlasticFlow::Both => true,
-            SoftEdgePlasticFlow::Compression => strain < 0.0,
-            SoftEdgePlasticFlow::Tension => strain > 0.0,
-        };
-        if !allowed || strain.abs() <= yield_strain {
-            return false;
-        }
-        // The rest length that would leave exactly the yield strain: only the excess flows, at
-        // the creep rate.
-        let signed_yield = if strain > 0.0 {
-            yield_strain
-        } else {
-            -yield_strain
-        };
-        let target = length / (1.0 + signed_yield);
-        let blend = (material.edge_plastic_creep * dt).min(1.0);
         let initial = self.initial_rest_length();
-        // Within the plastic bounds; a set a yield force carried past one stays where it is.
-        let shortest = (initial * (1.0 - material.edge_plastic_bound(-1.0)))
-            .max(Real::EPSILON)
-            .min(self.rest_length);
-        let longest = (initial * (1.0 + material.edge_plastic_bound(1.0))).max(self.rest_length);
-        let new_rest =
-            (self.rest_length + (target - self.rest_length) * blend).clamp(shortest, longest);
+        let Some(new_rest) =
+            edge_flowed_rest_length(self.rest_length, initial, length, material, dt)
+        else {
+            return false;
+        };
         let increment = (new_rest - self.rest_length).abs() / initial;
         // The warm-start impulse followed the old length error; it scales with what is left of it.
         let error = length - self.rest_length;
@@ -108,7 +84,8 @@ impl SoftBodyEdge {
         let initial = self.initial_rest_length();
         // The length read back through a permanent set rounds, so one within a few ulps of the
         // target has reached it.
-        if !target.is_finite() || (target - initial).abs() <= ACTUATOR_REACHED * target.max(initial) {
+        if !target.is_finite() || (target - initial).abs() <= ACTUATOR_REACHED * target.max(initial)
+        {
             return false;
         }
         let reach = actuator.speed.max(0.0) * dt;
@@ -129,29 +106,21 @@ const ACTUATOR_REACHED: Real = 4.0 * Real::EPSILON;
 #[cfg(feature = "dim3")]
 impl SoftBodyDihedral {
     /// Flows the rest angle toward the current `angle` when the fold exceeds the material's
-    /// edge yield, read in radians (see [`SoftBodyMaterial::edge_plastic_yield`]; `dt`: the step
-    /// length). Returns whether the dihedral flowed by a significant amount.
+    /// edge yield, read in radians, for `dt` (see [`dihedral_flowed_rest_angle`]). Returns
+    /// whether the dihedral flowed by a significant amount.
     pub(crate) fn plastic_flow(
         &mut self,
         angle: Real,
         material: &SoftBodyMaterial,
         dt: Real,
     ) -> bool {
-        let yield_angle = material.edge_plastic_yield;
-        if yield_angle <= 0.0 || material.edge_plastic_creep <= 0.0 {
-            return false;
-        }
-        let deviation = angle - self.rest_angle;
-        if deviation.abs() <= yield_angle {
-            return false;
-        }
-        // The rest angle that would leave exactly the yield: only the excess flows.
-        let target = angle - yield_angle.copysign(deviation);
-        let blend = (material.edge_plastic_creep * dt).min(1.0);
         let initial = self.initial_rest_angle();
-        let max = material.edge_plastic_max.max(0.0);
-        let new_rest = (self.rest_angle + (target - self.rest_angle) * blend)
-            .clamp(initial - max, initial + max);
+        let Some(new_rest) =
+            dihedral_flowed_rest_angle(self.rest_angle, initial, angle, material, dt)
+        else {
+            return false;
+        };
+        let deviation = angle - self.rest_angle;
         let increment = (new_rest - self.rest_angle).abs();
         // The warm-start impulse followed the old angle error; it scales with what is left of it.
         self.impulse *= ((angle - new_rest) / deviation).clamp(0.0, 1.0);
@@ -159,6 +128,83 @@ impl SoftBodyDihedral {
         self.plastic_set = new_rest - initial;
         increment > 1.0e-4
     }
+}
+
+/// The share of the strain past the yield that becomes permanent over `dt` at `creep` per second:
+/// `1 - e^(-creep dt)`, the exact solution of a flow at that rate over the interval. Flowing in
+/// many short intervals or in one long one sets the same share of a held strain, so a body flows
+/// alike at every step and substep length; `Real::INFINITY` sets the whole excess at once.
+pub(crate) fn creep_share(creep: Real, dt: Real) -> Real {
+    if !(creep > 0.0) || !(dt > 0.0) {
+        return 0.0;
+    }
+    1.0 - (-(creep * dt)).simd_exp()
+}
+
+/// The rest length an edge of rest length `rest` (created at `initial`) flows to when held at
+/// `length` for `dt`: past the material's edge yield ([`SoftBodyMaterial::edge_plastic_yield`]),
+/// in the directions its [`SoftBodyMaterial::edge_plastic_flow`] allows, the excess over the
+/// yield flows at the creep rate, within the plastic bounds (a set a yield force carried past one
+/// stays where it is). `None` when it does not flow.
+pub(crate) fn edge_flowed_rest_length(
+    rest: Real,
+    initial: Real,
+    length: Real,
+    material: &SoftBodyMaterial,
+    dt: Real,
+) -> Option<Real> {
+    let yield_strain = material.edge_plastic_yield;
+    if yield_strain <= 0.0 || material.edge_plastic_creep <= 0.0 || rest <= 0.0 {
+        return None;
+    }
+    let strain = length / rest - 1.0;
+    let allowed = match material.edge_plastic_flow {
+        SoftEdgePlasticFlow::Both => true,
+        SoftEdgePlasticFlow::Compression => strain < 0.0,
+        SoftEdgePlasticFlow::Tension => strain > 0.0,
+    };
+    if !allowed || strain.abs() <= yield_strain {
+        return None;
+    }
+    // The rest length that would leave exactly the yield strain: only the excess flows.
+    let signed_yield = if strain > 0.0 {
+        yield_strain
+    } else {
+        -yield_strain
+    };
+    let target = length / (1.0 + signed_yield);
+    let blend = creep_share(material.edge_plastic_creep, dt);
+    let shortest = (initial * (1.0 - material.edge_plastic_bound(-1.0)))
+        .max(Real::EPSILON)
+        .min(rest);
+    let longest = (initial * (1.0 + material.edge_plastic_bound(1.0))).max(rest);
+    Some((rest + (target - rest) * blend).clamp(shortest, longest))
+}
+
+/// The rest angle a dihedral of rest angle `rest` (created at `initial`) flows to when folded to
+/// `angle` for `dt`: past the material's edge yield, read in radians, the excess flows at the
+/// edge creep rate, within `edge_plastic_max` of the initial angle. `None` when it does not flow.
+#[cfg(feature = "dim3")]
+pub(crate) fn dihedral_flowed_rest_angle(
+    rest: Real,
+    initial: Real,
+    angle: Real,
+    material: &SoftBodyMaterial,
+    dt: Real,
+) -> Option<Real> {
+    let yield_angle = material.edge_plastic_yield;
+    if yield_angle <= 0.0 || material.edge_plastic_creep <= 0.0 {
+        return None;
+    }
+    let deviation = angle - rest;
+    if deviation.abs() <= yield_angle {
+        return None;
+    }
+    // The rest angle that would leave exactly the yield: only the excess flows.
+    let target = angle - yield_angle.copysign(deviation);
+    let blend = creep_share(material.edge_plastic_creep, dt);
+    let max = material.edge_plastic_max.max(0.0);
+    Some((rest + (target - rest) * blend).clamp(initial - max, initial + max))
 }
 
 /// Everything plastic flow changed in a soft body since it was created: each particle's rest

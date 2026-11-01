@@ -50,6 +50,10 @@ impl SoftFemSystem {
         self.response.resize(n, Vector::ZERO);
         self.clear_columns();
 
+        self.materials.clear();
+        self.materials.push(sb.material);
+        self.materials.extend_from_slice(sb.region_materials());
+
         let elastic = matches!(
             sb.cell_model,
             SoftBodyCellModel::Corotational | SoftBodyCellModel::NeoHookean
@@ -71,6 +75,13 @@ impl SoftFemSystem {
             let inv_mass: [Real; MAX_CONSTRAINT_PARTICLES] =
                 core::array::from_fn(|k| sb.particles[c.vertices[k] as usize].inv_mass);
             let beta = Self::rayleigh_coefficient(&coeffs, &inv_mass, mu, lambda, volume, zeta);
+            let plastic =
+                volume > 0.0 && material.plastic_yield > 0.0 && material.plastic_creep > 0.0;
+            let rest0 = if plastic {
+                core::array::from_fn(|k| sb.particles[c.vertices[k] as usize].initial_rest_position)
+            } else {
+                [Vector::ZERO; MAX_CONSTRAINT_PARTICLES]
+            };
             self.cells.push(FemCell {
                 vertices: c.vertices,
                 coeffs,
@@ -84,6 +95,11 @@ impl SoftFemSystem {
                 neo_hookean: sb.cell_model == SoftBodyCellModel::NeoHookean,
                 tangent: Self::corotational_hessian(mu * volume, lambda * volume),
                 tangent_strain: StrainVector::repeat(Real::MAX),
+                material: c.material,
+                plastic,
+                plastic_stretch: c.plastic_stretch,
+                rest0,
+                retained: 1.0,
             });
         }
 
@@ -168,10 +184,9 @@ impl SoftFemSystem {
                 + sb.particles[e.vertices[1] as usize].inv_mass;
             // A spring in physical units is its own stiffness, damped by `c = β k`.
             let (stiffness, beta) = match e.spring {
-                Some(spring) if spring.stiffness > 0.0 && spring.stiffness.is_finite() => (
-                    spring.stiffness,
-                    spring.damping.max(0.0) / spring.stiffness,
-                ),
+                Some(spring) if spring.stiffness > 0.0 && spring.stiffness.is_finite() => {
+                    (spring.stiffness, spring.damping.max(0.0) / spring.stiffness)
+                }
                 _ => Self::spring_stiffness(&softness, w),
             };
             let blocks = core::array::from_fn(|k| {
@@ -189,10 +204,14 @@ impl SoftFemSystem {
                 rest_range: {
                     let initial = e.initial_rest_length();
                     (
-                        (initial * (1.0 - material.edge_plastic_bound(-1.0))).max(Real::EPSILON).min(e.rest_length),
+                        (initial * (1.0 - material.edge_plastic_bound(-1.0)))
+                            .max(Real::EPSILON)
+                            .min(e.rest_length),
                         (initial * (1.0 + material.edge_plastic_bound(1.0))).max(e.rest_length),
                     )
                 },
+                initial_rest_length: e.initial_rest_length(),
+                material: e.material,
             });
         }
     }
@@ -221,6 +240,8 @@ impl SoftFemSystem {
                 rest_angle: d.rest_angle,
                 stiffness,
                 beta,
+                initial_rest_angle: d.initial_rest_angle(),
+                material: d.material,
             });
         }
     }

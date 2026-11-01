@@ -3,19 +3,19 @@
 use super::super::soft_fem_sparse::Preconditioner;
 use super::SoftFemSystem;
 use crate::alloc_prelude::*;
-use crate::dynamics::{SoftBody, SoftBodyMaterial};
 use crate::dynamics::soft_body::soft_body_shape_matching::extract_rotation;
 use crate::dynamics::solver::soft_constraint::soft_constraints_set::{
-    plastic_flow, total_tensile_strain,
+    flowed_rest_shape, stretch_moved, total_tensile_strain,
 };
 #[cfg(feature = "dim3")]
 use crate::dynamics::solver::soft_constraint::soft_element_constraint::dihedral_gradients;
 use crate::dynamics::solver::soft_constraint::soft_element_constraint::{
-    MAX_CONSTRAINT_PARTICLES, NeoHookeanConstraint, STIFFNESS_UPDATE_STRAIN, SoftElasticConstraint,
-    StrainJacobian, outer_product, strain_rows_of,
+    MAX_CONSTRAINT_PARTICLES, NeoHookeanConstraint, STIFFNESS_UPDATE_STRAIN, STRAIN_ROWS,
+    SoftElasticConstraint, StrainJacobian, outer_product, strain_rows_of,
 };
 use crate::dynamics::solver::solver_body::SolverBodies;
-use crate::math::{Matrix, Real, Vector};
+use crate::dynamics::{SoftBody, SoftBodyMaterial};
+use crate::math::{DIM, Matrix, Real, Vector};
 use crate::utils::RotationOps;
 #[cfg(not(feature = "std"))]
 #[allow(unused_imports)]
@@ -40,6 +40,11 @@ impl SoftFemSystem {
     /// Assembles `A = M + (h² + h β) K` and the elastic force at the current positions; pinned
     /// degrees of freedom become Dirichlet rows, with their coupling to the free rows
     /// (`Σ_{q pinned} A_pq v_q`) kept for the right-hand side; a step's first substep reuses it.
+    ///
+    /// It runs once per substep (`dt`: the substep length), and each plastic element's rest
+    /// shape flows first, at the strain the substep starts from, over the substep: a body's
+    /// plastic flow then follows its strain through the substeps of an impact, at its creep rate
+    /// per second, whatever the step length.
     pub(super) fn assemble_operator(&mut self, dt: Real) {
         self.matrix.clear_values();
         for (k, m) in self.mass.iter().enumerate() {
@@ -59,6 +64,32 @@ impl SoftFemSystem {
             cell.rotation = extract_rotation(f, cell.rotation);
             let s = cell.rotation.inverse().to_mat() * f;
             cell.strain = strain_rows_of(&(s - Matrix::IDENTITY));
+            if cell.plastic {
+                let material = self
+                    .materials
+                    .get(cell.material as usize)
+                    .unwrap_or(&self.materials[0]);
+                if let Some(flowed) = flowed_rest_shape(
+                    &cell.plastic_stretch,
+                    &cell.strain,
+                    cell.inverted,
+                    &cell.rest0,
+                    material,
+                    dt,
+                ) {
+                    // The rest shape the substep flowed to; the strain is read against it. The
+                    // flow keeps the rest volume, so the cell's material constants stand.
+                    cell.plastic_stretch = flowed.plastic_stretch;
+                    cell.inv_rest_matrix = flowed.inv_rest_matrix;
+                    cell.coeffs = SoftElasticConstraint::coefficients(&cell.inv_rest_matrix);
+                    cell.retained *= 1.0 - flowed.share;
+                    let f = SoftBody::cell_edge_matrix(x) * cell.inv_rest_matrix;
+                    cell.inverted = f.determinant() < 0.0;
+                    cell.rotation = extract_rotation(f, cell.rotation);
+                    let s = cell.rotation.inverse().to_mat() * f;
+                    cell.strain = strain_rows_of(&(s - Matrix::IDENTITY));
+                }
+            }
 
             let gradient = if cell.neo_hookean {
                 // Stable Neo-Hookean (Smith et al. 2018): the energy is defined and bounded
@@ -189,6 +220,7 @@ impl SoftFemSystem {
             position,
             force: forces,
             matrix,
+            materials,
             ..
         } = self;
         for spring in springs.iter_mut() {
@@ -204,8 +236,13 @@ impl SoftFemSystem {
             }
             // A yielding element gives way at its yield force: its rest length follows the
             // load within the substep, so it never carries past it. It keeps its elastic
-            // stiffness in the solve, which holds the substep's motion against it.
+            // stiffness in the solve, which holds the substep's motion against it. Past its
+            // strain yield it then creeps over the substep.
             spring.return_map(length);
+            let material = materials
+                .get(spring.material as usize)
+                .unwrap_or(&materials[0]);
+            spring.creep(length, material, dt);
             let c = length - spring.rest_length;
             let (magnitude, stiff) = spring.force(c);
             let n = d / length;
@@ -239,14 +276,30 @@ impl SoftFemSystem {
     /// Accumulates the dihedral elements' force and Gauss-Newton tangent.
     #[cfg(feature = "dim3")]
     fn assemble_dihedrals(&mut self, dt: Real) {
-        for dihedral in &self.dihedrals {
+        for dihedral in &mut self.dihedrals {
             if dihedral.stiffness <= 0.0 {
                 continue;
             }
             let pos: [Vector; 4] =
                 core::array::from_fn(|k| self.position[dihedral.vertices[k] as usize]);
             let mut grad = [Vector::ZERO; 4];
-            let c = dihedral_gradients(&pos, dihedral.rest_angle, &mut grad);
+            let mut c = dihedral_gradients(&pos, dihedral.rest_angle, &mut grad);
+            // Past its yield the rest angle creeps over the substep toward the fold.
+            let material = self
+                .materials
+                .get(dihedral.material as usize)
+                .unwrap_or(&self.materials[0]);
+            let angle = dihedral.rest_angle + c;
+            if let Some(rest) = crate::dynamics::soft_body::dihedral_flowed_rest_angle(
+                dihedral.rest_angle,
+                dihedral.initial_rest_angle,
+                angle,
+                material,
+                dt,
+            ) {
+                dihedral.rest_angle = rest;
+                c = angle - rest;
+            }
             for k in 0..4 {
                 self.force[dihedral.vertices[k] as usize] -= grad[k] * (dihedral.stiffness * c);
             }
@@ -308,8 +361,9 @@ impl SoftFemSystem {
     }
 
     /// Writes back what the soft body keeps across steps: each cell's warm-started polar rotation,
-    /// the step's plastic flow, and the tearing marks of elements strained past `tear_strain`
-    /// (the FEM counterpart of `SoftConstraintsSet::writeback_constraints`).
+    /// the rest shapes its substeps' plastic flow left, and the tearing marks of elements
+    /// strained past `tear_strain` (the FEM counterpart of
+    /// `SoftConstraintsSet::writeback_constraints`).
     pub fn writeback(&self, sb: &mut SoftBody, step_dt: Real) {
         let mut flowing = false;
         let mut torn = false;
@@ -347,14 +401,20 @@ impl SoftFemSystem {
                 continue;
             }
             let material = &cell_materials[ci];
-            // The tear strain counts the plastic stretch, as it stood before this step's flow.
-            let tensile = total_tensile_strain(&cell.strain, &out.plastic_stretch);
-            if material.plastic_yield > 0.0 && material.plastic_creep > 0.0 {
-                let rest0: [Vector; MAX_CONSTRAINT_PARTICLES] = core::array::from_fn(|k| {
-                    sb.particles[out.vertices[k] as usize].initial_rest_position
-                });
-                if plastic_flow(out, &cell.strain, cell.inverted, &rest0, material, step_dt) {
+            // The tear strain counts the plastic stretch the last substep's strain is read
+            // against.
+            let tensile = total_tensile_strain(&cell.strain, &cell.plastic_stretch);
+            if cell.plastic && cell.plastic_stretch != out.plastic_stretch {
+                let dm = cell.plastic_stretch * SoftBody::cell_edge_matrix(cell.rest0);
+                let factorial = if DIM == 2 { 2.0 } else { 6.0 };
+                if stretch_moved(&out.plastic_stretch, &cell.plastic_stretch) {
                     flowing = true;
+                }
+                out.plastic_stretch = cell.plastic_stretch;
+                out.inv_rest_matrix = cell.inv_rest_matrix;
+                out.rest_volume = dm.determinant() / factorial;
+                for impulse in &mut out.impulses[..STRAIN_ROWS] {
+                    *impulse *= cell.retained;
                 }
             }
             if material.tear_strain.is_some() {
@@ -380,16 +440,16 @@ impl SoftFemSystem {
                 .zip(sb.dihedrals.iter_mut())
                 .zip(&dihedral_materials)
             {
-                if material.edge_plastic_yield <= 0.0 || material.edge_plastic_creep <= 0.0 {
+                // The rest angle the substeps' flow left.
+                if material.edge_plastic_yield <= 0.0 || dihedral.rest_angle == d.rest_angle {
                     continue;
                 }
-                let pos: [Vector; 4] =
-                    core::array::from_fn(|k| self.position[dihedral.vertices[k] as usize]);
-                let mut grad = [Vector::ZERO; 4];
-                let angle = d.rest_angle + dihedral_gradients(&pos, d.rest_angle, &mut grad);
-                if d.plastic_flow(angle, material, step_dt) {
+                if (dihedral.rest_angle - d.rest_angle).abs() > 1.0e-4 {
                     flowing = true;
                 }
+                let initial = d.initial_rest_angle();
+                d.rest_angle = dihedral.rest_angle;
+                d.plastic_set = dihedral.rest_angle - initial;
             }
         }
         let edge_materials: Vec<SoftBodyMaterial> = sb
@@ -412,7 +472,8 @@ impl SoftFemSystem {
                 continue;
             }
             let material = &edge_materials[ei];
-            // The rest length the substeps' flow at the yield force left.
+            // The rest length the substeps' flow left, at the yield force and past the strain
+            // yield.
             if spring.rest_length != edge.rest_length {
                 let initial = edge.initial_rest_length();
                 if (spring.rest_length - edge.rest_length).abs() > 1.0e-4 * initial {
@@ -420,9 +481,6 @@ impl SoftFemSystem {
                 }
                 edge.rest_length = spring.rest_length;
                 edge.plastic_strain = spring.rest_length / initial - 1.0;
-            }
-            if edge.plastic_flow(length, material, step_dt) {
-                flowing = true;
             }
             if !material.tears() {
                 continue;
