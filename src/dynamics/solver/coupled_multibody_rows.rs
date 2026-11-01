@@ -111,11 +111,14 @@ pub(crate) fn coupling(
     k
 }
 
-/// Whether two rows act on a same multibody.
-fn share_a_multibody(a: &[Option<RowSide>; 2], b: &[Option<RowSide>; 2]) -> bool {
-    a.iter()
-        .flatten()
-        .any(|sa| sa.is_multibody() && b.iter().flatten().any(|sb| sa.velocities == sb.velocities))
+/// The entries of `by_velocities` (sorted) for the rows with a side on `velocities`.
+fn acting_on(
+    by_velocities: &[(SideVelocities, usize)],
+    velocities: SideVelocities,
+) -> &[(SideVelocities, usize)] {
+    let from = by_velocities.partition_point(|(v, _)| *v < velocities);
+    let to = from + by_velocities[from..].partition_point(|(v, _)| *v == velocities);
+    &by_velocities[from..to]
 }
 
 /// The multibody joint rows a pass's contacts are solved together with, and the buffers each
@@ -128,9 +131,17 @@ pub(crate) struct CoupledRows {
     pub engaged: Vec<usize>,
     /// The sides of each engaged row, indexed like `engaged`.
     pub sides: Vec<[Option<RowSide>; 2]>,
-    /// `K` between the engaged rows, row-major, `engaged.len()` square; the diagonal holds each
-    /// row's own `1 / inv_lhs`, its softness included.
-    pub coupling: Vec<Real>,
+    /// One entry per side of each engaged row, sorted: the velocities the side acts on, and the
+    /// row's position in `engaged`.
+    by_velocities: Vec<(SideVelocities, usize)>,
+    /// `K` between the engaged rows that act on a velocity in common, row by row: the entries of
+    /// the row at position `a` of `engaged` are `coupled[coupled_start[a]..coupled_start[a + 1]]`,
+    /// each `(b, K[a][b])`, sorted by `b`. The diagonal holds each row's own `1 / inv_lhs`, its
+    /// softness included.
+    coupled_start: Vec<usize>,
+    coupled: Vec<(usize, Real)>,
+    /// The rows a row of `engaged` shares a velocity with, while `coupled` is built.
+    neighbours: Vec<usize>,
     /// The positions in `engaged` of the joint rows of the block being solved.
     pub block: Vec<usize>,
     /// For each joint row of the block and each contact row, in that order, `K` from the
@@ -157,10 +168,12 @@ pub(crate) struct CoupledRows {
 }
 
 impl CoupledRows {
-    /// Collects the engaged joint rows of `joints` and the coupling between them.
+    /// Collects the engaged joint rows of `joints` and the coupling between the ones that act on
+    /// a velocity in common.
     pub fn gather(&mut self, joints: &[GenericJointConstraint], jacobians: &DVector) {
         self.engaged.clear();
         self.sides.clear();
+        self.by_velocities.clear();
         for (i, row) in joints.iter().enumerate() {
             let [lo, hi] = row.impulse_bounds;
             if row.impulse <= lo || row.impulse >= hi {
@@ -170,20 +183,47 @@ impl CoupledRows {
             if !sides.iter().flatten().any(RowSide::is_multibody) {
                 continue;
             }
+            let p = self.engaged.len();
+            for side in sides.iter().flatten() {
+                self.by_velocities.push((side.velocities, p));
+            }
             self.engaged.push(i);
             self.sides.push(sides);
         }
-        let n = self.engaged.len();
-        self.coupling.clear();
-        self.coupling.resize(n * n, 0.0);
-        for a in 0..n {
-            for b in 0..n {
-                self.coupling[a * n + b] = if a == b {
+        self.by_velocities.sort_unstable();
+
+        self.coupled_start.clear();
+        self.coupled.clear();
+        for a in 0..self.engaged.len() {
+            self.coupled_start.push(self.coupled.len());
+            self.neighbours.clear();
+            for side in self.sides[a].iter().flatten() {
+                self.neighbours.extend(
+                    acting_on(&self.by_velocities, side.velocities)
+                        .iter()
+                        .map(|(_, b)| *b),
+                );
+            }
+            self.neighbours.sort_unstable();
+            self.neighbours.dedup();
+            for &b in &self.neighbours {
+                let k = if a == b {
                     crate::utils::inv(joints[self.engaged[a]].inv_lhs)
                 } else {
                     coupling(&self.sides[a], jacobians, &self.sides[b], jacobians)
                 };
+                self.coupled.push((b, k));
             }
+        }
+        self.coupled_start.push(self.coupled.len());
+    }
+
+    /// `K` from the engaged row at position `b` to the one at position `a`.
+    pub fn engaged_coupling(&self, a: usize, b: usize) -> Real {
+        let entries = &self.coupled[self.coupled_start[a]..self.coupled_start[a + 1]];
+        match entries.binary_search_by_key(&b, |(row, _)| *row) {
+            Ok(at) => entries[at].1,
+            Err(_) => 0.0,
         }
     }
 
@@ -199,11 +239,18 @@ impl CoupledRows {
     ) {
         self.block.clear();
         self.block_coupling.clear();
-        for p in 0..self.engaged.len() {
-            if !share_a_multibody(&self.sides[p], &contact[0]) {
-                continue;
+        for side in contact[0].iter().flatten() {
+            if side.is_multibody() {
+                self.block.extend(
+                    acting_on(&self.by_velocities, side.velocities)
+                        .iter()
+                        .map(|(_, p)| *p),
+                );
             }
-            self.block.push(p);
+        }
+        self.block.sort_unstable();
+        self.block.dedup();
+        for &p in &self.block {
             for sides in contact {
                 let to_row = coupling(&self.sides[p], joint_jacobians, sides, jacobians);
                 let to_contact = coupling(sides, jacobians, &self.sides[p], joint_jacobians);

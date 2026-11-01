@@ -687,7 +687,6 @@ impl GenericContactConstraint {
         rows: &mut CoupledRows,
     ) {
         let j_step = j_step(ndofs1, ndofs2) * DIM;
-        let num_engaged = rows.engaged.len();
         let mut nrm_j_id = normal_j_id(j_id, ndofs1, ndofs2);
 
         for normal_part in normal_parts {
@@ -748,7 +747,7 @@ impl GenericContactConstraint {
                     let p = rows.block[i];
                     let row = &joints[rows.engaged[p]];
                     for k in 0..m {
-                        rows.matrix[i * n + k] = rows.coupling[p * num_engaged + rows.block[k]];
+                        rows.matrix[i * n + k] = rows.engaged_coupling(p, rows.block[k]);
                     }
                     rows.matrix[i * n + m] = rows.block_coupling[i].0;
                     rows.matrix[m * n + i] = rows.block_coupling[i].1;
@@ -861,7 +860,6 @@ impl GenericContactConstraint {
         const NT: usize = DIM - 1;
         let row_step = j_step(ndofs1, ndofs2);
         let point_step = row_step * DIM;
-        let num_engaged = rows.engaged.len();
         let mut tng_j_id = tangent_j_id(j_id, ndofs1, ndofs2);
 
         for (normal_part, tangent_part) in normal_parts.iter().zip(tangent_parts.iter_mut()) {
@@ -913,7 +911,7 @@ impl GenericContactConstraint {
                     let p = rows.block[i];
                     let row = &joints[rows.engaged[p]];
                     for k in 0..m {
-                        rows.matrix[i * n + k] = rows.coupling[p * num_engaged + rows.block[k]];
+                        rows.matrix[i * n + k] = rows.engaged_coupling(p, rows.block[k]);
                     }
                     for t in 0..NT {
                         let (to_row, to_contact) = rows.block_coupling[i * NT + t];
