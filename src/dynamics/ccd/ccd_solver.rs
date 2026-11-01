@@ -1,7 +1,7 @@
 use crate::alloc_prelude::*;
 use crate::dynamics::{
-    ImpulseJointSet, IntegrationParameters, IslandManager, MultibodyJointSet, RigidBodySet,
-    SoftBodySet,
+    ImpulseJointSet, IntegrationParameters, IslandManager, MultibodyIndex, MultibodyJointSet,
+    RigidBodySet, SoftBodySet,
 };
 use crate::geometry::{
     BroadPhaseBvh, Collider, ColliderHandle, ColliderSet, CollisionEvent, NarrowPhase,
@@ -284,16 +284,9 @@ impl CCDSolver {
         // NOTE: broad-phase AABBs are NOT enlarged to the swept volumes: only the fast body's
         // query box is swept; stationary targets keep their fat AABBs. Swept AABBs in
         // the tree leak into the next step's broad phase (pair explosion, ~2x narrow-phase cost).
-        // A link below a multibody's root is placed by its multibody, which the root's sweep
-        // carries along (see `apply_clamps`): it sweeps nothing of its own.
         let (non_bullets, bullets): (Vec<_>, Vec<_>) = islands
             .active_bodies()
             .filter(|h| bodies[*h].ccd.ccd_active && bodies[*h].is_dynamic())
-            .filter(|h| {
-                multibody_joints
-                    .rigid_body_link(*h)
-                    .is_none_or(|link| link.id == 0)
-            })
             .partition(|h| !is_bullet(&bodies[*h]));
 
         let mut all_results = Vec::new();
@@ -355,12 +348,12 @@ impl CCDSolver {
             });
             all_results.extend(results);
         }
-        Self::apply_clamps(bodies, multibody_joints, &all_results);
+        Self::apply_clamps(bodies, multibody_joints, &mut all_results);
 
         // Pass 2: bullets vs everything except other bullets. Targets read the (already
         // clamped) `next_position` from pass 1 (deferred bullet stage).
         if !bullets.is_empty() {
-            let bullet_results = {
+            let mut bullet_results = {
                 let query_pipeline = broad_phase.as_query_pipeline(
                     narrow_phase.query_dispatcher(),
                     bodies,
@@ -386,7 +379,7 @@ impl CCDSolver {
                     )
                 })
             };
-            Self::apply_clamps(bodies, multibody_joints, &bullet_results);
+            Self::apply_clamps(bodies, multibody_joints, &mut bullet_results);
             all_results.extend(bullet_results);
         }
 
@@ -458,34 +451,69 @@ impl CCDSolver {
     /// fraction. Pose only — velocities are preserved.
     ///
     /// A multibody states the poses of its links from its root's pose and its joints'
-    /// coordinates, and the next step reads its root's pose back from the root's body: the
-    /// root's clamp moves every link's body with it, by the same rigid motion, so the links end
-    /// the step where the multibody stands.
+    /// coordinates, and the next step reads its root's pose back from the root's body, so a
+    /// multibody is clamped as a whole: at the earliest fraction any of its links strikes, its
+    /// root's body is clamped to its own pose at that fraction and every link's body moves with
+    /// it by the same rigid motion, so the links end the step where the multibody stands. A
+    /// multibody whose root is not dynamic has no motion of its own to clamp, and its links end
+    /// the step where its coordinates put them. Each link's result then holds the fraction its
+    /// multibody stopped at, `1.0` for one that did not stop.
     fn apply_clamps(
         bodies: &mut RigidBodySet,
         multibodies: &MultibodyJointSet,
-        results: &[BodyContinuousResult],
+        results: &mut [BodyContinuousResult],
     ) {
-        for result in results {
-            if result.fraction < 1.0 {
-                let link = multibodies.rigid_body_link(result.handle).copied();
-                let rb = bodies.index_mut_internal(result.handle);
-                let sweep = Sweep::from_poses(
-                    &rb.pos.position,
-                    &rb.pos.next_position,
-                    rb.mprops.local_mprops.local_com,
-                );
-                let unclamped = rb.pos.next_position;
-                rb.pos.next_position = sweep.transform_at(result.fraction);
-                let Some(multibody) = link.and_then(|link| multibodies.get_multibody(link.multibody))
-                else {
-                    continue;
-                };
-                let carried = rb.pos.next_position * unclamped.inverse();
-                for other in multibody.links().skip(1) {
-                    let rb = bodies.index_mut_internal(other.rigid_body_handle());
-                    rb.pos.next_position = carried * rb.pos.next_position;
+        let mut struck: Vec<(MultibodyIndex, Real)> = Vec::new();
+        for result in results.iter() {
+            if result.fraction >= 1.0 {
+                continue;
+            }
+            if let Some(link) = multibodies.rigid_body_link(result.handle) {
+                match struck
+                    .iter_mut()
+                    .find(|(index, _)| *index == link.multibody)
+                {
+                    Some((_, fraction)) => *fraction = fraction.min(result.fraction),
+                    None => struck.push((link.multibody, result.fraction)),
                 }
+                continue;
+            }
+            let rb = bodies.index_mut_internal(result.handle);
+            let sweep = Sweep::from_poses(
+                &rb.pos.position,
+                &rb.pos.next_position,
+                rb.mprops.local_mprops.local_com,
+            );
+            rb.pos.next_position = sweep.transform_at(result.fraction);
+        }
+        for (index, fraction) in &mut struck {
+            let Some(multibody) = multibodies.get_multibody(*index) else {
+                continue;
+            };
+            let root = bodies.index_mut_internal(multibody.root().rigid_body_handle());
+            if !root.is_dynamic() {
+                *fraction = 1.0;
+                continue;
+            }
+            let sweep = Sweep::from_poses(
+                &root.pos.position,
+                &root.pos.next_position,
+                root.mprops.local_mprops.local_com,
+            );
+            let unclamped = root.pos.next_position;
+            root.pos.next_position = sweep.transform_at(*fraction);
+            let carried = root.pos.next_position * unclamped.inverse();
+            for other in multibody.links().skip(1) {
+                let rb = bodies.index_mut_internal(other.rigid_body_handle());
+                rb.pos.next_position = carried * rb.pos.next_position;
+            }
+        }
+        for result in results.iter_mut() {
+            let Some(link) = multibodies.rigid_body_link(result.handle) else {
+                continue;
+            };
+            if let Some((_, fraction)) = struck.iter().find(|(index, _)| *index == link.multibody) {
+                result.fraction = *fraction;
             }
         }
     }
