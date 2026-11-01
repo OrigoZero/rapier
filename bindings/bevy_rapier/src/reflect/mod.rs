@@ -165,9 +165,9 @@ pub struct SoftBodiesSettingsWrapper {
     /// Strain beyond which a soft-body constraint is re-solved after the contacts inside every
     /// substep (default: `0.75`).
     pub resweep_strain: Real,
-    /// Maximum number of extra substeps a soft body requests for its island while it is hit fast
-    /// (default: `4`).
-    pub max_extra_substeps: usize,
+    /// Most extra substeps a second a soft body adds to its island while it is hit fast or
+    /// loaded hard (default: `120`).
+    pub max_extra_substep_rate: Real,
     /// Factor applied to the contact softness natural frequencies for the soft-body contacts
     /// (default: `4.0`).
     pub contact_stiffening: Real,
@@ -185,9 +185,9 @@ pub struct SoftBodiesSettingsWrapper {
     /// Strain beyond which a soft-body constraint is re-solved after the contacts inside every
     /// substep (default: `0.75`).
     pub resweep_strain: Real,
-    /// Maximum number of extra substeps a soft body requests for its island while it is hit fast
-    /// (default: `4`).
-    pub max_extra_substeps: usize,
+    /// Most extra substeps a second a soft body adds to its island while it is hit fast or
+    /// loaded hard (default: `120`).
+    pub max_extra_substep_rate: Real,
     /// Factor applied to the contact softness natural frequencies for the soft-body contacts
     /// (default: `4.0`).
     pub contact_stiffening: Real,

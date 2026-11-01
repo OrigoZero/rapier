@@ -334,9 +334,9 @@ import RAPIER from '@dimforge/rapier2d';
     // Strain beyond which a constraint is re-solved after the contacts of every substep.
     // Default: 0.75
     world.integrationParameters.softBodiesResweepStrain = 0.75;
-    // Extra substeps a soft body requests while it is hit fast; 0 disables them.
-    // Default: 4
-    world.integrationParameters.softBodiesMaxExtraSubsteps = 4;
+    // Most extra substeps a second a soft body adds while it is hit fast or loaded hard; 0 disables them.
+    // Default: 120
+    world.integrationParameters.softBodiesMaxExtraSubstepRate = 120;
     // Stiffening of the soft-body contacts relative to the rigid ones.
     // Default: 4.0
     world.integrationParameters.softBodiesContactStiffening = 4.0;

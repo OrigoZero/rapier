@@ -146,19 +146,20 @@ pub struct SoftBody {
     pub(crate) topology_version: u32,
     /// Largest normal approach speed of the rigid bodies met by the surface, for the last step
     /// and the one before (`None`: no contact constraint that step); with the particle speeds, it drives
-    /// the impact-adaptive substeps (`IntegrationParameters::soft_bodies.max_extra_substeps`).
+    /// the impact-adaptive substeps (`IntegrationParameters::soft_bodies.max_extra_substep_rate`).
     /// A step split into several CCD passes counts once, with the largest speed of its passes.
     #[cfg_attr(feature = "serde-serialize", serde(default))]
     pub(crate) contact_approach_speeds: [Option<Real>; 2],
     /// Set by the first solve of a step, which shifted `contact_approach_speeds`: the step's later
     /// CCD passes merge into its entry. Cleared by the end-of-step sync.
     pub(crate) contact_approach_step_open: bool,
-    /// Total normal impulse of the surface's contact constraints over the last step, and the extra
-    /// substeps currently requested from that load (see `sync_particle_positions`).
+    /// Total normal impulse of the surface's contact constraints over the last step, and the load
+    /// level it holds the body at (0 to 2, see `sync_particle_positions`): each level above 0 asks
+    /// for the substeps a second `LOAD_SUBSTEP_RATES` names.
     #[cfg_attr(feature = "serde-serialize", serde(default))]
     pub(crate) contact_load: Real,
     #[cfg_attr(feature = "serde-serialize", serde(default))]
-    pub(crate) load_extra_substeps: u8,
+    pub(crate) load_level: u8,
     /// The particles whose state the solver keeps at the end of every substep
     /// ([`Self::set_recorded_particles`]), sorted and unique.
     pub(crate) recorded_particles: Vec<u32>,

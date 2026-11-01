@@ -9,10 +9,13 @@ be changed between two steps:
   (<notjs>`resweep_strain`</notjs><js>`softBodiesResweepStrain`</js><c>`r3SoftBodiesSetResweepStrain`</c><py>`resweep_strain`</py>) is the strain
   beyond which a constraint is solved once more after the contacts of every substep. This is what keeps a light body
   buried under heavier ones from being torn apart by them.
-- The **maximum number of extra substeps**
-  (<notjs>`max_extra_substeps`</notjs><js>`softBodiesMaxExtraSubsteps`</js><c>`r3SoftBodiesSetMaxExtraSubsteps`</c><py>`max_extra_substeps`</py>) is
-  the number of substeps a soft-body is allowed to ask for while it is hit fast. Those substeps  bound the motion of its
-  particles, and the motion of the rigid-bodies approaching them, by about one particle radius per substep. Giving zero
+- The **maximum extra substep rate**
+  (<notjs>`max_extra_substep_rate`</notjs><js>`softBodiesMaxExtraSubstepRate`</js><c>`r3SoftBodiesSetMaxExtraSubstepRate`</c><py>`max_extra_substep_rate`</py>) is
+  the number of extra substeps a second a soft-body is allowed to add while it is hit fast or loaded hard (120 by
+  default). A body hit fast asks for the substeps that bound the motion of its particles, and the motion of the
+  rigid-bodies approaching them, by about one particle radius per substep; a body loaded hard asks for a substep rate.
+  A step adds at most this rate over its length (4 extra substeps a step at 30 steps a second, 2 at 60, 1 at 120 and
+  none from 240), so a hit costs about the same soft-body work per simulated second whatever the timestep. Giving zero
   disables them.
 - The **contact stiffening**
   (<notjs>`contact_stiffening`</notjs><js>`softBodiesContactStiffening`</js><c>`r3SoftBodiesSetContactStiffening`</c><py>`contact_stiffening`</py>)

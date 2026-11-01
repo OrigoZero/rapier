@@ -1521,12 +1521,12 @@ pub unsafe extern "C" fn rpr_soft_bodies_contact_stiffening(world: *const RprWor
     })
 }
 
-/// Set the world setting documented by RprSoftBodiesSettings::maxExtraSubsteps.
+/// Set the world setting documented by RprSoftBodiesSettings::maxExtraSubstepRate.
 /// @ingroup soft_bodies
 #[rapier_export]
-pub unsafe extern "C" fn rpr_soft_bodies_set_max_extra_substeps(
+pub unsafe extern "C" fn rpr_soft_bodies_set_max_extra_substep_rate(
     world: *mut RprWorld,
-    value: usize,
+    value: RprReal,
 ) -> RprStatus {
     ffi(|| unsafe {
         let access = get(world)?.write()?;
@@ -1535,23 +1535,23 @@ pub unsafe extern "C" fn rpr_soft_bodies_set_max_extra_substeps(
         let parameters: *mut NativeIntegrationParameters =
             std::ptr::addr_of_mut!((*raw).0.integration_parameters).cast();
 
-        get_mut(parameters)?.0.soft_bodies.max_extra_substeps = value;
+        get_mut(parameters)?.0.soft_bodies.max_extra_substep_rate = nonnegative(value)?;
         Ok(())
     })
 }
 
-/// Return the world setting documented by RprSoftBodiesSettings::maxExtraSubsteps.
+/// Return the world setting documented by RprSoftBodiesSettings::maxExtraSubstepRate.
 /// @ingroup soft_bodies
 #[rapier_export]
-pub unsafe extern "C" fn rpr_soft_bodies_max_extra_substeps(world: *const RprWorld) -> usize {
-    ffi_value(|out: *mut usize| {
+pub unsafe extern "C" fn rpr_soft_bodies_max_extra_substep_rate(world: *const RprWorld) -> RprReal {
+    ffi_value(|out: *mut RprReal| {
         ffi(|| unsafe {
             let access = get(world)?.read()?;
             let raw = access.raw();
 
             let parameters: *const NativeIntegrationParameters =
                 std::ptr::addr_of!((*raw).0.integration_parameters).cast();
-            output(out, get(parameters)?.0.soft_bodies.max_extra_substeps)
+            output(out, get(parameters)?.0.soft_bodies.max_extra_substep_rate)
         })
     })
 }

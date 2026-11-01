@@ -70,7 +70,7 @@ impl SoftBodySet {
             contact_approach_speeds: [None; 2],
             contact_approach_step_open: false,
             contact_load: 0.0,
-            load_extra_substeps: 0,
+            load_level: 0,
             recorded_particles: Vec::new(),
             substep_particles: Vec::new(),
             substep_particles_dt: 0.0,

@@ -386,15 +386,15 @@ def test_integration_parameters_soft_settings():
     s = ip.soft_bodies
     assert isinstance(s, rp.SoftBodiesSettings)
     assert s.resweep_strain == pytest.approx(0.75)
-    assert s.max_extra_substeps == 4
-    s.max_extra_substeps = 2
+    assert s.max_extra_substep_rate == pytest.approx(120.0)
+    s.max_extra_substep_rate = 60.0
     s.contact_stiffening = 3.0
     rec = s.recovery
     rec.crossing_repulsion = False
     rec.overlap_patch_constraints = rp.SoftPatchConstraints.KEEP
     s.recovery = rec
     ip.soft_bodies = s
-    assert ip.soft_bodies.max_extra_substeps == 2
+    assert ip.soft_bodies.max_extra_substep_rate == pytest.approx(60.0)
     assert ip.soft_bodies.contact_stiffening == pytest.approx(3.0)
     assert not ip.soft_bodies.recovery.crossing_repulsion
     ps = rp.SoftBodyParticleSettings()
@@ -758,11 +758,11 @@ def test_material_is_a_live_view():
 def test_soft_body_settings_are_live_views():
     w = _ground_world()
     settings = w.integration_parameters.soft_bodies
-    settings.max_extra_substeps = 2
+    settings.max_extra_substep_rate = 60.0
     settings.recovery.crossing_repulsion = False
     settings.fem.max_linear_iterations = 33
     params = w.integration_parameters
-    assert params.soft_bodies.max_extra_substeps == 2
+    assert params.soft_bodies.max_extra_substep_rate == pytest.approx(60.0)
     assert not params.soft_bodies.recovery.crossing_repulsion
     assert params.soft_bodies.fem.max_linear_iterations == 33
     # The copy-and-assign-back pattern still works, from views of the same settings.
@@ -777,10 +777,10 @@ def test_soft_body_settings_are_live_views():
     assert params.soft_bodies.fem.linear_tolerance == pytest.approx(1.0e-6)
     # Copies are detached.
     detached = settings.copy()
-    detached.max_extra_substeps = 7
+    detached.max_extra_substep_rate = 70.0
     detached_recovery = settings.recovery.copy()
     detached_recovery.overlap_split = 9
-    assert params.soft_bodies.max_extra_substeps == 2
+    assert params.soft_bodies.max_extra_substep_rate == pytest.approx(60.0)
     assert params.soft_bodies.recovery.overlap_split == 3
     # A standalone settings object has live nested groups too.
     standalone = rp.SoftBodiesSettings()
