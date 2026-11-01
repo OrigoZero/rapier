@@ -6,7 +6,7 @@ use crate::dynamics::{
 use crate::geometry::{
     BroadPhaseBvh, Collider, ColliderHandle, ColliderSet, CollisionEvent, NarrowPhase,
 };
-use crate::math::Real;
+use crate::math::{Real, Rotation, SpatialVector};
 use crate::parry::bounding_volume::Aabb;
 use crate::pipeline::{EventHandler, PhysicsHooks, QueryFilter};
 use crate::prelude::{ActiveEvents, CollisionEventFlags};
@@ -47,6 +47,35 @@ pub struct CCDSolver {
     /// the same pass leave to them.
     #[cfg_attr(feature = "serde-serialize", serde(skip))]
     kinematic_pairs: KinematicPairs,
+    /// The joints of every multibody as the current continuous pass began.
+    #[cfg_attr(feature = "serde-serialize", serde(skip))]
+    multibody_pass_start: MultibodyPassStart,
+}
+
+/// The coordinates and rotation of every multibody's joints as a continuous pass began, which a
+/// multibody the pass stops goes back toward ([`CCDSolver::record_multibody_pass_start`]).
+#[derive(Clone, Default)]
+struct MultibodyPassStart {
+    /// Each multibody and where its links' entries begin in `joints`.
+    multibodies: Vec<(MultibodyIndex, usize)>,
+    /// Every link's joint coordinates and rotation, multibody after multibody, in link order.
+    joints: Vec<(SpatialVector, Rotation)>,
+}
+
+impl MultibodyPassStart {
+    /// The joint coordinates and rotations recorded for the multibody `index`, one entry per
+    /// link; empty for one that was not recorded.
+    fn joints_of(&self, index: MultibodyIndex) -> &[(SpatialVector, Rotation)] {
+        let Some(at) = self.multibodies.iter().position(|(i, _)| *i == index) else {
+            return &[];
+        };
+        let begin = self.multibodies[at].1;
+        let end = self
+            .multibodies
+            .get(at + 1)
+            .map_or(self.joints.len(), |(_, next)| *next);
+        &self.joints[begin..end]
+    }
 }
 
 /// The AABB loosening the cached fixed-target list was built with, paired with the list
@@ -75,6 +104,22 @@ impl CCDSolver {
     /// Forgets the strikes of the step before. The pipeline calls it as each step starts.
     pub fn clear_kinematic_strikes(&mut self) {
         self.kinematic_strikes.clear();
+    }
+
+    /// Records the coordinates and rotation of every multibody's joints as a continuous pass
+    /// begins, before the pass's solve moves them: a multibody the pass stops at a fraction of
+    /// its motion takes its joints back to that share of it ([`Self::solve_continuous`]). The
+    /// pipeline calls it before each pass.
+    pub fn record_multibody_pass_start(&mut self, multibody_joints: &MultibodyJointSet) {
+        let record = &mut self.multibody_pass_start;
+        record.multibodies.clear();
+        record.joints.clear();
+        for (index, multibody) in multibody_joints.multibodies.iter() {
+            record
+                .multibodies
+                .push((MultibodyIndex(index), record.joints.len()));
+            record.joints.extend(multibody.joint_states());
+        }
     }
 
     /// Updates the set of bodies that needs CCD to be resolved.
@@ -267,17 +312,12 @@ impl CCDSolver {
         colliders: &ColliderSet,
         soft_bodies: &SoftBodySet,
         impulse_joints: &ImpulseJointSet,
-        multibody_joints: &MultibodyJointSet,
+        multibody_joints: &mut MultibodyJointSet,
         broad_phase: &mut BroadPhaseBvh,
         narrow_phase: &NarrowPhase,
         hooks: &dyn PhysicsHooks,
         events: &dyn EventHandler,
     ) {
-        let ties = SoftTies {
-            soft_bodies,
-            impulse_joints,
-            multibody_joints,
-        };
         let dt = params.dt;
         let linear_slop = params.allowed_linear_error();
 
@@ -330,6 +370,11 @@ impl CCDSolver {
                 Some(fixed) => CcdTargets::Lists { fixed, soft: &soft },
                 None => CcdTargets::FullBvh { bvh, soft: &soft },
             };
+            let ties = SoftTies {
+                soft_bodies,
+                impulse_joints,
+                multibody_joints,
+            };
             let results = map_bodies_parallel(&non_bullets, hooks, |handle, hooks| {
                 sweep_fast_body(
                     handle,
@@ -348,7 +393,12 @@ impl CCDSolver {
             });
             all_results.extend(results);
         }
-        Self::apply_clamps(bodies, multibody_joints, &mut all_results);
+        Self::apply_clamps(
+            bodies,
+            multibody_joints,
+            &self.multibody_pass_start,
+            &mut all_results,
+        );
 
         // Pass 2: bullets vs everything except other bullets. Targets read the (already
         // clamped) `next_position` from pass 1 (deferred bullet stage).
@@ -362,6 +412,11 @@ impl CCDSolver {
                 );
                 let (bvh, dispatcher) = (query_pipeline.bvh, query_pipeline.dispatcher);
                 let kinematic_pairs = &self.kinematic_pairs;
+                let ties = SoftTies {
+                    soft_bodies,
+                    impulse_joints,
+                    multibody_joints,
+                };
                 map_bodies_parallel(&bullets, hooks, |handle, hooks| {
                     sweep_fast_body(
                         handle,
@@ -379,7 +434,12 @@ impl CCDSolver {
                     )
                 })
             };
-            Self::apply_clamps(bodies, multibody_joints, &mut bullet_results);
+            Self::apply_clamps(
+                bodies,
+                multibody_joints,
+                &self.multibody_pass_start,
+                &mut bullet_results,
+            );
             all_results.extend(bullet_results);
         }
 
@@ -451,16 +511,18 @@ impl CCDSolver {
     /// fraction. Pose only — velocities are preserved.
     ///
     /// A multibody states the poses of its links from its root's pose and its joints'
-    /// coordinates, and the next step reads its root's pose back from the root's body, so a
-    /// multibody is clamped as a whole: at the earliest fraction any of its links strikes, its
-    /// root's body is clamped to its own pose at that fraction and every link's body moves with
-    /// it by the same rigid motion, so the links end the step where the multibody stands. A
-    /// multibody whose root is not dynamic has no motion of its own to clamp, and its links end
-    /// the step where its coordinates put them. Each link's result then holds the fraction its
-    /// multibody stopped at, `1.0` for one that did not stop.
+    /// coordinates, and the next step reads its root's pose back from the root's body and its
+    /// joints' coordinates from the multibody, so a multibody is clamped as a whole: at the
+    /// earliest fraction any of its links strikes, every joint's coordinates go back to the same
+    /// share of the motion they made over the pass ([`MultibodyPassStart`]) and a dynamic root's
+    /// body is clamped to its own pose at that fraction, so every link's body ends the step where
+    /// the multibody stood at that fraction. A root that is not dynamic keeps the pose its own
+    /// motion gives it. Each link's result then holds the fraction its multibody stopped at,
+    /// `1.0` for one that did not stop.
     fn apply_clamps(
         bodies: &mut RigidBodySet,
-        multibodies: &MultibodyJointSet,
+        multibodies: &mut MultibodyJointSet,
+        pass_start: &MultibodyPassStart,
         results: &mut [BodyContinuousResult],
     ) {
         let mut struck: Vec<(MultibodyIndex, Real)> = Vec::new();
@@ -487,26 +549,25 @@ impl CCDSolver {
             rb.pos.next_position = sweep.transform_at(result.fraction);
         }
         for (index, fraction) in &mut struck {
-            let Some(multibody) = multibodies.get_multibody(*index) else {
+            let Some(multibody) = multibodies.get_multibody_mut_internal(*index) else {
                 continue;
             };
             let root = bodies.index_mut_internal(multibody.root().rigid_body_handle());
-            if !root.is_dynamic() {
-                *fraction = 1.0;
-                continue;
+            if root.is_dynamic() {
+                let sweep = Sweep::from_poses(
+                    &root.pos.position,
+                    &root.pos.next_position,
+                    root.mprops.local_mprops.local_com,
+                );
+                root.pos.next_position = sweep.transform_at(*fraction);
             }
-            let sweep = Sweep::from_poses(
-                &root.pos.position,
-                &root.pos.next_position,
-                root.mprops.local_mprops.local_com,
+            let start = pass_start.joints_of(*index);
+            assert_eq!(
+                start.len(),
+                multibody.num_links(),
+                "a multibody stepped in a continuous pass has its joints recorded as the pass began"
             );
-            let unclamped = root.pos.next_position;
-            root.pos.next_position = sweep.transform_at(*fraction);
-            let carried = root.pos.next_position * unclamped.inverse();
-            for other in multibody.links().skip(1) {
-                let rb = bodies.index_mut_internal(other.rigid_body_handle());
-                rb.pos.next_position = carried * rb.pos.next_position;
-            }
+            multibody.rewind_joints(bodies, start, *fraction);
         }
         for result in results.iter_mut() {
             let Some(link) = multibodies.rigid_body_link(result.handle) else {
