@@ -9,8 +9,11 @@ use crate::math::Real;
 use super::{SharedCtx, stage_batch};
 
 /// How many times each pass solves the multibodies' joint rows and their contacts against each
-/// other once their contacts are first solved (see [`solve_pass`]).
-const MULTIBODY_CONTACT_ROUNDS: usize = 8;
+/// other once their contacts are first solved (see [`solve_pass`]). Each contact point is solved
+/// as one block with the joint rows of its multibodies that bear an impulse, so a round settles
+/// a contact against a held link at once; the second settles the points of a multibody against
+/// one another through those rows.
+const MULTIBODY_CONTACT_ROUNDS: usize = 2;
 
 /// One solve pass: joints (colored, then overflow + generic on worker 0), soft-body rows, then
 /// contact colors (parallel); returns the updated stage ordinal. `soft_update` is set on the
@@ -375,7 +378,10 @@ pub(super) unsafe fn solve_pass(
             // A contact on a link of a multibody changes every one of its coordinates, so a
             // joint row solved before the contacts no longer holds once they are solved. The
             // joint rows and the contacts are solved against each other again, the contacts
-            // last, so a link landing hard on its stop is held at it through the substep.
+            // last, so a link landing hard on its stop is held at it through the substep. Each
+            // contact is solved together with the joint rows of its multibodies that bear an
+            // impulse (see `coupled_multibody_rows`): solved apart, a light link held on a heavy
+            // multibody passes the error between the two rows on a share of its mass a round.
             if has_generic_joints {
                 let joints = unsafe { &mut *ctx.joint_constraints };
                 for _ in 0..MULTIBODY_CONTACT_ROUNDS {
@@ -386,14 +392,30 @@ pub(super) unsafe fn solve_pass(
                             &mut vs.generic_solver_vels,
                         );
                     }
+                    vs.coupled_rows.gather(
+                        &joints.generic_velocity_constraints,
+                        &joints.generic_jacobians,
+                    );
                     for c in contacts.generic_velocity_constraints.iter_mut() {
-                        c.solve(
-                            jac,
-                            &mut vs.solver_bodies,
-                            &mut vs.generic_solver_vels,
-                            true,
-                            solve_friction,
-                        );
+                        if vs.coupled_rows.engaged.is_empty() {
+                            c.solve(
+                                jac,
+                                &mut vs.solver_bodies,
+                                &mut vs.generic_solver_vels,
+                                true,
+                                solve_friction,
+                            );
+                        } else {
+                            c.solve_with_joint_rows(
+                                jac,
+                                &mut vs.solver_bodies,
+                                &mut vs.generic_solver_vels,
+                                &mut joints.generic_velocity_constraints,
+                                &joints.generic_jacobians,
+                                &mut vs.coupled_rows,
+                                solve_friction,
+                            );
+                        }
                     }
                 }
             }

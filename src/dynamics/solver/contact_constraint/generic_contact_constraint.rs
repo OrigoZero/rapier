@@ -1,4 +1,6 @@
+use crate::dynamics::solver::GenericJointConstraint;
 use crate::dynamics::solver::GenericRhs;
+use crate::dynamics::solver::coupled_multibody_rows::CoupledRows;
 use crate::dynamics::{IntegrationParameters, MultibodyJointSet, RigidBodySet};
 use crate::geometry::ContactManifold;
 #[cfg(feature = "dim3")]
@@ -870,6 +872,95 @@ impl GenericContactConstraint {
             solve_restitution,
             solve_friction,
         );
+
+        if let GenericRhs::SolverVel(solver_vel1) = solver_vel1 {
+            bodies.vels[self.solver_vel1 as usize] = solver_vel1;
+        }
+
+        if let GenericRhs::SolverVel(solver_vel2) = solver_vel2 {
+            bodies.vels[self.solver_vel2 as usize] = solver_vel2;
+        }
+    }
+
+    /// [`Self::solve`] with each point's normal row, then its friction rows, solved as one block
+    /// with the engaged joint rows of `rows` on the multibodies the contact acts on (see
+    /// [`crate::dynamics::solver::coupled_multibody_rows`]).
+    #[allow(clippy::too_many_arguments)]
+    pub fn solve_with_joint_rows(
+        &mut self,
+        jacobians: &DVector,
+        bodies: &mut SolverBodies,
+        generic_solver_vels: &mut DVector,
+        joints: &mut [GenericJointConstraint],
+        joint_jacobians: &DVector,
+        rows: &mut CoupledRows,
+        solve_friction: bool,
+    ) {
+        let mut solver_vel1 = if self.solver_vel1 == u32::MAX {
+            GenericRhs::Fixed
+        } else if self.generic_constraint_mask & 0b01 == 0 {
+            GenericRhs::SolverVel(bodies.vels[self.solver_vel1 as usize])
+        } else {
+            GenericRhs::GenericId(self.solver_vel1)
+        };
+
+        let mut solver_vel2 = if self.solver_vel2 == u32::MAX {
+            GenericRhs::Fixed
+        } else if self.generic_constraint_mask & 0b10 == 0 {
+            GenericRhs::SolverVel(bodies.vels[self.solver_vel2 as usize])
+        } else {
+            GenericRhs::GenericId(self.solver_vel2)
+        };
+
+        let normal_parts = &mut self.normal_part[..self.num_contacts as usize];
+        Self::generic_solve_normals_with_joint_rows(
+            self.cfm_factor,
+            normal_parts,
+            jacobians,
+            self.dir1,
+            self.im1,
+            self.im2,
+            self.ndofs1,
+            self.ndofs2,
+            self.j_id,
+            &mut solver_vel1,
+            self.solver_vel1,
+            &mut solver_vel2,
+            self.solver_vel2,
+            bodies,
+            generic_solver_vels,
+            joints,
+            joint_jacobians,
+            rows,
+        );
+
+        if solve_friction {
+            let normal_parts = &self.normal_part[..self.num_contacts as usize];
+            let tangent_parts = &mut self.tangent_part[..self.num_contacts as usize];
+            Self::generic_solve_tangents_with_joint_rows(
+                normal_parts,
+                tangent_parts,
+                jacobians,
+                self.dir1,
+                #[cfg(feature = "dim3")]
+                self.tangent1,
+                self.im1,
+                self.im2,
+                self.limit,
+                self.ndofs1,
+                self.ndofs2,
+                self.j_id,
+                &mut solver_vel1,
+                self.solver_vel1,
+                &mut solver_vel2,
+                self.solver_vel2,
+                bodies,
+                generic_solver_vels,
+                joints,
+                joint_jacobians,
+                rows,
+            );
+        }
 
         if let GenericRhs::SolverVel(solver_vel1) = solver_vel1 {
             bodies.vels[self.solver_vel1 as usize] = solver_vel1;

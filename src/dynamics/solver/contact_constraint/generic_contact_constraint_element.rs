@@ -1,5 +1,8 @@
+use crate::dynamics::solver::GenericJointConstraint;
 use crate::dynamics::solver::SolverVel;
 use crate::dynamics::solver::contact_constraint::GenericContactConstraint;
+use crate::dynamics::solver::coupled_multibody_rows::{CoupledRows, RowSide, coupling};
+use crate::dynamics::solver::solver_body::SolverBodies;
 use crate::dynamics::solver::{ContactConstraintNormalPart, ContactConstraintTangentPart};
 use crate::math::{AngVector, DIM, DVector, Real, Vector};
 use crate::utils::{ComponentMul, DotProduct};
@@ -39,6 +42,36 @@ fn tangent_j_id(j_id: usize, ndofs1: usize, ndofs2: usize) -> usize {
 }
 
 impl GenericRhs {
+    /// The side of a contact row this velocity is, when it is a multibody's: its jacobian at
+    /// `j_id`, its weighted jacobian right after.
+    fn multibody_side(&self, j_id: usize, ndofs: usize) -> Option<RowSide> {
+        match self {
+            GenericRhs::GenericId(slot) => Some(RowSide {
+                slot: *slot,
+                ndofs,
+                j_id,
+                wj_id: j_id + ndofs,
+                error_sign: 1.0,
+                impulse_sign: 1.0,
+            }),
+            _ => None,
+        }
+    }
+
+    /// Writes a rigid body's velocity held here back to `bodies`.
+    fn store(&self, solver_vel_id: u32, bodies: &mut SolverBodies) {
+        if let GenericRhs::SolverVel(vel) = self {
+            bodies.vels[solver_vel_id as usize] = *vel;
+        }
+    }
+
+    /// Reads a rigid body's velocity held here again from `bodies`.
+    fn load(&mut self, solver_vel_id: u32, bodies: &SolverBodies) {
+        if let GenericRhs::SolverVel(vel) = self {
+            *vel = bodies.vels[solver_vel_id as usize];
+        }
+    }
+
     #[inline]
     fn dvel(
         &self,
@@ -579,6 +612,353 @@ impl GenericContactConstraint {
                 );
                 tng_j_id += j_step;
             }
+        }
+    }
+}
+
+impl GenericContactConstraint {
+    /// The normal rows of [`Self::generic_solve_group`], each solved as one block with the
+    /// engaged joint rows of `rows` that act on a multibody it acts on (see
+    /// [`crate::dynamics::solver::coupled_multibody_rows`]). A row with no engaged joint row on
+    /// its multibodies is solved alone, as `generic_solve_group` solves it. `solver_vel1_id` and
+    /// `solver_vel2_id` name the solver bodies a rigid side's velocity is held for, so the joint
+    /// rows read and move the velocity the contact does.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn generic_solve_normals_with_joint_rows(
+        cfm_factor: Real,
+        normal_parts: &mut [ContactConstraintNormalPart<Real>],
+        jacobians: &DVector,
+        dir1: Vector,
+        im1: Vector,
+        im2: Vector,
+        ndofs1: usize,
+        ndofs2: usize,
+        j_id: usize,
+        solver_vel1: &mut GenericRhs,
+        solver_vel1_id: u32,
+        solver_vel2: &mut GenericRhs,
+        solver_vel2_id: u32,
+        bodies: &mut SolverBodies,
+        solver_vels: &mut DVector,
+        joints: &mut [GenericJointConstraint],
+        joint_jacobians: &DVector,
+        rows: &mut CoupledRows,
+    ) {
+        let j_step = j_step(ndofs1, ndofs2) * DIM;
+        let num_engaged = rows.engaged.len();
+        let mut nrm_j_id = normal_j_id(j_id, ndofs1, ndofs2);
+
+        for normal_part in normal_parts {
+            let j_id1 = j_id1(nrm_j_id, ndofs1, ndofs2);
+            let j_id2 = j_id2(nrm_j_id, ndofs1, ndofs2);
+            let sides = [
+                solver_vel1.multibody_side(j_id1, ndofs1),
+                solver_vel2.multibody_side(j_id2, ndofs2),
+            ];
+            let r = normal_part.r;
+            let dvel = solver_vel1.dvel(
+                j_id1,
+                ndofs1,
+                jacobians,
+                dir1,
+                normal_part.torque_dir1,
+                solver_vels,
+            ) + solver_vel2.dvel(
+                j_id2,
+                ndofs2,
+                jacobians,
+                -dir1,
+                normal_part.torque_dir2,
+                solver_vels,
+            ) + normal_part.rhs;
+            // A point that bears no impulse and separates takes none: the block would only
+            // solve again the joint rows their own solve just left.
+            let takes_impulse = normal_part.impulse > 0.0 || dvel < 0.0;
+            if takes_impulse && r > 0.0 && cfm_factor > 0.0 {
+                rows.select(&[sides], jacobians, joint_jacobians);
+            } else {
+                rows.block.clear();
+            }
+
+            let solved = !rows.block.is_empty() && {
+                let m = rows.block.len();
+                let n = m + 1;
+                rows.begin_block(n);
+                solver_vel1.store(solver_vel1_id, bodies);
+                solver_vel2.store(solver_vel2_id, bodies);
+                for i in 0..m {
+                    let p = rows.block[i];
+                    let row = &joints[rows.engaged[p]];
+                    for k in 0..m {
+                        rows.matrix[i * n + k] = rows.coupling[p * num_engaged + rows.block[k]];
+                    }
+                    rows.matrix[i * n + m] = rows.block_coupling[i].0;
+                    rows.matrix[m * n + i] = rows.block_coupling[i].1;
+                    rows.error[i] = row.cfm_gain * row.impulse
+                        - row.velocity_error(joint_jacobians, bodies, solver_vels);
+                    rows.impulse[i] = row.impulse;
+                    rows.bounds[i] = row.impulse_bounds;
+                }
+                // The contact's own step is `cfm_factor * (impulse - r * dvel)`: its error is
+                // `dvel` plus the softness that step settles at, and `1 / (cfm_factor * r)` is
+                // the rate an impulse on it changes that error.
+                let softness = (1.0 - cfm_factor) / (cfm_factor * r);
+                rows.matrix[m * n + m] = 1.0 / (cfm_factor * r);
+                rows.error[m] = dvel + softness * normal_part.impulse;
+                rows.impulse[m] = normal_part.impulse;
+                rows.bounds[m] = [0.0, Real::MAX];
+                rows.solve_block()
+            };
+
+            if solved {
+                let m = rows.block.len();
+                let dlambda = rows.delta[m];
+                normal_part.impulse += dlambda;
+                solver_vel1.apply_impulse(
+                    j_id1,
+                    ndofs1,
+                    dlambda,
+                    jacobians,
+                    dir1,
+                    normal_part.ii_torque_dir1,
+                    solver_vels,
+                    im1,
+                );
+                solver_vel2.apply_impulse(
+                    j_id2,
+                    ndofs2,
+                    dlambda,
+                    jacobians,
+                    -dir1,
+                    normal_part.ii_torque_dir2,
+                    solver_vels,
+                    im2,
+                );
+                solver_vel1.store(solver_vel1_id, bodies);
+                solver_vel2.store(solver_vel2_id, bodies);
+                for i in 0..m {
+                    let row = rows.engaged[rows.block[i]];
+                    joints[row].apply_impulse_delta(
+                        rows.delta[i],
+                        joint_jacobians,
+                        bodies,
+                        solver_vels,
+                    );
+                }
+                solver_vel1.load(solver_vel1_id, bodies);
+                solver_vel2.load(solver_vel2_id, bodies);
+            } else {
+                normal_part.generic_solve(
+                    cfm_factor,
+                    nrm_j_id,
+                    jacobians,
+                    dir1,
+                    im1,
+                    im2,
+                    ndofs1,
+                    ndofs2,
+                    solver_vel1,
+                    solver_vel2,
+                    solver_vels,
+                );
+            }
+            nrm_j_id += j_step;
+        }
+    }
+}
+
+impl GenericContactConstraint {
+    /// The friction rows of [`Self::generic_solve_group`], each point's tangent rows solved as
+    /// one block with the engaged joint rows of `rows` that act on a multibody the contact acts
+    /// on, as [`Self::generic_solve_normals_with_joint_rows`] solves the normal rows. Each tangent
+    /// impulse is bounded by `limit` times the point's normal impulse; in 3D a pair the block
+    /// carries off its disc is put back on its edge, and the joint rows solved again around it.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn generic_solve_tangents_with_joint_rows(
+        normal_parts: &[ContactConstraintNormalPart<Real>],
+        tangent_parts: &mut [ContactConstraintTangentPart<Real>],
+        jacobians: &DVector,
+        dir1: Vector,
+        #[cfg(feature = "dim3")] tangent1: Vector,
+        im1: Vector,
+        im2: Vector,
+        limit: Real,
+        ndofs1: usize,
+        ndofs2: usize,
+        j_id: usize,
+        solver_vel1: &mut GenericRhs,
+        solver_vel1_id: u32,
+        solver_vel2: &mut GenericRhs,
+        solver_vel2_id: u32,
+        bodies: &mut SolverBodies,
+        solver_vels: &mut DVector,
+        joints: &mut [GenericJointConstraint],
+        joint_jacobians: &DVector,
+        rows: &mut CoupledRows,
+    ) {
+        #[cfg(feature = "dim3")]
+        let tangents1 = [tangent1, dir1.cross(tangent1)];
+        #[cfg(feature = "dim2")]
+        let tangents1 = [dir1.orthonormal_vector()];
+        const NT: usize = DIM - 1;
+        let row_step = j_step(ndofs1, ndofs2);
+        let point_step = row_step * DIM;
+        let num_engaged = rows.engaged.len();
+        let mut tng_j_id = tangent_j_id(j_id, ndofs1, ndofs2);
+
+        for (normal_part, tangent_part) in normal_parts.iter().zip(tangent_parts.iter_mut()) {
+            let bound = limit * normal_part.impulse;
+            let mut sides = [[None, None]; NT];
+            let mut ids = [(0, 0); NT];
+            for t in 0..NT {
+                let row_j_id = tng_j_id + t * row_step;
+                let j_id1 = j_id1(row_j_id, ndofs1, ndofs2);
+                let j_id2 = j_id2(row_j_id, ndofs1, ndofs2);
+                ids[t] = (j_id1, j_id2);
+                sides[t] = [
+                    solver_vel1.multibody_side(j_id1, ndofs1),
+                    solver_vel2.multibody_side(j_id2, ndofs2),
+                ];
+            }
+            // With no normal impulse the point's friction is held at zero, which a tangent row
+            // already at zero is: the block would only solve the joint rows again.
+            let takes_impulse = bound > 0.0 || (0..NT).any(|t| tangent_part.impulse[t] != 0.0);
+            if takes_impulse && (0..NT).all(|t| tangent_part.r[t] > 0.0) {
+                rows.select(&sides, jacobians, joint_jacobians);
+            } else {
+                rows.block.clear();
+            }
+
+            let solved = !rows.block.is_empty() && {
+                let m = rows.block.len();
+                let n = m + NT;
+                rows.begin_block(n);
+                solver_vel1.store(solver_vel1_id, bodies);
+                solver_vel2.store(solver_vel2_id, bodies);
+                for i in 0..m {
+                    let p = rows.block[i];
+                    let row = &joints[rows.engaged[p]];
+                    for k in 0..m {
+                        rows.matrix[i * n + k] = rows.coupling[p * num_engaged + rows.block[k]];
+                    }
+                    for t in 0..NT {
+                        let (to_row, to_contact) = rows.block_coupling[i * NT + t];
+                        rows.matrix[i * n + m + t] = to_row;
+                        rows.matrix[(m + t) * n + i] = to_contact;
+                    }
+                    rows.error[i] = row.cfm_gain * row.impulse
+                        - row.velocity_error(joint_jacobians, bodies, solver_vels);
+                    rows.impulse[i] = row.impulse;
+                    rows.bounds[i] = row.impulse_bounds;
+                }
+                for t in 0..NT {
+                    for u in 0..NT {
+                        rows.matrix[(m + t) * n + m + u] = if t == u {
+                            1.0 / tangent_part.r[t]
+                        } else {
+                            coupling(&sides[t], jacobians, &sides[u], jacobians)
+                        };
+                    }
+                    let (j_id1, j_id2) = ids[t];
+                    rows.error[m + t] = solver_vel1.dvel(
+                        j_id1,
+                        ndofs1,
+                        jacobians,
+                        tangents1[t],
+                        tangent_part.torque_dir1[t],
+                        solver_vels,
+                    ) + solver_vel2.dvel(
+                        j_id2,
+                        ndofs2,
+                        jacobians,
+                        -tangents1[t],
+                        tangent_part.torque_dir2[t],
+                        solver_vels,
+                    ) + tangent_part.rhs[t];
+                    rows.impulse[m + t] = tangent_part.impulse[t];
+                    rows.bounds[m + t] = [-bound, bound];
+                }
+                rows.solve_block() && {
+                    #[cfg(feature = "dim3")]
+                    {
+                        let new = na::Vector2::new(
+                            rows.impulse[m] + rows.delta[m],
+                            rows.impulse[m + 1] + rows.delta[m + 1],
+                        );
+                        if new.norm() > bound {
+                            let on_edge = new.cap_magnitude(bound);
+                            for t in 0..NT {
+                                rows.bounds[m + t] = [on_edge[t], on_edge[t]];
+                            }
+                            rows.release();
+                            rows.solve_block()
+                        } else {
+                            true
+                        }
+                    }
+                    #[cfg(feature = "dim2")]
+                    {
+                        true
+                    }
+                }
+            };
+
+            if solved {
+                let m = rows.block.len();
+                for t in 0..NT {
+                    let (j_id1, j_id2) = ids[t];
+                    let dlambda = rows.delta[m + t];
+                    tangent_part.impulse[t] += dlambda;
+                    solver_vel1.apply_impulse(
+                        j_id1,
+                        ndofs1,
+                        dlambda,
+                        jacobians,
+                        tangents1[t],
+                        tangent_part.ii_torque_dir1[t],
+                        solver_vels,
+                        im1,
+                    );
+                    solver_vel2.apply_impulse(
+                        j_id2,
+                        ndofs2,
+                        dlambda,
+                        jacobians,
+                        -tangents1[t],
+                        tangent_part.ii_torque_dir2[t],
+                        solver_vels,
+                        im2,
+                    );
+                }
+                solver_vel1.store(solver_vel1_id, bodies);
+                solver_vel2.store(solver_vel2_id, bodies);
+                for i in 0..m {
+                    let row = rows.engaged[rows.block[i]];
+                    joints[row].apply_impulse_delta(
+                        rows.delta[i],
+                        joint_jacobians,
+                        bodies,
+                        solver_vels,
+                    );
+                }
+                solver_vel1.load(solver_vel1_id, bodies);
+                solver_vel2.load(solver_vel2_id, bodies);
+            } else {
+                tangent_part.generic_solve(
+                    tng_j_id,
+                    jacobians,
+                    tangents1,
+                    im1,
+                    im2,
+                    ndofs1,
+                    ndofs2,
+                    bound,
+                    solver_vel1,
+                    solver_vel2,
+                    solver_vels,
+                );
+            }
+            tng_j_id += point_step;
         }
     }
 }

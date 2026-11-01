@@ -1,4 +1,5 @@
 use crate::alloc_prelude::*;
+use crate::dynamics::solver::coupled_multibody_rows::CoupledRows;
 use crate::dynamics::solver::solver_body::SolverBodies;
 use crate::dynamics::{MultibodyLinkId, solver::SolverVel};
 #[cfg(feature = "dim3")]
@@ -47,6 +48,9 @@ pub(crate) struct VelocitySolver {
     /// with, when its energy is held, indexed like `multibody_roots`: read as the substep moves
     /// the multibody, applied once its stabilization pass has settled the velocity it ends at.
     pub multibody_energy_holds: Vec<Option<Real>>,
+    /// The multibody joint rows each pass solves its multibody contacts together with, and the
+    /// buffers of those blocks (see [`crate::dynamics::solver::coupled_multibody_rows`]).
+    pub coupled_rows: CoupledRows,
     /// Per-solver-body gyroscopic parameters (3D), indexed like `solver_bodies`; consumed each
     /// substep by the velocity-increment stage, gated by a global "any gyroscopic body" flag so
     /// gyro-free scenes (the common case) skip the pass entirely.
@@ -98,6 +102,7 @@ impl VelocitySolver {
             generic_solver_vels_increment: DVector::zeros(0),
             multibody_roots: Vec::new(),
             multibody_energy_holds: Vec::new(),
+            coupled_rows: CoupledRows::default(),
             #[cfg(feature = "dim3")]
             solver_gyro: Vec::new(),
             substep_vels: Vec::new(),
