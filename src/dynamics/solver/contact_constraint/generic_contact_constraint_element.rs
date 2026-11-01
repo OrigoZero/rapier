@@ -1,10 +1,12 @@
 use crate::dynamics::solver::GenericJointConstraint;
 use crate::dynamics::solver::SolverVel;
 use crate::dynamics::solver::contact_constraint::GenericContactConstraint;
-use crate::dynamics::solver::coupled_multibody_rows::{CoupledRows, RowSide, coupling};
+use crate::dynamics::solver::coupled_multibody_rows::{
+    CoupledRows, RowSide, SideJacobian, SideVelocities, coupling,
+};
 use crate::dynamics::solver::solver_body::SolverBodies;
 use crate::dynamics::solver::{ContactConstraintNormalPart, ContactConstraintTangentPart};
-use crate::math::{AngVector, DIM, DVector, Real, Vector};
+use crate::math::{AngVector, DIM, DVector, Real, SPATIAL_DIM, Vector};
 use crate::utils::{ComponentMul, DotProduct};
 #[cfg(feature = "dim2")]
 use {crate::utils::OrthonormalBasis, na::SimdPartialOrd};
@@ -42,20 +44,59 @@ fn tangent_j_id(j_id: usize, ndofs1: usize, ndofs2: usize) -> usize {
 }
 
 impl GenericRhs {
-    /// The side of a contact row this velocity is, when it is a multibody's: its jacobian at
-    /// `j_id`, its weighted jacobian right after.
-    fn multibody_side(&self, j_id: usize, ndofs: usize) -> Option<RowSide> {
-        match self {
-            GenericRhs::GenericId(slot) => Some(RowSide {
-                slot: *slot,
-                ndofs,
-                j_id,
-                wj_id: j_id + ndofs,
-                error_sign: 1.0,
-                impulse_sign: 1.0,
-            }),
-            _ => None,
-        }
+    /// The side of a contact row this velocity is: a multibody's, its jacobian at `j_id` and its
+    /// weighted jacobian right after; a rigid body's (`solver_vel_id`), along `dir` and
+    /// `torque_dir`, weighted by `inv_mass` and `ii_torque_dir`.
+    #[allow(clippy::too_many_arguments)]
+    fn side(
+        &self,
+        solver_vel_id: u32,
+        j_id: usize,
+        ndofs: usize,
+        dir: Vector,
+        torque_dir: AngVector,
+        ii_torque_dir: AngVector,
+        inv_mass: Vector,
+    ) -> Option<RowSide> {
+        let (velocities, jacobian) = match self {
+            GenericRhs::GenericId(slot) => (
+                SideVelocities::Multibody(*slot),
+                SideJacobian::Buffer {
+                    ndofs,
+                    j_id,
+                    wj_id: j_id + ndofs,
+                },
+            ),
+            GenericRhs::SolverVel(_) => {
+                let mut j = [0.0; SPATIAL_DIM];
+                let mut wj = [0.0; SPATIAL_DIM];
+                let linear = dir.to_array();
+                let weighted = dir.component_mul(&inv_mass).to_array();
+                j[..DIM].copy_from_slice(&linear);
+                wj[..DIM].copy_from_slice(&weighted);
+                #[cfg(feature = "dim3")]
+                {
+                    j[DIM..].copy_from_slice(&torque_dir.to_array());
+                    wj[DIM..].copy_from_slice(&ii_torque_dir.to_array());
+                }
+                #[cfg(feature = "dim2")]
+                {
+                    j[DIM] = torque_dir;
+                    wj[DIM] = ii_torque_dir;
+                }
+                (
+                    SideVelocities::Body(solver_vel_id),
+                    SideJacobian::Inline { j, wj },
+                )
+            }
+            GenericRhs::Fixed => return None,
+        };
+        Some(RowSide {
+            velocities,
+            jacobian,
+            error_sign: 1.0,
+            impulse_sign: 1.0,
+        })
     }
 
     /// Writes a rigid body's velocity held here back to `bodies`.
@@ -622,7 +663,8 @@ impl GenericContactConstraint {
     /// [`crate::dynamics::solver::coupled_multibody_rows`]). A row with no engaged joint row on
     /// its multibodies is solved alone, as `generic_solve_group` solves it. `solver_vel1_id` and
     /// `solver_vel2_id` name the solver bodies a rigid side's velocity is held for, so the joint
-    /// rows read and move the velocity the contact does.
+    /// rows read and move the velocity the contact does, and a joint row acting on the same
+    /// rigid body couples with the contact through it.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn generic_solve_normals_with_joint_rows(
         cfm_factor: Real,
@@ -652,8 +694,24 @@ impl GenericContactConstraint {
             let j_id1 = j_id1(nrm_j_id, ndofs1, ndofs2);
             let j_id2 = j_id2(nrm_j_id, ndofs1, ndofs2);
             let sides = [
-                solver_vel1.multibody_side(j_id1, ndofs1),
-                solver_vel2.multibody_side(j_id2, ndofs2),
+                solver_vel1.side(
+                    solver_vel1_id,
+                    j_id1,
+                    ndofs1,
+                    dir1,
+                    normal_part.torque_dir1,
+                    normal_part.ii_torque_dir1,
+                    im1,
+                ),
+                solver_vel2.side(
+                    solver_vel2_id,
+                    j_id2,
+                    ndofs2,
+                    -dir1,
+                    normal_part.torque_dir2,
+                    normal_part.ii_torque_dir2,
+                    im2,
+                ),
             ];
             let r = normal_part.r;
             let dvel = solver_vel1.dvel(
@@ -816,8 +874,24 @@ impl GenericContactConstraint {
                 let j_id2 = j_id2(row_j_id, ndofs1, ndofs2);
                 ids[t] = (j_id1, j_id2);
                 sides[t] = [
-                    solver_vel1.multibody_side(j_id1, ndofs1),
-                    solver_vel2.multibody_side(j_id2, ndofs2),
+                    solver_vel1.side(
+                        solver_vel1_id,
+                        j_id1,
+                        ndofs1,
+                        tangents1[t],
+                        tangent_part.torque_dir1[t],
+                        tangent_part.ii_torque_dir1[t],
+                        im1,
+                    ),
+                    solver_vel2.side(
+                        solver_vel2_id,
+                        j_id2,
+                        ndofs2,
+                        -tangents1[t],
+                        tangent_part.torque_dir2[t],
+                        tangent_part.ii_torque_dir2[t],
+                        im2,
+                    ),
                 ];
             }
             // With no normal impulse the point's friction is held at zero, which a tangent row

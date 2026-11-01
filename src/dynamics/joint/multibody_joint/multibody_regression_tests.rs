@@ -1553,6 +1553,127 @@ fn a_multibody_landing_on_its_forearm_keeps_the_forearm_at_its_stop() {
     );
 }
 
+/// A `root_mass` kg box with a 1.5 kg forearm hinged to it, a multibody lying on fixed ground,
+/// and a `light_mass` kg box held above the root by an impulse joint (`fixed`, else a ball joint)
+/// whose anchor on the light box is `offset` m from its centre along a diagonal, stepped for 4 s
+/// at `rate` steps a second in `substeps` substeps. Answers the largest distance between the
+/// joint's two anchors and the fastest the light box moved after the first second.
+#[cfg(feature = "dim3")]
+fn light_body_held_to_a_resting_multibody(
+    fixed: bool,
+    root_mass: Real,
+    light_mass: Real,
+    offset: Real,
+    rate: Real,
+    substeps: usize,
+) -> (Real, Real) {
+    let mut world = PhysicsWorld::new();
+    world.integration_parameters.dt = 1.0 / rate;
+    world.integration_parameters.num_solver_iterations = substeps;
+    world.insert(
+        RigidBodyBuilder::fixed().translation(Vector::new(0.0, -0.5, 0.0)),
+        ColliderBuilder::cuboid(10.0, 0.5, 10.0).friction(0.7),
+    );
+    let (root, _) = world.insert(
+        RigidBodyBuilder::dynamic()
+            .translation(Vector::new(0.0, 0.11, 0.0))
+            .can_sleep(false),
+        ColliderBuilder::cuboid(0.15, 0.1, 0.1)
+            .mass(root_mass)
+            .friction(0.7),
+    );
+    let (forearm, _) = world.insert(
+        RigidBodyBuilder::dynamic()
+            .translation(Vector::new(0.3, 0.11, 0.0))
+            .can_sleep(false),
+        ColliderBuilder::cuboid(0.15, 0.04, 0.04)
+            .mass(1.5)
+            .friction(0.7),
+    );
+    let elbow = RevoluteJointBuilder::new(Vector::Z)
+        .local_anchor1(Vector::new(0.15, 0.0, 0.0))
+        .local_anchor2(Vector::new(-0.15, 0.0, 0.0))
+        .limits([-140.0_f32.to_radians() as Real, 0.0])
+        .contacts_enabled(false);
+    world.insert_multibody_joint(root, forearm, elbow).unwrap();
+    let anchor1 = Vector::new(0.0, 0.3, 0.0);
+    let anchor2 = Vector::new(offset, -offset, offset);
+    let (light, _) = world.insert(
+        RigidBodyBuilder::dynamic()
+            .translation(Vector::new(0.0, 0.11, 0.0) + anchor1 - anchor2)
+            .can_sleep(false),
+        ColliderBuilder::cuboid(0.05, 0.05, 0.05)
+            .mass(light_mass)
+            .friction(0.7),
+    );
+    if fixed {
+        let joint = FixedJointBuilder::new()
+            .local_anchor1(anchor1)
+            .local_anchor2(anchor2)
+            .contacts_enabled(false);
+        world.insert_impulse_joint(root, light, joint);
+    } else {
+        let joint = SphericalJointBuilder::new()
+            .local_anchor1(anchor1)
+            .local_anchor2(anchor2)
+            .contacts_enabled(false);
+        world.insert_impulse_joint(root, light, joint);
+    }
+    let (mut apart, mut fastest): (Real, Real) = (0.0, 0.0);
+    for step in 0..(4.0 * rate) as usize {
+        world.step();
+        let held = world.bodies[light].position() * anchor2;
+        let holding = world.bodies[root].position() * anchor1;
+        let gap = (held - holding).length();
+        let speed = world.bodies[light].linvel().length();
+        if !(gap.is_finite() && speed.is_finite()) {
+            return (Real::INFINITY, Real::INFINITY);
+        }
+        apart = apart.max(gap);
+        if step as Real >= rate {
+            fastest = fastest.max(speed);
+        }
+    }
+    (apart, fastest)
+}
+
+/// A light body held by an impulse joint to a multibody resting on the ground stays at its
+/// anchor, at 30 and 60 steps a second in 2 substeps and at 60 in 4. Each of the ground's
+/// contacts on the multibody is solved as one block with the joint rows of the multibody that
+/// bear an impulse, and the joint holding the light body is one of them: solved in that block
+/// through the multibody alone, with the light body left out of how its rows push on one another
+/// and on the contact, a 0.1 kg box held 0.87 m from its centre to a 50 kg multibody was thrown
+/// off at 6.6 m/s, its anchor 3.6 m from where the joint holds it.
+#[test]
+#[cfg(feature = "dim3")]
+fn a_light_body_held_to_a_resting_multibody_stays_at_its_anchor() {
+    let mut failed = Vec::new();
+    for fixed in [true, false] {
+        for (root_mass, light_mass) in [(50.0 as Real, 0.1 as Real), (200.0, 0.05), (10.0, 1.0)] {
+            for offset in [0.2 as Real, 0.5] {
+                for (rate, substeps) in [(30.0 as Real, 2), (60.0, 2), (60.0, 4)] {
+                    let (apart, fastest) = light_body_held_to_a_resting_multibody(
+                        fixed, root_mass, light_mass, offset, rate, substeps,
+                    );
+                    // The ball joint lets the light box swing; the fixed joint holds it still.
+                    if apart > 0.05 || (fixed && fastest > 0.2) {
+                        failed.push(alloc::format!(
+                            "{} joint, {root_mass} kg holding {light_mass} kg {offset} m off its \
+                             centre, {rate} Hz x {substeps}: anchors {apart} m apart, the light \
+                             box at up to {fastest} m/s",
+                            if fixed { "fixed" } else { "ball" }
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        failed.is_empty(),
+        "the light body left its anchor: {failed:?}"
+    );
+}
+
 
 /// How a chain of [`chain_by_its_anchor`] swung.
 #[cfg(feature = "dim3")]
