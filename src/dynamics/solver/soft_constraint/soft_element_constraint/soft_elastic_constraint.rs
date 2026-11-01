@@ -15,13 +15,12 @@ use simba::scalar::{ComplexField as _, RealField as _};
 /// leaves is off by this fraction of the strain itself.
 pub(crate) const CELL_ROTATION_TOLERANCE: Real = 1.0e-5;
 
-/// An elastic cell as a step left it, for its write-back: its rotation, strain and whether it
-/// was inverted at the last update, and the impulses it accumulated (strain rows in the cell
-/// frame, then the volumetric row).
+/// An elastic cell as a step left it, for its write-back: its rotation and strain at the last
+/// update, and the impulses it accumulated (strain rows in the cell frame, then the volumetric
+/// row).
 pub(crate) struct ElasticEndState {
     pub rotation: Rotation,
     pub strain: StrainVector,
-    pub inverted: bool,
     pub strain_impulse: StrainVector,
     pub vol_impulse: Real,
 }
@@ -254,6 +253,27 @@ pub(crate) struct SoftElasticConstraint {
     /// Volumetric impulse (corotational only).
     pub vol_impulse: Real,
     pub model: SoftElasticModel,
+    /// The cell's plastic state through the step, for a cell whose material flows (a plastic
+    /// yield and creep rate): it flows at the end of every substep.
+    pub flow: Option<SoftCellFlow>,
+}
+
+/// The plastic state of a [`SoftElasticConstraint`] through a step: the cell's rest shape flows
+/// at the end of every substep, at the stress its strain rows carried over the substep, so a
+/// body's plastic flow follows its strain through the substeps of an impact at its creep rate per
+/// second, whatever the step length. The step's write-back flows the last substep and copies the
+/// state onto the cell.
+#[derive(Copy, Clone, Debug)]
+pub(crate) struct SoftCellFlow {
+    /// The plastic stretch the cell's rest shape `inv_rest_matrix` holds.
+    pub plastic_stretch: Matrix,
+    /// Whether a substep of this step has been solved: the next update flows the cell over it
+    /// before reading the cell's strain.
+    pub pending: bool,
+    /// The elastic energy this step's flows took out of the cell: at each flow, its energy at
+    /// the substep's end configuration against the rest shape it flowed from, less against the one
+    /// it flowed to.
+    pub work: Real,
 }
 
 /// The constitutive model of a [`SoftElasticConstraint`] and its model-specific state.
@@ -370,17 +390,36 @@ impl SoftElasticConstraint {
         inv
     }
 
-    /// Updates positions, the rotation, the strain, and the model state: the volumetric
-    /// gradient, rhs and Schur complement (corotational), or the tangent stiffness and gradient
-    /// (Neo-Hookean).
+    /// Reads the particles' positions from the solver bodies (the assembly's for those that are not
+    /// solver bodies).
     #[inline]
-    pub fn update(&mut self, bodies: &SolverBodies) {
+    pub fn read_positions(&mut self, bodies: &SolverBodies) {
         for k in 0..MAX_CONSTRAINT_PARTICLES {
             let id = self.solver_ids[k];
             if id != u32::MAX {
                 self.pos[k] = bodies.get_pose(id).translation;
             }
         }
+    }
+
+    /// Takes the rows `rows` its rest shape `inv_rest_matrix` (and `coeffs`, its strain
+    /// coefficients) decide (see `elastic_cell_rows`).
+    pub(crate) fn set_rows(
+        &mut self,
+        rows: &crate::dynamics::solver::soft_constraint::ElasticCellRows,
+    ) {
+        self.inv_a = rows.inv_a;
+        self.strain_cap = rows.strain_cap;
+        self.strain_per_impulse = rows.strain_per_impulse;
+        self.model = rows.model;
+    }
+
+    /// Updates positions, the rotation, the strain, and the model state: the volumetric
+    /// gradient, rhs and Schur complement (corotational), or the tangent stiffness and gradient
+    /// (Neo-Hookean).
+    #[inline]
+    pub fn update(&mut self, bodies: &SolverBodies) {
+        self.read_positions(bodies);
         let f = self.deformation_gradient();
         self.rotation = extract_rotation_within(f, self.rotation, CELL_ROTATION_TOLERANCE);
         self.rot_mat = self.rotation.to_mat();

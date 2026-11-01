@@ -248,6 +248,9 @@ pub(crate) struct SoftConstraintsSet {
     pub contact_chunks: Vec<Range<usize>>,
     pub contact_colors: Vec<Range<usize>>,
     pub groups: Vec<SoftGroupLayout>,
+    /// The solver's largest corrective velocity, which bounds the elastic cells' snap-back (their
+    /// rows are made afresh when a cell's rest shape flows within the step).
+    pub max_corrective_velocity: Real,
     /// Workspace of the element-constraint assembly (see `soft_element_constraint_assembly`).
     pub(crate) element_constraint_workspace:
         super::soft_element_constraint_assembly::ElementConstraintAssemblyWorkspace,

@@ -186,10 +186,7 @@ impl SoftEdgeSpring {
         // ω² = k / m with m = 1 / w the effective mass; ζ = c / (2 √(k m)).
         let omega = (self.stiffness * inv_mass).sqrt();
         let zeta = self.damping.max(0.0) * inv_mass / (2.0 * omega);
-        Some(SpringCoefficients::new(
-            omega / Real::simd_two_pi(),
-            zeta,
-        ))
+        Some(SpringCoefficients::new(omega / Real::simd_two_pi(), zeta))
     }
 }
 
@@ -272,18 +269,17 @@ pub struct SoftBodyEdge {
     /// particles together (resisting a stretch), negative pushing them apart.
     #[cfg_attr(feature = "serde-serialize", serde(default))]
     pub(crate) force: Real,
-    /// The work the plastic flow of the last step's FEM substeps took out of the edge (see
+    /// The work the plastic flow of the last step's substeps took out of the edge (see
     /// [`Self::flow_work`]).
     #[cfg_attr(feature = "serde-serialize", serde(skip))]
     pub(crate) flow_work: Real,
 }
 
 impl SoftBodyEdge {
-    /// The work plastic flow took out of this edge within the last step, in joules, on the FEM
-    /// solver ([`crate::dynamics::SoftBodySolver::Fem`]), which flows it at every substep: at each
-    /// flow, the elastic energy it held at that substep's configuration against the rest length it
-    /// flowed from, less against the one it flowed to; for a yield force, that force times the way
-    /// its rest length moved. A body the constraint solver stepped reads `0.0`.
+    /// The work plastic flow took out of this edge within the last step, in joules. Both solvers
+    /// flow it at every substep: at each flow, the elastic energy it held at that substep's
+    /// configuration against the rest length it flowed from, less against the one it flowed to;
+    /// for a yield force, that force times the way its rest length moved.
     pub fn flow_work(&self) -> Real {
         self.flow_work
     }
@@ -401,7 +397,7 @@ pub struct SoftBodyDihedral {
     /// Which material of the body the dihedral takes (see [`SoftBodyEdge::material`]).
     #[cfg_attr(feature = "serde-serialize", serde(default))]
     pub material: u16,
-    /// The work the plastic flow of the last step's FEM substeps took out of the dihedral (see
+    /// The work the plastic flow of the last step's substeps took out of the dihedral (see
     /// [`Self::flow_work`]).
     #[cfg_attr(feature = "serde-serialize", serde(skip))]
     pub(crate) flow_work: Real,
@@ -409,11 +405,10 @@ pub struct SoftBodyDihedral {
 
 #[cfg(feature = "dim3")]
 impl SoftBodyDihedral {
-    /// The work plastic flow took out of this dihedral within the last step, in joules, on the FEM
-    /// solver ([`crate::dynamics::SoftBodySolver::Fem`]), which flows it at every substep: at each
-    /// flow, the elastic energy it held at that substep's configuration against the rest angle it
-    /// flowed from, less against the one it flowed to. A body the constraint solver stepped reads
-    /// `0.0`.
+    /// The work plastic flow took out of this dihedral within the last step, in joules. Both
+    /// solvers flow it at every substep: at each flow, the elastic energy it held at that
+    /// substep's configuration against the rest angle it flowed from, less against the one it
+    /// flowed to.
     pub fn flow_work(&self) -> Real {
         self.flow_work
     }
@@ -513,7 +508,7 @@ pub struct SoftBodyCell {
     /// material's `tear_smoothing` (see [`Self::stress`]).
     #[cfg_attr(feature = "serde-serialize", serde(default))]
     pub(crate) stress: Real,
-    /// The work the plastic flow of the last step's FEM substeps took out of the cell (see
+    /// The work the plastic flow of the last step's substeps took out of the cell (see
     /// [`Self::flow_work`]).
     #[cfg_attr(feature = "serde-serialize", serde(skip))]
     pub(crate) flow_work: Real,
@@ -525,11 +520,11 @@ fn identity_matrix() -> Matrix {
 }
 
 impl SoftBodyCell {
-    /// The work plastic flow took out of this cell within the last step, in joules, on the FEM
-    /// solver ([`crate::dynamics::SoftBodySolver::Fem`]), which flows it at every substep: at each
-    /// flow, the elastic energy it held at that substep's configuration against the rest shape it
-    /// flowed from, less against the one it flowed to. A body the constraint solver stepped reads
-    /// `0.0`.
+    /// The work plastic flow took out of this cell within the last step, in joules. Both solvers
+    /// flow it at every substep: at each flow, the elastic energy it held at that substep's
+    /// configuration against the rest shape it flowed from, less against the one it flowed to
+    /// (the FEM solver at the configuration a substep starts from, the constraint solver at the
+    /// one it ends at).
     pub fn flow_work(&self) -> Real {
         self.flow_work
     }

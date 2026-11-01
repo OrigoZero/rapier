@@ -9,6 +9,7 @@ use simba::simd::SimdValue as _;
 #[cfg(feature = "dim3")]
 use super::super::soft_element_constraint::CELL_ROTATION_TOLERANCE;
 use super::super::soft_element_constraint::ElasticEndState;
+use super::{element_creep, flow_elastic_cell};
 use crate::dynamics::solver::solver_body::SolverBodies;
 use crate::math::{Real, Vector};
 use crate::utils::{AngularInertiaOps, ComponentMul, DotProduct};
@@ -300,7 +301,14 @@ impl SoftConstraintsSet {
                 // A new substep begins: the impulse is the previous one's total.
                 constraint.peak_impulse = constraint.peak_impulse.max(constraint.impulse);
                 constraint.trough_impulse = constraint.trough_impulse.min(constraint.impulse);
-                constraint.update(bodies);
+                let awake = &self.awake[constraint.soft_body as usize];
+                // SAFETY: read-only access to the soft body's elements and materials.
+                let sb = unsafe { &*awake.ptr };
+                let creep = (constraint.creeps && constraint.creep_pending)
+                    .then(|| element_creep(sb, constraint))
+                    .flatten();
+                constraint.update(bodies, awake.substep_dt, creep);
+                constraint.creep_pending = true;
                 self.strained[i] = constraint.is_strained(min_strain);
             }
             if let Some(coeff) = warmstart {
@@ -317,6 +325,39 @@ impl SoftConstraintsSet {
             let bi = range.batches.start + idx;
             let batch = &mut self.elastic_batches[bi];
             if update {
+                // The plastic lanes' cells flow over the substep just solved.
+                for l in 0..crate::math::SIMD_WIDTH {
+                    let ci = batch.constraints[l];
+                    if ci == u32::MAX {
+                        continue;
+                    }
+                    let constraint = &mut self.elastic_constraints[ci as usize];
+                    match &mut constraint.flow {
+                        None => continue,
+                        Some(flow) if !flow.pending => {
+                            flow.pending = true;
+                            continue;
+                        }
+                        Some(_) => {}
+                    }
+                    let awake = &self.awake[constraint.soft_body as usize];
+                    // SAFETY: read-only access to the soft body's elements and materials.
+                    let sb = unsafe { &*awake.ptr };
+                    constraint.read_positions(bodies);
+                    let x = constraint.pos;
+                    let impulse = batch.lane(l).strain_impulse;
+                    if let Some(flowed) = flow_elastic_cell(
+                        constraint,
+                        sb,
+                        &x,
+                        &impulse,
+                        awake.substep_dt,
+                        self.max_corrective_velocity,
+                        true,
+                    ) {
+                        batch.refit_lane(l, constraint, 1.0 - flowed.share);
+                    }
+                }
                 let strained = batch.update(bodies, CELL_ROTATION_TOLERANCE, min_strain);
                 for l in 0..crate::math::SIMD_WIDTH {
                     let ci = batch.constraints[l];
@@ -336,6 +377,29 @@ impl SoftConstraintsSet {
         let i = self.elastic_singles[range.singles.start + idx] as usize;
         let constraint = &mut self.elastic_constraints[i];
         if update {
+            if let Some(pending) = constraint.flow.as_mut().map(|flow| &mut flow.pending) {
+                if !*pending {
+                    *pending = true;
+                } else {
+                    // The cell flows over the substep just solved.
+                    let awake = &self.awake[constraint.soft_body as usize];
+                    // SAFETY: read-only access to the soft body's elements and materials.
+                    let sb = unsafe { &*awake.ptr };
+                    constraint.read_positions(bodies);
+                    let (x, impulse) = (constraint.pos, constraint.strain_impulse);
+                    if let Some(flowed) = flow_elastic_cell(
+                        constraint,
+                        sb,
+                        &x,
+                        &impulse,
+                        awake.substep_dt,
+                        self.max_corrective_velocity,
+                        true,
+                    ) {
+                        constraint.strain_impulse *= 1.0 - flowed.share;
+                    }
+                }
+            }
             constraint.update(bodies);
             self.strained[num_scalar + i] = constraint.is_strained(min_strain);
         }
@@ -381,8 +445,8 @@ impl SoftConstraintsSet {
         }
     }
 
-    /// Elastic cell `i` as the step left it: its rotation, strain and whether it was inverted at
-    /// the last update, and the impulses it accumulated (strain rows in the cell frame, then the
+    /// Elastic cell `i` as the step left it: its rotation and strain at the last update, and the
+    /// impulses it accumulated (strain rows in the cell frame, then the
     /// volumetric row).
     #[inline]
     pub fn elastic_end_state(&self, i: usize) -> ElasticEndState {
@@ -395,7 +459,6 @@ impl SoftConstraintsSet {
         ElasticEndState {
             rotation: c.rotation,
             strain: c.strain,
-            inverted: c.inverted,
             strain_impulse: c.strain_impulse,
             vol_impulse: c.vol_impulse,
         }

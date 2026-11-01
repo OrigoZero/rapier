@@ -1023,8 +1023,8 @@ pub(super) unsafe fn run_worker(ctx: &SharedCtx, worker_id: usize) {
             // SAFETY: each constraint is claimed by exactly one worker and writes its own element; each
             // awake body likewise writes its own particles.
             unsafe {
-                soft.writeback_constraints(constraints, ctx.base_params.dt);
                 let vs = &*ctx.velocity_solver;
+                soft.writeback_constraints(constraints, &vs.solver_bodies, ctx.base_params.dt);
                 for ai in awake {
                     soft.writeback_particles(ai, &vs.solver_bodies, &vs.substep_vels, ctx.base_params.dt);
                 }

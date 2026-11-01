@@ -1,7 +1,7 @@
 //! The scalar N-particle constraint: gradients of each element kind, its update, warm start and solve.
 
-use crate::dynamics::SoftBody;
 use crate::dynamics::solver::solver_body::SolverBodies;
+use crate::dynamics::{SoftBody, SoftBodyMaterial};
 use crate::math::{DIM, Real, Vector};
 use crate::utils::DotProduct;
 #[cfg(not(feature = "std"))]
@@ -80,6 +80,28 @@ pub(crate) struct SoftScalarConstraint {
     /// The shortest and the longest rest length a yielding distance constraint's plastic bounds
     /// allow: reaching one, it hardens.
     pub rest_range: [Real; 2],
+    /// The squared natural frequency of the element's spring (its softness's), `ω² = k w` with
+    /// `w` its effective mass: its stiffness is `ω² / w`, which its elastic energy reads.
+    pub omega_sq: Real,
+    /// Whether the element's rest length (distance) or rest angle (dihedral) creeps past its
+    /// material's edge yield (see [`Self::creep`]).
+    pub creeps: bool,
+    /// Whether a substep of this step has been solved: the next update creeps the element over
+    /// it before reading its error.
+    pub creep_pending: bool,
+    /// The elastic energy this step's plastic flows took out of the element: its yield force
+    /// times the way a yield moved its rest length, and at each creep its energy at the
+    /// substep's end against the rest it flowed from, less against the one it flowed to.
+    pub flow_work: Real,
+}
+
+/// What a creeping element's flow reads besides the constraint: its material (the edge yield,
+/// creep rate, flow directions and plastic bounds) and the rest length or angle it was created
+/// with.
+#[derive(Copy, Clone, Debug)]
+pub(crate) struct ElementCreep<'a> {
+    pub material: &'a SoftBodyMaterial,
+    pub initial: Real,
 }
 
 /// How close to its yield bound a constraint's impulse must come for the element to count as
@@ -137,25 +159,21 @@ impl SoftScalarConstraint {
     /// Updates the positions, gradients, rhs and effective mass from the current solver-body
     /// poses. Soft constraints are springs whose bias is the spring force, not an error-correction
     /// velocity, so they are solved once per substep (biased pass only) with the bias always on.
+    /// A yielding distance constraint gives way first (see [`Self::return_map`], `dt` the substep
+    /// length), and with `creep` the element creeps over the substep just solved (see
+    /// [`Self::creep`]).
     #[inline]
-    pub fn update(&mut self, bodies: &SolverBodies) {
-        let n = self.num_particles as usize;
-        for k in 0..n {
-            let id = self.solver_ids[k];
-            if id != u32::MAX {
-                self.pos[k] = bodies.get_pose(id).translation;
-            }
-        }
-
+    pub fn update(&mut self, bodies: &SolverBodies, dt: Real, creep: Option<ElementCreep>) {
+        self.read_positions(bodies);
         let mut c = self.compute_gradients();
         if self.kind == SoftScalarConstraintKind::Distance {
-            c = self.return_map(c);
+            c = self.return_map(c, dt);
         }
 
         // Effective mass and softness.
-        let mut w = 0.0;
-        for k in 0..n {
-            w += self.grad[k].gdot(self.grad[k] * self.im[k]);
+        let w = self.effective_mass();
+        if let Some(creep) = creep {
+            c = self.creep(c, w, creep, dt);
         }
         let cfm_gain = w * self.cfm_coeff;
         self.cfm_gain = cfm_gain;
@@ -166,24 +184,123 @@ impl SoftScalarConstraint {
         self.rhs = c * self.erp_inv_dt;
     }
 
+    /// Reads the particles' positions from the solver bodies (the assembly's for those that are
+    /// not solver bodies).
+    #[inline]
+    fn read_positions(&mut self, bodies: &SolverBodies) {
+        let n = self.num_particles as usize;
+        for k in 0..n {
+            let id = self.solver_ids[k];
+            if id != u32::MAX {
+                self.pos[k] = bodies.get_pose(id).translation;
+            }
+        }
+    }
+
+    /// `Σ_k ∇_k C · (w_k ∇_k C)` over the current gradients.
+    #[inline]
+    fn effective_mass(&self) -> Real {
+        let n = self.num_particles as usize;
+        let mut w = 0.0;
+        for k in 0..n {
+            w += self.grad[k].gdot(self.grad[k] * self.im[k]);
+        }
+        w
+    }
+
+    /// Creeps the element over the substep `dt` that just ended with its particles where the
+    /// solver bodies hold them (see [`Self::creep`]): the step's write-back takes its last
+    /// substep's flow this way.
+    pub fn creep_at(&mut self, bodies: &SolverBodies, creep: ElementCreep, dt: Real) {
+        self.read_positions(bodies);
+        let c = self.compute_gradients();
+        let w = self.effective_mass();
+        self.creep(c, w, creep, dt);
+    }
+
+    /// The elastic energy `f² / 2k` the element holds at error `c`, its stiffness `k = ω² / w`
+    /// (`w` its effective mass) and its force within its load bounds (`dt` the substep length the
+    /// bounds are impulses over).
+    #[inline]
+    fn energy(&self, c: Real, w: Real, dt: Real) -> Real {
+        if w <= 0.0 || self.omega_sq <= 0.0 || dt <= 0.0 {
+            return 0.0;
+        }
+        let k = self.omega_sq / w;
+        let bound = |impulse: Real| {
+            if impulse == Real::MAX {
+                Real::MAX
+            } else {
+                impulse / dt
+            }
+        };
+        let force = (k * c).clamp(-bound(self.load_bounds[0]), bound(self.load_bounds[1]));
+        0.5 * force * force / k
+    }
+
+    /// Creeps the element's rest length (distance) or rest angle (dihedral), at error `c` and
+    /// effective mass `w`, over the substep `dt`: past its material's edge yield the excess flows
+    /// at the edge creep rate (`edge_flowed_rest_length`, `dihedral_flowed_rest_angle`). The
+    /// warm-start impulse keeps the share of the error the flow left, and the flow's energy is
+    /// added to `flow_work`. Returns the error against the rest it leaves.
+    fn creep(&mut self, c: Real, w: Real, creep: ElementCreep, dt: Real) -> Real {
+        let rest = match self.kind {
+            SoftScalarConstraintKind::Distance => {
+                crate::dynamics::soft_body::edge_flowed_rest_length(
+                    self.rest,
+                    creep.initial,
+                    self.rest + c,
+                    creep.material,
+                    dt,
+                )
+            }
+            #[cfg(feature = "dim3")]
+            SoftScalarConstraintKind::Dihedral => {
+                crate::dynamics::soft_body::dihedral_flowed_rest_angle(
+                    self.rest,
+                    creep.initial,
+                    self.rest + c,
+                    creep.material,
+                    dt,
+                )
+            }
+            SoftScalarConstraintKind::CellVolume => None,
+        };
+        let Some(rest) = rest else {
+            return c;
+        };
+        let left = c + self.rest - rest;
+        self.flow_work += (self.energy(c, w, dt) - self.energy(left, w, dt)).max(0.0);
+        if c != 0.0 {
+            self.impulse *= (left / c).clamp(0.0, 1.0);
+        }
+        self.rest = rest;
+        left
+    }
+
     /// Flows a yielding distance constraint's rest length at the start of a substep, given its
     /// length error `c`: an element that carried its yield force through the substep just ended
     /// gave way, so its rest length takes the length the load put it at, and one whose length
     /// reached the end of its plastic range there hardens, its yield in that direction lifted.
     /// It hardens where it stands, so the solve stops it there and never springs it back to the
     /// end of the range (a hit carrying it past that end within one substep sets it that much
-    /// further). Returns the length error against the rest length it leaves.
+    /// further). Giving way adds its yield force (`dt` the substep length its yield impulse is
+    /// over) times the way its rest length moved to `flow_work`. Returns the length error against
+    /// the rest length it leaves.
     #[inline]
-    fn return_map(&mut self, c: Real) -> Real {
+    fn return_map(&mut self, c: Real, dt: Real) -> Real {
         let [push, pull] = self.yield_bounds;
         let length = c + self.rest;
         let gave_way = |bound: Real| bound * (1.0 - YIELD_TOLERANCE);
+        let inv_dt = crate::utils::inv(dt);
         if push != Real::MAX && c < 0.0 && self.impulse <= -gave_way(push) {
+            self.flow_work += push * inv_dt * (self.rest - length).max(0.0);
             self.rest = length;
             if length <= self.rest_range[0] {
                 self.yield_bounds[0] = Real::MAX;
             }
         } else if pull != Real::MAX && c > 0.0 && self.impulse >= gave_way(pull) {
+            self.flow_work += pull * inv_dt * (length - self.rest).max(0.0);
             self.rest = length;
             if length >= self.rest_range[1] {
                 self.yield_bounds[1] = Real::MAX;

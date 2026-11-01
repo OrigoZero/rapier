@@ -19,7 +19,7 @@ use super::soft_constraints_set::{
 use super::soft_element_constraint::SoftElasticBatch;
 use super::soft_element_constraint::{
     CorotationalConstraint, MAX_CONSTRAINT_PARTICLES, NeoHookeanConstraint, STRAIN_ROWS,
-    SoftCellBlock, SoftElasticConstraint, SoftElasticModel, SoftScalarConstraint,
+    SoftCellBlock, SoftCellFlow, SoftElasticConstraint, SoftElasticModel, SoftScalarConstraint,
     SoftScalarConstraintKind, SoftScalarConstraintWriteback, StrainMatrix, StrainVector,
 };
 use crate::dynamics::soft_body::SOFT_BODY_OVERFLOW_COLOR;
@@ -133,6 +133,7 @@ impl SoftConstraintsSet {
         self.contacts.clear();
         self.attachments.clear();
         self.groups.clear();
+        self.max_corrective_velocity = max_corrective_velocity;
 
         if soft_bodies.is_empty() {
             return;
@@ -693,10 +694,11 @@ impl SoftConstraintsSet {
                                element: usize,
                                vertices: &[u32],
                                rest: Real,
-                               erp: Real,
-                               cfm: Real,
+                               softness: &SpringCoefficients<Real>,
                                impulse: Real|
          -> SoftScalarConstraint {
+            let (erp, cfm) = coeffs_of(softness);
+            let omega = softness.angular_frequency();
             let mut solver_ids = [u32::MAX; MAX_CONSTRAINT_PARTICLES];
             let mut pos = [Vector::ZERO; MAX_CONSTRAINT_PARTICLES];
             let mut im = [0.0; MAX_CONSTRAINT_PARTICLES];
@@ -728,6 +730,10 @@ impl SoftConstraintsSet {
                 load_bounds: [Real::MAX, Real::MAX],
                 yield_bounds: [Real::MAX, Real::MAX],
                 rest_range: [0.0, Real::MAX],
+                omega_sq: omega * omega,
+                creeps: false,
+                creep_pending: false,
+                flow_work: 0.0,
             }
         };
 
@@ -744,10 +750,10 @@ impl SoftConstraintsSet {
             let spring = e
                 .spring
                 .and_then(|spring| spring.softness(im_of(e.vertices[0]) + im_of(e.vertices[1])));
-            let (erp, cfm) = match (spring, e.softness, e.kind) {
-                (Some(softness), _, _) | (None, Some(softness), _) => coeffs_of(&softness),
-                (None, None, SoftBodyEdgeKind::Structural) => coeffs_of(&material.edge_softness),
-                (None, None, SoftBodyEdgeKind::Bend) => coeffs_of(&material.bend_softness),
+            let softness = match (spring, e.softness, e.kind) {
+                (Some(softness), _, _) | (None, Some(softness), _) => softness,
+                (None, None, SoftBodyEdgeKind::Structural) => material.edge_softness,
+                (None, None, SoftBodyEdgeKind::Bend) => material.bend_softness,
             };
             let mut constraint = base_constraint(
                 SoftScalarConstraintKind::Distance,
@@ -755,10 +761,11 @@ impl SoftConstraintsSet {
                 ei,
                 &e.vertices,
                 e.rest_length,
-                erp,
-                cfm,
+                &softness,
                 e.impulse,
             );
+            constraint.creeps =
+                material.edge_plastic_yield > 0.0 && material.edge_plastic_creep > 0.0;
             // The force bounds (a cable pushes with nothing, a strut pulls with nothing, a
             // bounded edge carries no more than its bound) and the forces a yielding edge gives
             // way at, as impulses per substep; the substeps flow a yielding edge's rest length
@@ -798,17 +805,18 @@ impl SoftConstraintsSet {
             .skip(dihedrals.start)
             .filter(|_| element_constraints)
         {
-            let (bend_erp, bend_cfm) = coeffs_of(&sb.element_material(d.material).bend_softness);
-            let constraint = base_constraint(
+            let material = sb.element_material(d.material);
+            let mut constraint = base_constraint(
                 SoftScalarConstraintKind::Dihedral,
                 SoftScalarConstraintWriteback::Dihedral,
                 di,
                 &d.vertices,
                 d.rest_angle,
-                bend_erp,
-                bend_cfm,
+                &material.bend_softness,
                 d.impulse,
             );
+            constraint.creeps =
+                material.edge_plastic_yield > 0.0 && material.edge_plastic_creep > 0.0;
             out.push_constraint(d.color, constraint);
         }
 
@@ -823,16 +831,13 @@ impl SoftConstraintsSet {
                 // Integrated implicitly by the FEM solver instead (see `soft_fem`).
                 SoftBodyCellModel::Volume if sb.uses_fem() => continue,
                 SoftBodyCellModel::Volume => {
-                    let (vol_erp, vol_cfm) =
-                        coeffs_of(&sb.element_material(c.material).volume_softness);
                     let constraint = base_constraint(
                         SoftScalarConstraintKind::CellVolume,
                         SoftScalarConstraintWriteback::CellVolume,
                         ci,
                         &c.vertices,
                         c.rest_volume,
-                        vol_erp,
-                        vol_cfm,
+                        &sb.element_material(c.material).volume_softness,
                         c.impulses[0],
                     );
                     out.push_constraint(c.color, constraint);
@@ -846,9 +851,6 @@ impl SoftConstraintsSet {
                     let material = sb.element_material(c.material);
                     let (mu, lambda) = material.lame_parameters();
                     let elastic_zeta = material.elastic_damping_ratio;
-                    // Constraint-space stiffnesses 2μV₀ / 4μV₀ (diagonal / shear rows) and λV₀
-                    // (volumetric, at rest) map to natural frequencies via the effective masses,
-                    // ω² = k · Σ w |∇C|²; Neo-Hookean damping/snap-back caps use (2μ + λ)V₀ / 4μV₀.
                     let vol = c.rest_volume.abs();
                     let (coeffs, im, w_vol) = elastic_cell_terms(sb, slots, c);
                     // Per-cell stiffness scale (regional materials through the clusters).
@@ -865,6 +867,15 @@ impl SoftConstraintsSet {
                     }
                     // The block's diagonal and the softened block's inverse, from the
                     // cell's last step when nothing they depend on changed.
+                    let terms = ElasticCellTerms {
+                        mu,
+                        lambda,
+                        volume: vol,
+                        damping_ratio: elastic_zeta,
+                        dt,
+                        neo_hookean,
+                        max_corrective_velocity,
+                    };
                     let key = SoftCellBlock::key(
                         &c.inv_rest_matrix,
                         &im,
@@ -878,108 +889,18 @@ impl SoftConstraintsSet {
                     // SAFETY: `cell_blocks` holds one block per cell of the body, and each cell
                     // is filled by exactly one worker.
                     let cached = unsafe { &mut *awake.cell_blocks.add(ci) };
-                    let (diagonal, fresh_block) = match cached.matching(&key) {
-                        Some(block) => (block.diagonal, None),
-                        None => {
-                            let block = SoftElasticConstraint::strain_block(&coeffs, &im);
-                            (block.diagonal(), Some(block))
-                        }
-                    };
-                    let two_pi = Real::simd_two_pi();
-                    // Snap-back caps: a strain error moves the particles at about
-                    // `erp * strain * cell size` per second.
-                    let cell_size = vol.simd_powf(1.0 / DIM as Real).max(1.0e-6);
-                    let strain_cap = |erp: Real| {
-                        if erp > 0.0 {
-                            max_corrective_velocity / (erp * cell_size)
-                        } else {
-                            Real::MAX
-                        }
-                    };
-                    let mut erp_strain = StrainVector::zeros();
-                    let mut cfm_strain = StrainVector::zeros();
-                    let mut inert = [false; STRAIN_ROWS];
-                    let mut damping = StrainVector::zeros();
-                    let mut strain_per_impulse = StrainVector::zeros();
-                    for r in 0..STRAIN_ROWS {
-                        let w = diagonal[r];
-                        // The row's deviatoric stiffness: the stress-based strain of both models
-                        // reads through it (an isotropic material's deviatoric response is `2μ`).
-                        let k_dev = if r < DIM {
-                            2.0 * mu * vol
-                        } else {
-                            4.0 * mu * vol
-                        };
-                        let k = if neo_hookean {
-                            NeoHookeanConstraint::rest_stiffness(mu, lambda, r) * vol
-                        } else {
-                            k_dev
-                        };
-                        let omega = (k * w).sqrt();
-                        if omega > 0.0 {
-                            strain_per_impulse[r] = 1.0 / (k_dev * dt);
-                            let (erp, cfm) =
-                                coeffs_of(&SpringCoefficients::new(omega / two_pi, elastic_zeta));
-                            erp_strain[r] = erp;
-                            cfm_strain[r] = w * cfm;
-                            // Damping c = 2ζω/w (the constraint as a spring of mass 1/w).
-                            damping[r] = 2.0 * elastic_zeta * omega / w;
-                        } else {
-                            inert[r] = true;
-                        }
+                    let (rows, fresh) =
+                        elastic_cell_rows(&terms, &coeffs, &im, w_vol, cached.matching(&key));
+                    if let Some((diagonal, inv_a)) = fresh {
+                        *cached = SoftCellBlock::new(key, diagonal, inv_a);
                     }
-                    let strain_caps = StrainVector::from_fn(|r, _| strain_cap(erp_strain[r]));
                     let strain_impulse = StrainVector::from_fn(|r, _| c.impulses[r]);
-                    let (inv_a, model, vol_impulse) = if neo_hookean {
-                        let model = SoftElasticModel::NeoHookean(NeoHookeanConstraint {
-                            dt,
-                            mu: mu * vol,
-                            lambda: (lambda + mu) * vol,
-                            damping,
-                            stiffness_strain: StrainVector::repeat(Real::MAX),
-                            m: StrainMatrix::zeros(),
-                            dt_grad: StrainVector::zeros(),
-                        });
-                        if fresh_block.is_some() {
-                            *cached = SoftCellBlock::new(key, diagonal, StrainMatrix::zeros());
-                        }
-                        (StrainMatrix::zeros(), model, 0.0)
+                    let vol_impulse = if neo_hookean {
+                        0.0
                     } else {
-                        let omega_vol = (lambda * vol * w_vol).sqrt();
-                        // A zero Poisson ratio disables the volumetric row (zero gain
-                        // and rhs: its impulse stays zero).
-                        let (erp_vol, cfm_coeff_vol) = if omega_vol > 0.0 {
-                            coeffs_of(&SpringCoefficients::new(omega_vol / two_pi, elastic_zeta))
-                        } else {
-                            (0.0, 0.0)
-                        };
-                        let inv_a = match fresh_block {
-                            None => cached.inv_a,
-                            Some(mut softened) => {
-                                for r in 0..STRAIN_ROWS {
-                                    softened[(r, r)] += cfm_strain[r];
-                                }
-                                let inv_a = SoftElasticConstraint::invert_block(softened, inert);
-                                *cached = SoftCellBlock::new(key, diagonal, inv_a);
-                                inv_a
-                            }
-                        };
-                        let model = SoftElasticModel::Corotational(CorotationalConstraint {
-                            erp_strain,
-                            cfm_strain,
-                            erp_vol,
-                            cfm_coeff_vol,
-                            volumetric: omega_vol > 0.0,
-                            vol_cap: strain_cap(erp_vol),
-                            grad_vol: [Vector::ZERO; MAX_CONSTRAINT_PARTICLES],
-                            cfm_gain_vol: 0.0,
-                            rhs_vol: 0.0,
-                            b: StrainVector::zeros(),
-                            z: StrainVector::zeros(),
-                            inv_s: 0.0,
-                        });
-                        (inv_a, model, c.impulses[STRAIN_ROWS])
+                        c.impulses[STRAIN_ROWS]
                     };
+                    let plastic = material.plastic_yield > 0.0 && material.plastic_creep > 0.0;
                     let constraint = SoftElasticConstraint {
                         soft_body: ai as u32,
                         element: ci as u32,
@@ -990,14 +911,19 @@ impl SoftConstraintsSet {
                         inv_rest_matrix: c.inv_rest_matrix,
                         rotation: c.rotation,
                         rot_mat: c.rotation.to_mat(),
-                        inv_a,
-                        strain_cap: strain_caps,
+                        inv_a: rows.inv_a,
+                        strain_cap: rows.strain_cap,
                         strain: StrainVector::zeros(),
                         inverted: false,
                         strain_impulse,
-                        strain_per_impulse,
+                        strain_per_impulse: rows.strain_per_impulse,
                         vol_impulse,
-                        model,
+                        model: rows.model,
+                        flow: plastic.then(|| SoftCellFlow {
+                            plastic_stretch: c.plastic_stretch,
+                            pending: false,
+                            work: 0.0,
+                        }),
                     };
                     out.push_elastic_constraint(c.color, constraint);
                 }
@@ -1089,11 +1015,170 @@ fn element_ranges(
     )
 }
 
+/// What decides an elastic cell's rows besides its rest shape and its particles' masses: its
+/// material's Lamé parameters (scaled by the cell's stiffness), its rest volume and damping
+/// ratio, the substep length, its model and the solver's largest corrective velocity.
+#[derive(Copy, Clone, Debug)]
+pub(crate) struct ElasticCellTerms {
+    pub mu: Real,
+    pub lambda: Real,
+    pub volume: Real,
+    pub damping_ratio: Real,
+    pub dt: Real,
+    pub neo_hookean: bool,
+    pub max_corrective_velocity: Real,
+}
+
+/// The rows of an elastic cell's constraint its rest shape decides (see [`elastic_cell_rows`]).
+#[derive(Copy, Clone, Debug)]
+pub(crate) struct ElasticCellRows {
+    pub inv_a: StrainMatrix,
+    pub strain_cap: StrainVector,
+    pub strain_per_impulse: StrainVector,
+    pub model: SoftElasticModel,
+}
+
+/// An elastic cell's rows from its strain coefficients `coeffs`, its particles' inverse masses
+/// `im`, its rest volumetric weight `w_vol` (see [`elastic_cell_terms`]) and `terms`: each strain
+/// row's spring coefficients, snap-back cap and strain per unit impulse, the softened block's
+/// inverse and the model's state. `cached` is the cell's block when nothing it depends on
+/// changed; otherwise the block is made afresh and returned as `(diagonal, inverse)` for the
+/// cache (a Neo-Hookean cell inverts its own block at every update, and caches a zero inverse).
+pub(crate) fn elastic_cell_rows(
+    terms: &ElasticCellTerms,
+    coeffs: &[Vector; MAX_CONSTRAINT_PARTICLES],
+    im: &[Real; MAX_CONSTRAINT_PARTICLES],
+    w_vol: Real,
+    cached: Option<&SoftCellBlock>,
+) -> (ElasticCellRows, Option<(StrainVector, StrainMatrix)>) {
+    let ElasticCellTerms {
+        mu,
+        lambda,
+        volume: vol,
+        damping_ratio: elastic_zeta,
+        dt,
+        neo_hookean,
+        max_corrective_velocity,
+    } = *terms;
+    let coeffs_of = |c: &SpringCoefficients<Real>| (c.erp_inv_dt(dt), c.cfm_coeff(dt));
+    // Constraint-space stiffnesses 2μV₀ / 4μV₀ (diagonal / shear rows) and λV₀ (volumetric, at
+    // rest) map to natural frequencies via the effective masses, ω² = k · Σ w |∇C|²; Neo-Hookean
+    // damping/snap-back caps use (2μ + λ)V₀ / 4μV₀.
+    let (diagonal, fresh_block) = match cached {
+        Some(block) => (block.diagonal, None),
+        None => {
+            let block = SoftElasticConstraint::strain_block(coeffs, im);
+            (block.diagonal(), Some(block))
+        }
+    };
+    let two_pi = Real::simd_two_pi();
+    // Snap-back caps: a strain error moves the particles at about `erp * strain * cell size` per
+    // second.
+    let cell_size = vol.simd_powf(1.0 / DIM as Real).max(1.0e-6);
+    let strain_cap = |erp: Real| {
+        if erp > 0.0 {
+            max_corrective_velocity / (erp * cell_size)
+        } else {
+            Real::MAX
+        }
+    };
+    let mut erp_strain = StrainVector::zeros();
+    let mut cfm_strain = StrainVector::zeros();
+    let mut inert = [false; STRAIN_ROWS];
+    let mut damping = StrainVector::zeros();
+    let mut strain_per_impulse = StrainVector::zeros();
+    for r in 0..STRAIN_ROWS {
+        let w = diagonal[r];
+        // The row's deviatoric stiffness: the stress-based strain of both models reads through it
+        // (an isotropic material's deviatoric response is `2μ`).
+        let k_dev = if r < DIM {
+            2.0 * mu * vol
+        } else {
+            4.0 * mu * vol
+        };
+        let k = if neo_hookean {
+            NeoHookeanConstraint::rest_stiffness(mu, lambda, r) * vol
+        } else {
+            k_dev
+        };
+        let omega = (k * w).sqrt();
+        if omega > 0.0 {
+            strain_per_impulse[r] = 1.0 / (k_dev * dt);
+            let (erp, cfm) = coeffs_of(&SpringCoefficients::new(omega / two_pi, elastic_zeta));
+            erp_strain[r] = erp;
+            cfm_strain[r] = w * cfm;
+            // Damping c = 2ζω/w (the constraint as a spring of mass 1/w).
+            damping[r] = 2.0 * elastic_zeta * omega / w;
+        } else {
+            inert[r] = true;
+        }
+    }
+    let strain_caps = StrainVector::from_fn(|r, _| strain_cap(erp_strain[r]));
+    if neo_hookean {
+        let model = SoftElasticModel::NeoHookean(NeoHookeanConstraint {
+            dt,
+            mu: mu * vol,
+            lambda: (lambda + mu) * vol,
+            damping,
+            stiffness_strain: StrainVector::repeat(Real::MAX),
+            m: StrainMatrix::zeros(),
+            dt_grad: StrainVector::zeros(),
+        });
+        let rows = ElasticCellRows {
+            inv_a: StrainMatrix::zeros(),
+            strain_cap: strain_caps,
+            strain_per_impulse,
+            model,
+        };
+        return (rows, fresh_block.map(|_| (diagonal, StrainMatrix::zeros())));
+    }
+    let omega_vol = (lambda * vol * w_vol).sqrt();
+    // A zero Poisson ratio disables the volumetric row (zero gain and rhs: its impulse stays
+    // zero).
+    let (erp_vol, cfm_coeff_vol) = if omega_vol > 0.0 {
+        coeffs_of(&SpringCoefficients::new(omega_vol / two_pi, elastic_zeta))
+    } else {
+        (0.0, 0.0)
+    };
+    let (inv_a, fresh) = match (cached, fresh_block) {
+        (Some(block), _) => (block.inv_a, None),
+        (None, Some(mut softened)) => {
+            for r in 0..STRAIN_ROWS {
+                softened[(r, r)] += cfm_strain[r];
+            }
+            let inv_a = SoftElasticConstraint::invert_block(softened, inert);
+            (inv_a, Some((diagonal, inv_a)))
+        }
+        (None, None) => unreachable!(),
+    };
+    let model = SoftElasticModel::Corotational(CorotationalConstraint {
+        erp_strain,
+        cfm_strain,
+        erp_vol,
+        cfm_coeff_vol,
+        volumetric: omega_vol > 0.0,
+        vol_cap: strain_cap(erp_vol),
+        grad_vol: [Vector::ZERO; MAX_CONSTRAINT_PARTICLES],
+        cfm_gain_vol: 0.0,
+        rhs_vol: 0.0,
+        b: StrainVector::zeros(),
+        z: StrainVector::zeros(),
+        inv_s: 0.0,
+    });
+    let rows = ElasticCellRows {
+        inv_a,
+        strain_cap: strain_caps,
+        strain_per_impulse,
+        model,
+    };
+    (rows, fresh)
+}
+
 /// An elastic cell's strain coefficients, its particles' inverse masses (zero without a solver
 /// slot) and its rest volumetric weight `Σ_p w_p |∇_p C_V|²` (at rest `∇C_V` of particle `p` is
 /// `Σ_j coeffs[p][j] e_j`); a zero weight (all pinned, degenerate cell) means no constraint.
 #[inline]
-fn elastic_cell_terms(
+pub(crate) fn elastic_cell_terms(
     sb: &SoftBody,
     slots: &[u32],
     c: &crate::dynamics::SoftBodyCell,
@@ -1109,11 +1194,22 @@ fn elastic_cell_terms(
             im[k] = sb.particles[v as usize].inv_mass;
         }
     }
+    let w_vol = elastic_cell_weight(&coeffs, &im);
+    (coeffs, im, w_vol)
+}
+
+/// An elastic cell's rest volumetric weight `Σ_p w_p |∇_p C_V|²` from its strain coefficients and
+/// its particles' inverse masses (see [`elastic_cell_terms`]).
+#[inline]
+pub(crate) fn elastic_cell_weight(
+    coeffs: &[Vector; MAX_CONSTRAINT_PARTICLES],
+    im: &[Real; MAX_CONSTRAINT_PARTICLES],
+) -> Real {
     let mut w_vol = 0.0;
     for (w, c) in im.iter().zip(coeffs.iter()) {
         w_vol += w * c.length_squared();
     }
-    (coeffs, im, w_vol)
+    w_vol
 }
 
 /// A zero angular inertia (the cluster fit's initial value).
