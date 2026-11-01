@@ -35,7 +35,9 @@ pub struct SoftBodyMaterial {
     /// rest shape flows toward its current shape (default: `0.0`, no plasticity).
     pub plastic_yield: Real,
     /// Rate (per second) at which the strain in excess of the yield is absorbed into the rest
-    /// shape (default: `1.0`); the flow is deviatoric (volume preserving).
+    /// shape (default: `1.0`): a strain held for `t` seconds sets the share `1 - e^(-creep t)` of
+    /// its excess, whatever step and substep length it is simulated at. The flow is deviatoric
+    /// (volume preserving).
     pub plastic_creep: Real,
     /// Largest accumulated plastic deformation of a cell, the Frobenius norm of `P - I` with `P`
     /// its rest shape's plastic stretch (default: `1.0`). Flow past it is projected back onto the
@@ -51,8 +53,8 @@ pub struct SoftBodyMaterial {
     #[cfg_attr(feature = "serde-serialize", serde(default))]
     pub edge_plastic_yield: Real,
     /// Rate (per second) at which an edge's strain in excess of its yield is absorbed into its
-    /// rest length (default: `1.0`); `Real::INFINITY` (or anything above the step rate) sets it at
-    /// once.
+    /// rest length (default: `1.0`): a strain held for `t` seconds sets the share
+    /// `1 - e^(-creep t)` of its excess; `Real::INFINITY` sets it at once.
     #[cfg_attr(feature = "serde-serialize", serde(default = "one"))]
     pub edge_plastic_creep: Real,
     /// Largest permanent set an edge may accumulate, as a fraction of its initial length (default:

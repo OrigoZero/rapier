@@ -5197,3 +5197,95 @@ fn a_box_swinging_on_a_rope_tied_to_it_stays_tied() {
         }
     }
 }
+
+/// A plastic FEM block thrown onto the ground at 8 m/s crumples and rebounds the same way at
+/// every step length that divides into the same substep: 30 steps of 8 substeps a second, 60 of
+/// 4, 120 of 2 and 240 of 1 all solve 240 substeps a second, and the block's flow follows its
+/// strain through those substeps at its creep rate, so its rebound and the permanent set it keeps
+/// agree across them.
+#[cfg(feature = "fem")]
+#[test]
+fn plastic_flow_follows_the_substeps_at_every_step_length() {
+    let crash = |rate: Real, substeps: usize| {
+        let mut world = world_with_ground();
+        world.integration_parameters.dt = 1.0 / rate;
+        world.integration_parameters.num_solver_iterations = substeps;
+        world
+            .integration_parameters
+            .soft_bodies
+            .max_extra_substep_rate = 0.0;
+        let block = SoftBodyBuilder::cuboid(
+            Vector::new(0.0, 0.6, 0.0),
+            Vector::new(0.5, 0.25, 0.25),
+            6,
+            3,
+            3,
+        )
+        .cell_model(SoftBodyCellModel::Corotational)
+        .solver(SoftBodySolver::Fem)
+        .material(SoftBodyMaterial {
+            young_modulus: 3.0e4,
+            poisson_ratio: 0.3,
+            elastic_damping_ratio: 0.3,
+            plastic_yield: 0.02,
+            plastic_creep: 30.0,
+            plastic_max: 0.5,
+            ..Default::default()
+        })
+        .particle_mass(0.5)
+        .can_sleep(false);
+        let handle = world.insert_soft_body(block);
+        let n = world.soft_bodies[handle].num_particles();
+        for i in 0..n {
+            world.soft_bodies[handle].set_particle_velocity(i, Vector::new(0.0, -8.0, 0.0));
+        }
+        let mean_vy = |world: &PhysicsWorld| {
+            let sb = &world.soft_bodies[handle];
+            (0..n).map(|i| sb.particle_velocity(i).y).sum::<Real>() / n as Real
+        };
+        let mut rebound: Real = 0.0;
+        for _ in 0..(rate as usize) {
+            world.step();
+            rebound = rebound.max(mean_vy(&world));
+        }
+        assert_finite(&world, handle);
+        let sb = &world.soft_bodies[handle];
+        let set = sb
+            .cells()
+            .iter()
+            .map(|c| {
+                let d = c.plastic_stretch() - Matrix::IDENTITY;
+                (d.x_axis.length_squared() + d.y_axis.length_squared() + d.z_axis.length_squared())
+                    .sqrt()
+            })
+            .sum::<Real>()
+            / sb.cells().len() as Real;
+        (rebound, set)
+    };
+    let runs: Vec<(Real, usize, Real, Real)> = [(30.0, 8), (60.0, 4), (120.0, 2), (240.0, 1)]
+        .into_iter()
+        .map(|(rate, substeps)| {
+            let (rebound, set) = crash(rate, substeps);
+            (rate, substeps, rebound, set)
+        })
+        .collect();
+    let spread = |pick: fn(&(Real, usize, Real, Real)) -> Real| {
+        let (min, max) = runs
+            .iter()
+            .map(pick)
+            .fold((Real::MAX, Real::MIN), |(a, b), x| (a.min(x), b.max(x)));
+        (max - min) / max
+    };
+    assert!(
+        runs.iter().all(|r| r.3 > 0.02),
+        "the block kept no permanent set: {runs:?}"
+    );
+    assert!(
+        spread(|r| r.3) < 0.1,
+        "the permanent set depends on the step length: (rate, substeps, rebound, set) {runs:?}"
+    );
+    assert!(
+        spread(|r| r.2) < 0.15,
+        "the rebound depends on the step length: (rate, substeps, rebound, set) {runs:?}"
+    );
+}

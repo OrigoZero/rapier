@@ -7,25 +7,40 @@ use simba::scalar::{ComplexField as _, RealField as _};
 use simba::simd::SimdComplexField as _;
 
 use crate::dynamics::SoftBody;
+use crate::dynamics::soft_body::creep_share;
 use crate::math::{DIM, Matrix, Real, Vector};
 
 use super::super::soft_element_constraint::{
     STRAIN_ROWS, StrainVector, max_symmetric_eigenvalue, strain_matrix,
 };
 
-/// Plastic flow of an elastic cell (see `SoftBodyMaterial::plastic_yield`): past the yield the rest
-/// shape flows toward the deviatoric stretch at the creep rate (`Dm' = S_p Dm`, unit determinant,
-/// `Dm = P Dm₀` bounded by `plastic_max`); inverted cells do not flow. Returns whether it flowed.
-pub(crate) fn plastic_flow(
-    cell: &mut crate::dynamics::SoftBodyCell,
+/// A cell's rest shape after plastic flow (see [`flowed_rest_shape`]).
+#[derive(Copy, Clone, Debug)]
+pub(crate) struct FlowedRestShape {
+    /// The new plastic stretch `P'` (unit determinant).
+    pub plastic_stretch: Matrix,
+    /// The inverse of the new rest edge matrix `P' Dm₀`.
+    pub inv_rest_matrix: Matrix,
+    /// The signed rest volume of `P' Dm₀`.
+    pub rest_volume: Real,
+    /// The share of the cell's strain the flow took into its rest shape.
+    pub share: Real,
+}
+
+/// Plastic flow of an elastic cell of plastic stretch `plastic_stretch` held at `strain` for
+/// `dt` (see `SoftBodyMaterial::plastic_yield`): past the yield the rest shape flows toward the
+/// deviatoric stretch at the creep rate (`Dm' = S_p Dm`, unit determinant, `Dm = P Dm₀` bounded by
+/// `plastic_max`); an inverted cell does not flow. `None` when it does not flow.
+pub(crate) fn flowed_rest_shape(
+    plastic_stretch: &Matrix,
     strain: &StrainVector,
     inverted: bool,
     rest0: &[Vector; DIM + 1],
     material: &crate::dynamics::SoftBodyMaterial,
     dt: Real,
-) -> bool {
-    if inverted {
-        return false;
+) -> Option<FlowedRestShape> {
+    if inverted || material.plastic_yield <= 0.0 {
+        return None;
     }
     let eps = strain_matrix(strain);
     // The diagonal strain rows come first.
@@ -33,18 +48,21 @@ pub(crate) fn plastic_flow(
     let dev = eps - Matrix::IDENTITY * (trace / DIM as Real);
     let norm = frobenius_norm(&dev);
     if norm <= material.plastic_yield {
-        return false;
+        return None;
     }
-    let gamma = ((norm - material.plastic_yield) / norm * material.plastic_creep * dt).min(1.0);
+    let share = (norm - material.plastic_yield) / norm * creep_share(material.plastic_creep, dt);
+    if share <= 0.0 {
+        return None;
+    }
     // The plastic stretch: a fraction of the full stretch `S = I + ε`, normalized to a unit
     // determinant so the flow keeps the rest volume.
-    let s_p = Matrix::IDENTITY + eps * gamma;
+    let s_p = Matrix::IDENTITY + eps * share;
     let det = s_p.determinant();
     if det <= 1.0e-6 {
-        return false;
+        return None;
     }
     let s_p = s_p * (1.0 / det.simd_powf(1.0 / DIM as Real));
-    let total = s_p * cell.plastic_stretch;
+    let total = s_p * *plastic_stretch;
     let deviation = total - Matrix::IDENTITY;
     let deviation_norm = frobenius_norm(&deviation);
     let total = if deviation_norm > material.plastic_max {
@@ -54,7 +72,7 @@ pub(crate) fn plastic_flow(
     };
     let total_det = total.determinant();
     if total_det <= 1.0e-6 {
-        return false;
+        return None;
     }
     let total = total * (1.0 / total_det.simd_powf(1.0 / DIM as Real));
     // The new rest edge matrix `P' Dm₀` and its signed volume (`det(Dm) / DIM!`).
@@ -62,16 +80,45 @@ pub(crate) fn plastic_flow(
     let factorial = if DIM == 2 { 2.0 } else { 6.0 };
     let volume = dm.determinant() / factorial;
     if !volume.is_finite() || volume.abs() <= Real::EPSILON {
+        return None;
+    }
+    Some(FlowedRestShape {
+        plastic_stretch: total,
+        inv_rest_matrix: dm.inverse(),
+        rest_volume: volume,
+        share,
+    })
+}
+
+/// Whether a cell's plastic stretch moved from `before` to `after` by a significant amount (such
+/// a body is kept awake).
+pub(crate) fn stretch_moved(before: &Matrix, after: &Matrix) -> bool {
+    frobenius_norm(&(*after - *before)) > 1.0e-4
+}
+
+/// Plastic flow of an elastic cell over `dt` (see [`flowed_rest_shape`]), its strain rows' warm
+/// start following what is left of the strain. Returns whether it flowed significantly.
+pub(crate) fn plastic_flow(
+    cell: &mut crate::dynamics::SoftBodyCell,
+    strain: &StrainVector,
+    inverted: bool,
+    rest0: &[Vector; DIM + 1],
+    material: &crate::dynamics::SoftBodyMaterial,
+    dt: Real,
+) -> bool {
+    let Some(flowed) =
+        flowed_rest_shape(&cell.plastic_stretch, strain, inverted, rest0, material, dt)
+    else {
         return false;
-    }
-    cell.inv_rest_matrix = dm.inverse();
-    cell.rest_volume = volume;
-    let increment = frobenius_norm(&(total - cell.plastic_stretch));
-    cell.plastic_stretch = total;
+    };
+    cell.inv_rest_matrix = flowed.inv_rest_matrix;
+    cell.rest_volume = flowed.rest_volume;
+    let moved = stretch_moved(&cell.plastic_stretch, &flowed.plastic_stretch);
+    cell.plastic_stretch = flowed.plastic_stretch;
     for impulse in &mut cell.impulses[..STRAIN_ROWS] {
-        *impulse *= 1.0 - gamma;
+        *impulse *= 1.0 - flowed.share;
     }
-    increment > 1.0e-4
+    moved
 }
 
 /// The largest tensile strain of a cell, plastic flow included: the largest principal value of the
@@ -150,11 +197,15 @@ mod tests {
         let dm = cell.plastic_stretch * SoftBody::cell_edge_matrix(rest0);
         let err = frobenius_norm(&(cell.inv_rest_matrix * dm - Matrix::IDENTITY));
         assert!(err < 1.0e-5, "rest matrix drifted: {err}");
-        // The strain rows' warm start followed the flow (full creep: nothing elastic left).
+        // The strain rows' warm start followed the flow: the yield is what stays elastic, the
+        // share `yield / ‖dev ε‖` of the strain (the shear's deviatoric norm is `0.2 √2`).
+        let retained = 0.05 / (0.2 * Real::sqrt(2.0));
         assert!(
             cell.impulses[..STRAIN_ROWS]
                 .iter()
-                .all(|i| i.abs() < 1.0e-6)
+                .all(|i| (i - retained).abs() < 1.0e-5),
+            "{:?}",
+            cell.impulses
         );
         assert_eq!(cell.impulses[STRAIN_ROWS], 1.0);
     }
