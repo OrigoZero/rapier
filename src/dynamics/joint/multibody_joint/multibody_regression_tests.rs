@@ -1698,7 +1698,8 @@ struct AnchoredChainSwing {
 /// substeps. The joints switch contacts off between the bodies they join, so the second link
 /// is the first that meets the anchor's box, near the root. With `anchor_collides` false the
 /// box is a sensor and the chain swings free of it. A force of `push` newtons, across the plane
-/// the chain is raised in, acts on the ball throughout.
+/// the chain is raised in, acts on the ball throughout. Every collider has rapier's default
+/// surface.
 #[cfg(feature = "dim3")]
 fn chain_by_its_anchor(
     angle: Real,
@@ -1706,6 +1707,48 @@ fn chain_by_its_anchor(
     substeps: usize,
     anchor_collides: bool,
     push: Real,
+) -> AnchoredChainSwing {
+    chain_by_its_anchor_on(
+        angle,
+        rate,
+        substeps,
+        anchor_collides,
+        push,
+        ChainSurfaces::default(),
+    )
+}
+
+/// The friction and restitution of the colliders of [`chain_by_its_anchor_on`].
+#[cfg(feature = "dim3")]
+#[derive(Copy, Clone)]
+struct ChainSurfaces {
+    /// The anchor's box: `(friction, restitution)`.
+    anchor: (Real, Real),
+    /// Each link and the ball: `(friction, restitution)`.
+    chain: (Real, Real),
+}
+
+#[cfg(feature = "dim3")]
+impl Default for ChainSurfaces {
+    fn default() -> Self {
+        let collider = ColliderBuilder::ball(1.0);
+        let surface = (collider.friction, collider.restitution);
+        Self {
+            anchor: surface,
+            chain: surface,
+        }
+    }
+}
+
+/// The chain of [`chain_by_its_anchor`], its colliders made of `surfaces`.
+#[cfg(feature = "dim3")]
+fn chain_by_its_anchor_on(
+    angle: Real,
+    rate: Real,
+    substeps: usize,
+    anchor_collides: bool,
+    push: Real,
+    surfaces: ChainSurfaces,
 ) -> AnchoredChainSwing {
     let mut world = PhysicsWorld::new();
     world.integration_parameters.dt = 1.0 / rate;
@@ -1719,7 +1762,10 @@ fn chain_by_its_anchor(
         RigidBodyBuilder::fixed()
             .translation(anchor_at)
             .rotation(raised.to_scaled_axis()),
-        ColliderBuilder::cuboid(0.5, 0.5, 0.5).sensor(!anchor_collides),
+        ColliderBuilder::cuboid(0.5, 0.5, 0.5)
+            .sensor(!anchor_collides)
+            .friction(surfaces.anchor.0)
+            .restitution(surfaces.anchor.1),
     );
     let mut bodies = Vec::new();
     for i in 0..links {
@@ -1728,7 +1774,10 @@ fn chain_by_its_anchor(
                 .translation(anchor_at + down * (pitch * (i as Real + 0.5)))
                 .rotation(raised.to_scaled_axis())
                 .can_sleep(false),
-            ColliderBuilder::capsule_y(pitch * 0.3, 0.07).mass(4.0),
+            ColliderBuilder::capsule_y(pitch * 0.3, 0.07)
+                .mass(4.0)
+                .friction(surfaces.chain.0)
+                .restitution(surfaces.chain.1),
         );
         bodies.push(link);
     }
@@ -1737,7 +1786,10 @@ fn chain_by_its_anchor(
             .translation(anchor_at + down * (pitch * links as Real + eye + ball_radius))
             .rotation(raised.to_scaled_axis())
             .can_sleep(false),
-        ColliderBuilder::ball(ball_radius).mass(500.0),
+        ColliderBuilder::ball(ball_radius)
+            .mass(500.0)
+            .friction(surfaces.chain.0)
+            .restitution(surfaces.chain.1),
     );
     bodies.push(ball);
     world.bodies[ball].add_force(Vector::new(push, 0.0, 0.0), true);
@@ -1902,6 +1954,51 @@ fn a_chain_the_continuous_pass_takes_back_off_its_anchors_body_keeps_its_energy(
     assert!(
         failed.is_empty(),
         "the chain gained energy through the continuous pass: {failed:?}"
+    );
+}
+
+/// The chain of [`chain_by_its_anchor`] with bouncy links (restitution 0.3, friction 0.5) on an
+/// anchor's box with friction 0.7, pushed out of the plane it is raised in by 1 to 200 N on its
+/// 500 kg ball, released at 55, 70 and 85 degrees at 30 and 60 steps a second in 2 and 4
+/// substeps, never moves its ball faster than a tenth over the speed of its fall and never lifts
+/// it a tenth of a metre above its release. Its second link knocks on the anchor's box as
+/// the chain hangs, and the step's restitution pass bounces it once the substeps have moved the
+/// chain. The bounce was solved through the rows the last substep began with, a few hundredths
+/// of a radian behind joints that turn against one another, and moved the chain along
+/// directions the contact never asked for: released at 70 degrees at 30 steps in 2 substeps, a
+/// 1 N push left the ball at 14 m/s where its fall gives it 9.6, the chain 28 kJ over its
+/// release, a bounce taking it from 5.5 kJ of kinetic energy to 192 kJ.
+#[test]
+#[cfg(feature = "dim3")]
+fn a_bouncy_chain_knocking_on_its_anchors_body_keeps_its_energy() {
+    let surfaces = ChainSurfaces {
+        anchor: (0.7, 0.0),
+        chain: (0.5, 0.3),
+    };
+    let mut failed = Vec::new();
+    for push in [1.0 as Real, 20.0, 200.0] {
+        for angle in [55.0 as Real, 70.0, 85.0] {
+            for (rate, substeps) in [(30.0 as Real, 2), (30.0, 4), (60.0, 2), (60.0, 4)] {
+                let swing = chain_by_its_anchor_on(angle, rate, substeps, true, push, surfaces);
+                if swing.not_finite_at.is_some()
+                    || swing.fastest > swing.fall_speed * 1.1
+                    || swing.rose > 0.1
+                {
+                    failed.push(alloc::format!(
+                        "{push} N, {angle}°, {rate} Hz x {substeps}: not finite at {:?}, fastest \
+                         {} m/s (its fall {} m/s), rose {} m",
+                        swing.not_finite_at,
+                        swing.fastest,
+                        swing.fall_speed,
+                        swing.rose
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        failed.is_empty(),
+        "the bouncy chain gained energy: {failed:?}"
     );
 }
 

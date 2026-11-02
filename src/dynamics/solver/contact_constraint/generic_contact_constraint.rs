@@ -450,43 +450,11 @@ impl GenericContactConstraintBuilder {
         let inv_dt = params.inv_dt();
         let erp_inv_dt = softness.erp_inv_dt(params.dt);
 
-        // We don't update jacobians so the update is mostly identical to the non-generic velocity constraint.
-        // Anchor frames must match `generate` exactly: identity for a world-attached side
-        // (including sleeping multibody links, whose anchors are stored as world points),
-        // the link pose for a live multibody side, the solver-body (CoM-centered) pose otherwise.
-        let pose_for = |handle: RigidBodyHandle, solver_vel: u32, is_multibody: bool| {
-            if solver_vel == u32::MAX {
-                crate::math::Pose::IDENTITY
-            } else if is_multibody {
-                multibodies
-                    .rigid_body_link(handle)
-                    .map(|m| multibodies[m.multibody].link(m.id).unwrap().local_to_world)
-                    .unwrap_or(crate::math::Pose::IDENTITY)
-            } else {
-                bodies.get_pose(solver_vel).pose()
-            }
-        };
-        let pose1 = pose_for(
-            self.handle1,
-            constraint.solver_vel1,
-            constraint.generic_constraint_mask & 0b01 != 0,
-        );
-        let pose2 = pose_for(
-            self.handle2,
-            constraint.solver_vel2,
-            constraint.generic_constraint_mask & 0b10 != 0,
-        );
+        let (pose1, pose2) = self.contact_poses(bodies, multibodies, constraint);
+        let tangents1 = Self::tangents(constraint);
         let all_infos = &self.infos[..constraint.num_contacts as usize];
         let normal_parts = &mut constraint.normal_part[..constraint.num_contacts as usize];
         let tangent_parts = &mut constraint.tangent_part[..constraint.num_contacts as usize];
-
-        #[cfg(feature = "dim2")]
-        let tangents1 = constraint.dir1.orthonormal_basis();
-        #[cfg(feature = "dim3")]
-        let tangents1 = [
-            constraint.tangent1,
-            constraint.dir1.gcross(constraint.tangent1),
-        ];
 
         let dir1_na = constraint.dir1;
         let max_corrective_velocity = params.max_corrective_velocity();
@@ -553,6 +521,53 @@ impl GenericContactConstraintBuilder {
                 constraint,
             );
         }
+    }
+
+    /// The poses the two sides of `constraint` stand at, the frames its contact points are
+    /// stored in. They match `generate` exactly: identity for a world-attached side (including
+    /// sleeping multibody links, whose anchors are stored as world points), the link pose for a
+    /// live multibody side, the solver-body (CoM-centered) pose otherwise.
+    fn contact_poses(
+        &self,
+        bodies: &SolverBodies,
+        multibodies: &MultibodyJointSet,
+        constraint: &GenericContactConstraint,
+    ) -> (crate::math::Pose, crate::math::Pose) {
+        let pose_for = |handle: RigidBodyHandle, solver_vel: u32, is_multibody: bool| {
+            if solver_vel == u32::MAX {
+                crate::math::Pose::IDENTITY
+            } else if is_multibody {
+                multibodies
+                    .rigid_body_link(handle)
+                    .map(|m| multibodies[m.multibody].link(m.id).unwrap().local_to_world)
+                    .unwrap_or(crate::math::Pose::IDENTITY)
+            } else {
+                bodies.get_pose(solver_vel).pose()
+            }
+        };
+        (
+            pose_for(
+                self.handle1,
+                constraint.solver_vel1,
+                constraint.generic_constraint_mask & 0b01 != 0,
+            ),
+            pose_for(
+                self.handle2,
+                constraint.solver_vel2,
+                constraint.generic_constraint_mask & 0b10 != 0,
+            ),
+        )
+    }
+
+    /// The friction directions of `constraint`.
+    fn tangents(constraint: &GenericContactConstraint) -> [Vector; DIM - 1] {
+        #[cfg(feature = "dim2")]
+        return constraint.dir1.orthonormal_basis();
+        #[cfg(feature = "dim3")]
+        return [
+            constraint.tangent1,
+            constraint.dir1.gcross(constraint.tangent1),
+        ];
     }
 
     /// Writes the jacobians, `M⁻¹·Jᵀ` and effective masses of the multibody sides of
@@ -688,10 +703,19 @@ impl GenericContactConstraintBuilder {
     /// point's normal velocity to its prepare-time `restitution * approach_velocity`, gated
     /// on the point having applied an impulse. Implemented by re-running the normal solve
     /// with `rhs = seed` on those points and a zeroed effective mass on the others.
+    ///
+    /// The multibody sides' rows are written first from the configuration the step ended at
+    /// ([`Self::refresh_multibody_jacobians`]): the generalized velocity the bounce changes is
+    /// read there, and the rows the last substep solved with stood where that substep began.
+    /// A chain whipping under a heavy end turns its joints against one another, and through
+    /// rows a few hundredths of a radian behind it the bounce of a link knocking on a fixed
+    /// box moved the chain along directions the contact never asked for: a chain ending its
+    /// last substep with 5.5 kJ of kinetic energy left the bounce with 192 kJ.
     pub fn apply_restitution(
         &self,
         constraint: &mut GenericContactConstraint,
-        jacobians: &DVector,
+        multibodies: &MultibodyJointSet,
+        jacobians: &mut DVector,
         bodies: &mut SolverBodies,
         generic_solver_vels: &mut DVector,
     ) {
@@ -699,23 +723,41 @@ impl GenericContactConstraintBuilder {
             return;
         }
 
-        let mut any_gated = false;
-        for (info, normal_part) in self.infos[..constraint.num_contacts as usize]
+        let num = constraint.num_contacts as usize;
+        let gated = |info: &CoulombContactPointInfos<Real>,
+                     part: &ContactConstraintNormalPart<Real>| {
+            info.restitution_seed < 0.0 && part.total_impulse() > 0.0
+        };
+        if !self.infos[..num]
             .iter()
-            .zip(constraint.normal_part[..constraint.num_contacts as usize].iter_mut())
+            .zip(&constraint.normal_part[..num])
+            .any(|(info, part)| gated(info, part))
         {
-            if info.restitution_seed < 0.0 && normal_part.total_impulse() > 0.0 {
+            return;
+        }
+
+        let (pose1, pose2) = self.contact_poses(bodies, multibodies, constraint);
+        let tangents1 = Self::tangents(constraint);
+        self.refresh_multibody_jacobians(
+            multibodies,
+            pose1,
+            pose2,
+            tangents1,
+            jacobians,
+            constraint,
+        );
+        for (info, normal_part) in self.infos[..num]
+            .iter()
+            .zip(constraint.normal_part[..num].iter_mut())
+        {
+            if gated(info, normal_part) {
                 normal_part.rhs = info.restitution_seed;
-                any_gated = true;
             } else {
                 normal_part.r = 0.0;
             }
         }
-
-        if any_gated {
-            constraint.cfm_factor = 1.0;
-            constraint.solve(jacobians, bodies, generic_solver_vels, true, false);
-        }
+        constraint.cfm_factor = 1.0;
+        constraint.solve(jacobians, bodies, generic_solver_vels, true, false);
     }
 }
 
