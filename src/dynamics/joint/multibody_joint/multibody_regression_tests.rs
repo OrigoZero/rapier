@@ -2865,3 +2865,58 @@ fn a_link_spun_round_its_cone_faster_than_its_substeps_hold_stays_on_its_cone() 
         "the link stood {widest} degrees off its cone's axis, on a 30 degree cone"
     );
 }
+
+/// A hinge left by its substep turning far faster than the energy it was held to allows is held
+/// to that energy plus the work gravity does at the velocity the hold leaves it with, not at
+/// the velocity the substep blew up to. A 1 kg arm 0.5 m from its hinge, held to the energy of
+/// 1 rad/s and left turning down at 1000 rad/s, was allowed the work gravity does at 1000 rad/s
+/// over a 60 Hz step, 82 J, and kept turning at 25.5 rad/s.
+#[test]
+#[cfg(feature = "dim3")]
+fn a_blown_up_velocity_is_held_with_the_work_of_the_velocity_it_is_held_to() {
+    let dt: Real = 1.0 / 60.0;
+    let mut world = PhysicsWorld::new();
+    world.integration_parameters.dt = dt;
+    let (root, _) = world.insert(RigidBodyBuilder::fixed(), ColliderBuilder::ball(0.05));
+    let (arm, _) = world.insert(
+        RigidBodyBuilder::dynamic()
+            .translation(Vector::new(0.5, 0.0, 0.0))
+            .can_sleep(false),
+        ColliderBuilder::ball(0.05).mass(1.0),
+    );
+    let joint = RevoluteJointBuilder::new(Vector::Z)
+        .local_anchor2(Vector::new(-0.5, 0.0, 0.0))
+        .contacts_enabled(false)
+        .build();
+    world.insert_multibody_joint(root, arm, joint).unwrap();
+    world.step();
+    let link = *world.multibody_joints.rigid_body_link(arm).unwrap();
+    let multibody = world
+        .multibody_joints
+        .get_multibody_mut(link.multibody)
+        .unwrap();
+    multibody.damping_mut().fill(0.0);
+    let turn_at =
+        |multibody: &mut crate::dynamics::Multibody, bodies: &mut RigidBodySet, omega: Real| {
+            multibody.velocities.fill(omega);
+            multibody.update_velocities(bodies);
+            multibody.update_mass_matrix(dt, bodies);
+            multibody.update_acceleration(dt, bodies, super::multibody::MultibodyForces::Applied);
+            multibody
+                .kinetic_energy_to_hold(multibody.velocities.as_view(), bodies)
+                .unwrap()
+        };
+    let held = turn_at(multibody, &mut world.bodies, -1.0);
+    assert_eq!(
+        multibody.step_end_energy_scale(held, dt, &world.bodies),
+        1.0,
+        "a hinge turning at the energy it was held to is left as it is"
+    );
+    turn_at(multibody, &mut world.bodies, -1000.0);
+    let scale = multibody.step_end_energy_scale(held, dt, &world.bodies);
+    let turning = 1000.0 * scale;
+    assert!(
+        turning < 2.0,
+        "the hinge held to the energy of 1 rad/s kept turning at {turning} rad/s"
+    );
+}
