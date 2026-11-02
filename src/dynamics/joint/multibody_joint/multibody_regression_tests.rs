@@ -1865,6 +1865,46 @@ fn a_chain_pushed_off_its_plane_against_its_anchors_body_never_climbs_nor_leaps(
     );
 }
 
+/// The chain of [`chain_by_its_anchor`] pushed out of the plane it is raised in, by 1 to 200 N
+/// on its 500 kg ball, against its anchor's body, released at 55, 70 and 85 degrees at 30 and 60
+/// steps a second in 2 and 4 substeps, never moves its ball faster than a twentieth over the
+/// speed of its fall and never lifts it a tenth of a metre above its release. Its second link
+/// knocks on the anchor's box as the chain hangs, and the continuous pass takes the chain back
+/// to the share of its motion that knock stopped at, keeping its joints' velocities. The joints
+/// below the knocking link turn against one another, their shares of the ball's velocity
+/// cancelling at the configuration the solve ended at and far less at the one a few hundredths
+/// of a radian back: released at 55 degrees at 30 steps in 4 substeps, a 1 N push left the ball
+/// at 31.5 m/s for a step where its fall gives it 7.7, the chain 239 kJ over its release.
+#[test]
+#[cfg(feature = "dim3")]
+fn a_chain_the_continuous_pass_takes_back_off_its_anchors_body_keeps_its_energy() {
+    let mut failed = Vec::new();
+    for push in [1.0 as Real, 20.0, 200.0] {
+        for angle in [55.0 as Real, 70.0, 85.0] {
+            for (rate, substeps) in [(30.0 as Real, 2), (30.0, 4), (60.0, 2), (60.0, 4)] {
+                let swing = chain_by_its_anchor(angle, rate, substeps, true, push);
+                if swing.not_finite_at.is_some()
+                    || swing.fastest > swing.fall_speed * 1.05
+                    || swing.rose > 0.1
+                {
+                    failed.push(alloc::format!(
+                        "{push} N, {angle}°, {rate} Hz x {substeps}: not finite at {:?}, fastest \
+                         {} m/s (its fall {} m/s), rose {} m",
+                        swing.not_finite_at,
+                        swing.fastest,
+                        swing.fall_speed,
+                        swing.rose
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        failed.is_empty(),
+        "the chain gained energy through the continuous pass: {failed:?}"
+    );
+}
+
 /// The inverse of a multibody's mass matrix holds every degree of freedom with a positive
 /// inertia for a chain of twelve 4 kg capsule links, 0.07 m wide and 0.55 m apart, each turned a
 /// twentieth of a radian off the one above, carrying a 20 t load from a fixed anchor. Its mass

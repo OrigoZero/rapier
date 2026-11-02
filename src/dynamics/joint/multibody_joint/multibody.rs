@@ -1697,13 +1697,26 @@ impl Multibody {
     /// with its joints at `start` (from [`Self::joint_states`], one entry per link): every
     /// joint below the root goes back to that share of its motion, a dynamic root takes the
     /// pose its body's `next_position` holds, and every link's body ends the motion where the
-    /// multibody then stands (`next_position`).
+    /// multibody then stands (`next_position`), with the velocity its joints give it there.
+    ///
+    /// The multibody keeps its generalized velocity through the rewind, at no more kinetic
+    /// energy than it ended the motion with. The energy a generalized velocity carries depends
+    /// on the configuration it is read at: the joints of a chain whipping under a heavy end turn
+    /// against one another, their shares of the end's velocity cancelling where the solver held
+    /// the chain's energy, and the same velocity read a few hundredths of a radian back cancels
+    /// far less. A chain hanging from a fixed body at 30 steps a second, its second link knocking
+    /// on that body's box, ended its solve with 6 kJ of kinetic energy and started the next step,
+    /// rewound by the continuous pass, with 152 kJ: its 500 kg end flung at 13.6 m/s where its
+    /// fall gives it 9.2. A rewind that would raise the energy scales the velocity down to the
+    /// energy the motion ended with.
     pub(crate) fn rewind_joints(
         &mut self,
         bodies: &mut RigidBodySet,
         start: &[(SpatialVector, Rotation)],
         fraction: Real,
     ) {
+        let ended =
+            (self.ndofs > 0).then(|| self.kinetic_energy_at(self.velocities.as_view(), bodies));
         for (link, start) in self.links.iter_mut().zip(start).skip(1) {
             link.joint.interpolate_from(*start, fraction);
         }
@@ -1717,7 +1730,14 @@ impl Multibody {
             }
         }
         self.forward_kinematics(bodies, false);
-        self.update_rigid_bodies_internal(bodies, false, true, false);
+        self.update_rigid_bodies_internal(bodies, true, true, false);
+        if let Some(ended) = ended {
+            let rewound = self.kinetic_energy_at(self.velocities.as_view(), bodies);
+            if rewound > ended {
+                self.velocities *= (ended / rewound).simd_sqrt();
+            }
+            self.update_velocities(bodies);
+        }
     }
 
     // TODO: make a version that doesn’t write back to bodies and doesn’t update the jacobians
