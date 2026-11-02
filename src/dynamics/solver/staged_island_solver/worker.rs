@@ -375,6 +375,7 @@ pub(super) unsafe fn run_worker(ctx: &SharedCtx, worker_id: usize) {
                     let incr = core::mem::take(&mut vs.generic_solver_vels_increment);
                     vs.generic_solver_vels += &incr;
                     vs.generic_solver_vels_increment = incr;
+                    vs.generic_free_vels.clone_from(&vs.generic_solver_vels);
                     sync.complete(stage, 1, stage_work);
                 }
                 stage = sync.sync(stage, stage_work);
@@ -799,7 +800,18 @@ pub(super) unsafe fn run_worker(ctx: &SharedCtx, worker_id: usize) {
                     let vs = unsafe { &mut *ctx.velocity_solver };
                     let bodies = unsafe { &mut *ctx.bodies };
                     let multibodies = unsafe { &mut *ctx.multibodies };
-                    vs.integrate_multibody_positions(params, bodies, multibodies);
+                    // Generic constraints exist only on the single-group path.
+                    let (contacts, joints) = if ctx.groups.len() == 1 {
+                        let contacts = unsafe { &*ctx.contact_constraints };
+                        let joints = unsafe { &*ctx.joint_constraints };
+                        (
+                            &contacts.generic_velocity_constraints[..],
+                            &joints.generic_velocity_constraints[..],
+                        )
+                    } else {
+                        (&[][..], &[][..])
+                    };
+                    vs.integrate_multibody_positions(params, bodies, multibodies, contacts, joints);
                     sync.complete(stage, 1, num_group_bodies + 1);
                 }
                 stage = sync.sync(stage, num_group_bodies + 1);
