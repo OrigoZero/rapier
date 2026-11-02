@@ -54,7 +54,7 @@ fn gradients_match_finite_differences() {
         yield_bounds: [Real::MAX, Real::MAX],
         rest_range: [0.0, Real::MAX],
         omega_sq: 0.0,
-        creeps: false,
+        creep_yield: 0.0,
         creep_pending: false,
         flow_work: 0.0,
     };

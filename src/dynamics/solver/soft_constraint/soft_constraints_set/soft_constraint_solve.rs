@@ -4,12 +4,12 @@
 #[allow(unused_imports)]
 use simba::scalar::{ComplexField as _, RealField as _};
 #[cfg(feature = "dim3")]
-use simba::simd::SimdValue as _;
+use simba::simd::{SimdBool as _, SimdValue as _};
 
 #[cfg(feature = "dim3")]
 use super::super::soft_element_constraint::CELL_ROTATION_TOLERANCE;
 use super::super::soft_element_constraint::ElasticEndState;
-use super::{element_creep, flow_elastic_cell};
+use super::flow_elastic_cell;
 use crate::dynamics::solver::solver_body::SolverBodies;
 use crate::math::{Real, Vector};
 use crate::utils::{AngularInertiaOps, ComponentMul, DotProduct};
@@ -304,9 +304,8 @@ impl SoftConstraintsSet {
                 let awake = &self.awake[constraint.soft_body as usize];
                 // SAFETY: read-only access to the soft body's elements and materials.
                 let sb = unsafe { &*awake.ptr };
-                let creep = (constraint.creeps && constraint.creep_pending)
-                    .then(|| element_creep(sb, constraint))
-                    .flatten();
+                let creep =
+                    (constraint.creep_yield > 0.0 && constraint.creep_pending).then_some(sb);
                 constraint.update(bodies, awake.substep_dt, creep);
                 constraint.creep_pending = true;
                 self.strained[i] = constraint.is_strained(min_strain);
@@ -326,36 +325,39 @@ impl SoftConstraintsSet {
             let batch = &mut self.elastic_batches[bi];
             if update {
                 // The plastic lanes' cells flow over the substep just solved.
-                for l in 0..crate::math::SIMD_WIDTH {
-                    let ci = batch.constraints[l];
-                    if ci == u32::MAX {
-                        continue;
-                    }
-                    let constraint = &mut self.elastic_constraints[ci as usize];
-                    match &mut constraint.flow {
-                        None => continue,
-                        Some(flow) if !flow.pending => {
-                            flow.pending = true;
+                let past_yield = if batch.flow_pending {
+                    batch.lanes_past_yield()
+                } else {
+                    batch.flow_pending = true;
+                    crate::math::SimdBool::splat(false)
+                };
+                if past_yield.any() {
+                    for l in 0..crate::math::SIMD_WIDTH {
+                        if !past_yield.extract(l) {
                             continue;
                         }
-                        Some(_) => {}
-                    }
-                    let awake = &self.awake[constraint.soft_body as usize];
-                    // SAFETY: read-only access to the soft body's elements and materials.
-                    let sb = unsafe { &*awake.ptr };
-                    constraint.read_positions(bodies);
-                    let x = constraint.pos;
-                    let impulse = batch.lane(l).strain_impulse;
-                    if let Some(flowed) = flow_elastic_cell(
-                        constraint,
-                        sb,
-                        &x,
-                        &impulse,
-                        awake.substep_dt,
-                        self.max_corrective_velocity,
-                        true,
-                    ) {
-                        batch.refit_lane(l, constraint, 1.0 - flowed.share);
+                        let constraint =
+                            &mut self.elastic_constraints[batch.constraints[l] as usize];
+                        let awake = &self.awake[constraint.soft_body as usize];
+                        // SAFETY: read-only access to the soft body's elements and materials.
+                        let sb = unsafe { &*awake.ptr };
+                        let impulse = batch.lane_strain_impulse(l);
+                        let rotation = batch.lane_rotation(l);
+                        if let Some(flowed) = flow_elastic_cell(
+                            constraint,
+                            sb,
+                            |c| {
+                                c.read_positions(bodies);
+                                c.pos
+                            },
+                            &impulse,
+                            &rotation,
+                            awake.substep_dt,
+                            self.max_corrective_velocity,
+                            true,
+                        ) {
+                            batch.refit_lane(l, constraint, 1.0 - flowed.share);
+                        }
                     }
                 }
                 let strained = batch.update(bodies, CELL_ROTATION_TOLERANCE, min_strain);
@@ -385,13 +387,16 @@ impl SoftConstraintsSet {
                     let awake = &self.awake[constraint.soft_body as usize];
                     // SAFETY: read-only access to the soft body's elements and materials.
                     let sb = unsafe { &*awake.ptr };
-                    constraint.read_positions(bodies);
-                    let (x, impulse) = (constraint.pos, constraint.strain_impulse);
+                    let (impulse, rotation) = (constraint.strain_impulse, constraint.rot_mat);
                     if let Some(flowed) = flow_elastic_cell(
                         constraint,
                         sb,
-                        &x,
+                        |c| {
+                            c.read_positions(bodies);
+                            c.pos
+                        },
                         &impulse,
+                        &rotation,
                         awake.substep_dt,
                         self.max_corrective_velocity,
                         true,
