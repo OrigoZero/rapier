@@ -1048,6 +1048,10 @@ impl Multibody {
                 "Internal error: contiguity assumption on assembly_id does not hold."
             );
             curr_assembly_id += link.joint.ndofs();
+            // A link's body jacobian and its Coriolis terms read the velocities of its own joint
+            // and of the joints it hangs from, which come before it in assembly order: its part
+            // of the mass matrix spans the degrees of freedom up to its own.
+            let width = curr_assembly_id;
 
             if link.joint.kinematic {
                 for k in link.assembly_id..link.assembly_id + link.joint.ndofs() {
@@ -1077,15 +1081,20 @@ impl Multibody {
             let rb_mass_matrix_wo_gyro = concat_rb_mass_matrix(rb_mass, rb_inertia.into());
             #[allow(clippy::useless_conversion)] // Needed in 3D, no-op in 2D
             let rb_mass_matrix = concat_rb_mass_matrix(rb_mass, augmented_inertia.into());
-            let body_jacobian = body_jacobian.map(|x| x as f64);
-            self.augmented_mass.quadform(
-                1.0,
-                &rb_mass_matrix_wo_gyro.map(|x| x as f64),
-                &body_jacobian,
-                1.0,
-            );
-            self.acc_augmented_mass
-                .quadform(1.0, &rb_mass_matrix.map(|x| x as f64), &body_jacobian, 1.0);
+            if width > 0 {
+                let body_jacobian = body_jacobian.columns(0, width).map(|x| x as f64);
+                self.augmented_mass
+                    .view_mut((0, 0), (width, width))
+                    .quadform(
+                        1.0,
+                        &rb_mass_matrix_wo_gyro.map(|x| x as f64),
+                        &body_jacobian,
+                        1.0,
+                    );
+                self.acc_augmented_mass
+                    .view_mut((0, 0), (width, width))
+                    .quadform(1.0, &rb_mass_matrix.map(|x| x as f64), &body_jacobian, 1.0);
+            }
 
             /*
              *
@@ -1212,12 +1221,16 @@ impl Multibody {
                 i_coriolis_dt_w.gemm(dt, &mat_to_na(rb_inertia), coriolis_w, 0.0);
             }
 
-            self.acc_augmented_mass.gemm_tr(
-                1.0,
-                &rb_j.map(|x| x as f64),
-                &self.i_coriolis_dt.map(|x| x as f64),
-                1.0,
-            );
+            if width > 0 {
+                self.acc_augmented_mass
+                    .view_mut((0, 0), (width, width))
+                    .gemm_tr(
+                        1.0,
+                        &rb_j.columns(0, width).map(|x| x as f64),
+                        &self.i_coriolis_dt.columns(0, width).map(|x| x as f64),
+                        1.0,
+                    );
+            }
         }
 
         /*
