@@ -1960,8 +1960,8 @@ fn a_chain_the_continuous_pass_takes_back_off_its_anchors_body_keeps_its_energy(
 /// The chain of [`chain_by_its_anchor`] with bouncy links (restitution 0.3, friction 0.5) on an
 /// anchor's box with friction 0.7, pushed out of the plane it is raised in by 1 to 200 N on its
 /// 500 kg ball, released at 55, 70 and 85 degrees at 30 and 60 steps a second in 2 and 4
-/// substeps, never moves its ball faster than a tenth over the speed of its fall and never lifts
-/// it a tenth of a metre above its release. Its second link knocks on the anchor's box as
+/// substeps, never moves its ball faster than a twentieth over the speed of its fall and never
+/// lifts it a tenth of a metre above its release. Its second link knocks on the anchor's box as
 /// the chain hangs, and the step's restitution pass bounces it once the substeps have moved the
 /// chain. The bounce was solved through the rows the last substep began with, a few hundredths
 /// of a radian behind joints that turn against one another, and moved the chain along
@@ -1981,7 +1981,7 @@ fn a_bouncy_chain_knocking_on_its_anchors_body_keeps_its_energy() {
             for (rate, substeps) in [(30.0 as Real, 2), (30.0, 4), (60.0, 2), (60.0, 4)] {
                 let swing = chain_by_its_anchor_on(angle, rate, substeps, true, push, surfaces);
                 if swing.not_finite_at.is_some()
-                    || swing.fastest > swing.fall_speed * 1.1
+                    || swing.fastest > swing.fall_speed * 1.05
                     || swing.rose > 0.1
                 {
                     failed.push(alloc::format!(
@@ -2001,6 +2001,51 @@ fn a_bouncy_chain_knocking_on_its_anchors_body_keeps_its_energy() {
         "the bouncy chain gained energy: {failed:?}"
     );
 }
+
+/// The chain of [`a_bouncy_chain_knocking_on_its_anchors_body_keeps_its_energy`], pushed out of
+/// the plane it is raised in by 3 to 50 N, released at 55, 70 and 85 degrees at 30 and 60 steps
+/// a second in 2 and 4 substeps, never moves its ball faster than its fall gives it, to within
+/// a hundredth, nor lifts it a tenth of a metre above its release. As it passes the bottom of
+/// its first swing its second link knocks on the anchor's box and the links below whip against
+/// one another at tens of radians a second. Each substep held the free velocity of the next,
+/// whose accelerations through the semi-implicit Coriolis terms turn much of that whip back,
+/// and the velocity the step ended with kept the rest: released at 70 degrees at 30 steps in 4
+/// substeps with a 10 N push, a step ended at 25.5 kJ of kinetic energy where its last substep
+/// was held to 16.2 kJ, and the ball left it 4% faster than its fall gives it.
+#[test]
+#[cfg(feature = "dim3")]
+fn a_whipping_chain_ends_each_step_no_faster_than_its_fall() {
+    let surfaces = ChainSurfaces {
+        anchor: (0.7, 0.0),
+        chain: (0.5, 0.3),
+    };
+    let mut failed = Vec::new();
+    for push in [3.0 as Real, 10.0, 50.0] {
+        for angle in [55.0 as Real, 70.0, 85.0] {
+            for (rate, substeps) in [(30.0 as Real, 2), (30.0, 4), (60.0, 2), (60.0, 4)] {
+                let swing = chain_by_its_anchor_on(angle, rate, substeps, true, push, surfaces);
+                if swing.not_finite_at.is_some()
+                    || swing.fastest > swing.fall_speed * 1.01
+                    || swing.rose > 0.1
+                {
+                    failed.push(alloc::format!(
+                        "{push} N, {angle}°, {rate} Hz x {substeps}: not finite at {:?}, fastest \
+                         {} m/s (its fall {} m/s), rose {} m",
+                        swing.not_finite_at,
+                        swing.fastest,
+                        swing.fall_speed,
+                        swing.rose
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        failed.is_empty(),
+        "the whipping chain ended a step faster than its fall: {failed:?}"
+    );
+}
+
 
 /// The inverse of a multibody's mass matrix holds every degree of freedom with a positive
 /// inertia for a chain of twelve 4 kg capsule links, 0.07 m wide and 0.55 m apart, each turned a
