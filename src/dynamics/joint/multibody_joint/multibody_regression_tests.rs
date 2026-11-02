@@ -2440,3 +2440,155 @@ fn a_free_chain_under_a_heavy_ball_swings_no_faster_nor_higher_than_its_fall() {
         "the free chain swung faster or higher than its fall: {failed:?}"
     );
 }
+
+/// An articulation of a 5 kg box and a 1 kg arm on an undamped hinge, dropped from rest, falls as
+/// far in one second as a lone 5 kg box does, to within a two-hundredth, at `rate` steps a second
+/// in `substeps` substeps. Answers how far each fell.
+#[cfg(feature = "dim3")]
+fn articulation_and_box_falling(rate: Real, substeps: usize) -> (Real, Real) {
+    let mut world = PhysicsWorld::new();
+    world.integration_parameters.dt = 1.0 / rate;
+    world.integration_parameters.num_solver_iterations = substeps;
+    let (root, _) = world.insert(
+        RigidBodyBuilder::dynamic()
+            .translation(Vector::new(0.0, 100.0, 0.0))
+            .can_sleep(false),
+        ColliderBuilder::cuboid(0.2, 0.2, 0.2).mass(5.0),
+    );
+    let (arm, _) = world.insert(
+        RigidBodyBuilder::dynamic()
+            .translation(Vector::new(0.5, 100.0, 0.0))
+            .can_sleep(false),
+        ColliderBuilder::cuboid(0.2, 0.05, 0.05).mass(1.0),
+    );
+    let joint = RevoluteJointBuilder::new(Vector::Z)
+        .local_anchor1(Vector::new(0.25, 0.0, 0.0))
+        .local_anchor2(Vector::new(-0.25, 0.0, 0.0))
+        .contacts_enabled(false)
+        .build();
+    world.insert_multibody_joint(root, arm, joint).unwrap();
+    let link = *world.multibody_joints.rigid_body_link(root).unwrap();
+    world
+        .multibody_joints
+        .get_multibody_mut(link.multibody)
+        .unwrap()
+        .damping_mut()
+        .fill(0.0);
+    let (lone, _) = world.insert(
+        RigidBodyBuilder::dynamic()
+            .translation(Vector::new(10.0, 100.0, 0.0))
+            .can_sleep(false),
+        ColliderBuilder::cuboid(0.2, 0.2, 0.2).mass(5.0),
+    );
+    for _ in 0..rate as usize {
+        world.step();
+    }
+    (
+        100.0 - world.bodies[root].translation().y,
+        100.0 - world.bodies[lone].translation().y,
+    )
+}
+
+/// An articulation dropped from rest falls as a lone body does, to within a two-hundredth of
+/// its fall over one second, at 30 steps a second in 2 substeps and at 60 in 2 and in 4. A
+/// multibody's kinetic energy is held each substep to what it moved with plus the work of the
+/// forces on it, and that work was read as `dt · v · f` alone: a body at rest, or at the turn of
+/// its swing, gains `dt² · f · M⁻¹f / 2` from its forces over a substep and nothing else, so the
+/// hold took most of what gravity gave every slowly moving multibody. The articulation fell
+/// 4.846 m where the lone box fell 4.946 m at 60 steps in 2 substeps, and 4.799 m where it fell
+/// 4.987 m at 30.
+#[test]
+#[cfg(feature = "dim3")]
+fn an_articulation_dropped_from_rest_falls_as_a_lone_body_does() {
+    let mut failed = Vec::new();
+    for (rate, substeps) in [(30.0, 2), (60.0, 2), (60.0, 4)] {
+        let (articulation, lone) = articulation_and_box_falling(rate, substeps);
+        if (articulation - lone).abs() > lone * 0.005 {
+            failed.push(alloc::format!(
+                "{rate} Hz x {substeps}: the articulation fell {articulation} m, the lone box {lone} m"
+            ));
+        }
+    }
+    assert!(
+        failed.is_empty(),
+        "an articulation fell unlike a lone body: {failed:?}"
+    );
+}
+
+/// The least and the most the kinetic and potential energy of a 1 kg capsule `length` m long,
+/// hung from a fixed body on an undamped hinge and let go `angle` degrees from hanging, stood
+/// above or below where it was let go over ten seconds at `rate` steps a second in `substeps`
+/// substeps, as shares of the energy its swing has.
+#[cfg(feature = "dim3")]
+fn undamped_hinge_swing(length: Real, angle: Real, rate: Real, substeps: usize) -> (Real, Real) {
+    let mut world = PhysicsWorld::new();
+    world.integration_parameters.dt = 1.0 / rate;
+    world.integration_parameters.num_solver_iterations = substeps;
+    let anchor_at = Vector::new(0.0, 20.0, 0.0);
+    let angle = angle.to_radians();
+    let raised = Rotation::from_axis_angle(Vector::X, angle);
+    let down = Vector::new(0.0, -angle.cos(), -angle.sin());
+    let (anchor, _) = world.insert(
+        RigidBodyBuilder::fixed()
+            .translation(anchor_at)
+            .rotation(raised.to_scaled_axis()),
+        ColliderBuilder::ball(0.05).sensor(true),
+    );
+    let (link, _) = world.insert(
+        RigidBodyBuilder::dynamic()
+            .translation(anchor_at + down * (length * 0.5))
+            .rotation(raised.to_scaled_axis())
+            .can_sleep(false),
+        ColliderBuilder::capsule_y(length * 0.3, 0.07).mass(1.0),
+    );
+    let joint = RevoluteJointBuilder::new(Vector::X)
+        .local_anchor1(Vector::ZERO)
+        .local_anchor2(Vector::new(0.0, length * 0.5, 0.0))
+        .contacts_enabled(false)
+        .build();
+    world.insert_multibody_joint(anchor, link, joint).unwrap();
+    let id = *world.multibody_joints.rigid_body_link(link).unwrap();
+    world
+        .multibody_joints
+        .get_multibody_mut(id.multibody)
+        .unwrap()
+        .damping_mut()
+        .fill(0.0);
+    let swing = 9.81 * length * 0.5 * (1.0 - angle.cos());
+    let start = links_energy(&world.bodies, &[link], world.gravity);
+    let (mut least, mut most): (Real, Real) = (0.0, 0.0);
+    for _ in 0..(10.0 * rate) as usize {
+        world.step();
+        let energy = links_energy(&world.bodies, &[link], world.gravity) - start;
+        least = least.min(energy / swing);
+        most = most.max(energy / swing);
+    }
+    (least, most)
+}
+
+/// An undamped hinge let go from 30 degrees on a 1 m link, and from 10 degrees on a 0.3 m one,
+/// swings for ten seconds at 30 and 60 steps a second in 2 substeps with its energy within 7%
+/// of the energy its swing has, above or below: the bounded swing of a semi-implicit step's
+/// energy through each period, which a 0.3 m link at 30 steps a second spans at about 6%. With
+/// the work of gravity read as `dt · v · f` alone, the energy hold took a share of that work at
+/// every turn of the swing, and the 0.3 m hinge kept 24% of its energy over the ten seconds at
+/// 30 steps a second, the 1 m hinge 62%.
+#[test]
+#[cfg(feature = "dim3")]
+fn an_undamped_hinge_swings_as_high_as_it_was_let_go() {
+    let mut failed = Vec::new();
+    for (length, angle) in [(1.0 as Real, 30.0 as Real), (0.3, 10.0)] {
+        for rate in [30.0, 60.0] {
+            let (least, most) = undamped_hinge_swing(length, angle, rate, 2);
+            if least < -0.07 || most > 0.07 {
+                failed.push(alloc::format!(
+                    "{length} m from {angle}° at {rate} Hz x 2: energy from {least} to {most} of its swing's"
+                ));
+            }
+        }
+    }
+    assert!(
+        failed.is_empty(),
+        "an undamped hinge lost or gained energy: {failed:?}"
+    );
+}
