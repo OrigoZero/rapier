@@ -1685,6 +1685,11 @@ struct AnchoredChainSwing {
     /// How far, in metres, the ball rose above the height it was released from, after its first
     /// two seconds.
     rose: Real,
+    /// The farthest the ball moved in one step, in metres.
+    longest_step: Real,
+    /// The speed the ball reaches falling from the height it was released at to the lowest the
+    /// chain hangs it, in m/s: the fastest its swing can carry it.
+    fall_speed: Real,
 }
 
 /// Twelve 4 kg capsule links, 0.55 m apart, hung on spherical multibody joints from a fixed
@@ -1692,13 +1697,15 @@ struct AnchoredChainSwing {
 /// end, raised `angle` degrees and let go for 8 s at `rate` steps a second in `substeps`
 /// substeps. The joints switch contacts off between the bodies they join, so the second link
 /// is the first that meets the anchor's box, near the root. With `anchor_collides` false the
-/// box is a sensor and the chain swings free of it.
+/// box is a sensor and the chain swings free of it. A force of `push` newtons, across the plane
+/// the chain is raised in, acts on the ball throughout.
 #[cfg(feature = "dim3")]
 fn chain_by_its_anchor(
     angle: Real,
     rate: Real,
     substeps: usize,
     anchor_collides: bool,
+    push: Real,
 ) -> AnchoredChainSwing {
     let mut world = PhysicsWorld::new();
     world.integration_parameters.dt = 1.0 / rate;
@@ -1733,6 +1740,7 @@ fn chain_by_its_anchor(
         ColliderBuilder::ball(ball_radius).mass(500.0),
     );
     bodies.push(ball);
+    world.bodies[ball].add_force(Vector::new(push, 0.0, 0.0), true);
     for (i, body) in bodies.iter().enumerate() {
         let parent = if i == 0 { anchor } else { bodies[i - 1] };
         let on_parent = if i == 0 {
@@ -1753,11 +1761,15 @@ fn chain_by_its_anchor(
         world.insert_multibody_joint(parent, *body, joint).unwrap();
     }
     let released = world.bodies[ball].translation().y;
+    let reach = pitch * links as Real + eye + ball_radius;
     let mut swing = AnchoredChainSwing {
         not_finite_at: None,
         fastest: 0.0,
         rose: Real::MIN,
+        longest_step: 0.0,
+        fall_speed: (2.0 * 9.81 * reach * (1.0 - angle.cos())).sqrt(),
     };
+    let mut was = world.bodies[ball].translation();
     for step in 0..(8.0 * rate) as usize {
         world.step();
         let ball = &world.bodies[ball];
@@ -1765,6 +1777,8 @@ fn chain_by_its_anchor(
             swing.not_finite_at = Some(step);
             return swing;
         }
+        swing.longest_step = swing.longest_step.max((ball.translation() - was).length());
+        was = ball.translation();
         swing.fastest = swing.fastest.max(ball.linvel().length());
         if step as Real >= 2.0 * rate {
             swing.rose = swing.rose.max(ball.translation().y - released);
@@ -1786,8 +1800,8 @@ fn a_chain_sliding_on_its_anchors_body_swings_as_the_free_chain_does() {
     let mut failed = Vec::new();
     for angle in [40.0, 55.0, 70.0, 85.0] {
         for substeps in [4, 8] {
-            let free = chain_by_its_anchor(angle, 60.0, substeps, false);
-            let swing = chain_by_its_anchor(angle, 60.0, substeps, true);
+            let free = chain_by_its_anchor(angle, 60.0, substeps, false, 0.0);
+            let swing = chain_by_its_anchor(angle, 60.0, substeps, true, 0.0);
             let finite = swing.not_finite_at.is_none() && free.not_finite_at.is_none();
             if !finite || swing.fastest > free.fastest * 1.1 || swing.rose > 0.25 {
                 failed.push(alloc::format!(
@@ -1803,6 +1817,48 @@ fn a_chain_sliding_on_its_anchors_body_swings_as_the_free_chain_does() {
     assert!(
         failed.is_empty(),
         "the chain swung faster or higher: {failed:?}"
+    );
+}
+
+/// The chain of [`chain_by_its_anchor`] pushed out of the plane it is raised in, by 0.3 to 30 N
+/// on its 500 kg ball, against its anchor's body at 60 steps a second in 4 substeps, never moves
+/// faster than a tenth over the speed of its fall from where it was released, never rises a
+/// quarter metre above it and never leaps a metre in a step. Pushed off its plane, the second
+/// link presses on the box with its side and spins about its own length, and the joints below
+/// it turn back against it. Two things flung it. The multibody's mass matrix, which spans
+/// eight orders of magnitude between that spin and the swing of the ball, was factored in
+/// `f32`, which read some of its smallest inertias with the wrong sign: a contact solved through
+/// it pushed with a negative effective mass and the chain leapt metres in a step. And the
+/// Coriolis update of the joints below the spinning link added a percent of the chain's energy
+/// each substep while the fastest of them turned a few hundredths of a radian, below the turn
+/// from which a substep's energy was held, and the ball climbed metres over its release.
+#[test]
+#[cfg(feature = "dim3")]
+fn a_chain_pushed_off_its_plane_against_its_anchors_body_never_climbs_nor_leaps() {
+    let mut failed = Vec::new();
+    for push in [0.3 as Real, 3.0, 30.0] {
+        for angle in [50.0 as Real, 60.0, 70.0, 80.0] {
+            let swing = chain_by_its_anchor(angle, 60.0, 4, true, push);
+            if swing.not_finite_at.is_some()
+                || swing.fastest > swing.fall_speed * 1.1
+                || swing.rose > 0.25
+                || swing.longest_step > 1.0
+            {
+                failed.push(alloc::format!(
+                    "{push} N, {angle}°: not finite at {:?}, fastest {} m/s (its fall {} m/s), \
+                     rose {} m, longest step {} m",
+                    swing.not_finite_at,
+                    swing.fastest,
+                    swing.fall_speed,
+                    swing.rose,
+                    swing.longest_step
+                ));
+            }
+        }
+    }
+    assert!(
+        failed.is_empty(),
+        "the chain pushed off its plane climbed or leapt: {failed:?}"
     );
 }
 
@@ -2272,3 +2328,4 @@ fn a_multibody_link_sliding_into_a_thin_wall_stops_in_front_of_it() {
         );
     }
 }
+
