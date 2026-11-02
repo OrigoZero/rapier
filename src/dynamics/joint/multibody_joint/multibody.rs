@@ -31,6 +31,18 @@ use crate::prelude::{GenericJoint, RigidBody};
 /// a substep was flung off its anchor's body.
 const ENERGY_HOLD_MARGIN: Real = 1.0e-3;
 
+/// Which of the generalized forces on a multibody an acceleration update reads
+/// ([`Multibody::update_acceleration`]).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(crate) enum MultibodyForces {
+    /// The forces applied to its links (gravity and every force and torque added to their
+    /// bodies), the forces of its joints' springs and the damping of its joints.
+    Applied,
+    /// The inertial forces of its motion at the configuration it stands at: the Coriolis and
+    /// centrifugal forces of its joints' velocities and the gyroscopic torques of its links.
+    Inertial,
+}
+
 /// The factorization of a multibody's mass matrix, held in `f64` whatever precision the rest of
 /// the solver works in.
 ///
@@ -579,10 +591,27 @@ impl Multibody {
             .extend((0..num_jacobians).map(|_| Jacobian::zeros(0)));
     }
 
-    pub(crate) fn update_acceleration(&mut self, dt: Real, bodies: &RigidBodySet) {
+    /// The accelerations the generalized forces `forces` give the multibody over a substep of
+    /// `dt`, at the configuration and the velocity its links' bodies stand at, solved through the
+    /// mass matrix [`Self::update_mass_matrix`] last built.
+    ///
+    /// The applied forces are read as a substep begins and the inertial forces as its move ends:
+    /// the Coriolis, centrifugal and gyroscopic forces turn the velocity the multibody moved with
+    /// for the configuration the move reached, before the substep's stabilization pass reads that
+    /// velocity (see `VelocitySolver::integrate_multibody_positions`). The applied forces'
+    /// position part (gravity, the forces added to the links' bodies and the springs' pull) is
+    /// kept as the work [`Self::kinetic_energy_scale`] reads.
+    pub(crate) fn update_acceleration(
+        &mut self,
+        dt: Real,
+        bodies: &RigidBodySet,
+        forces: MultibodyForces,
+    ) {
         if self.ndofs == 0 {
             return; // Nothing to do.
         }
+        let applied = forces == MultibodyForces::Applied;
+        let inertial = forces == MultibodyForces::Inertial;
 
         self.accelerations.fill(0.0);
 
@@ -646,28 +675,40 @@ impl Multibody {
                 gyroscopic = 0.0;
             }
 
-            let external_forces = Force::new(
-                rb.forces.force - rb_mass * acc.linvel,
-                rb.forces.torque - gyroscopic - rb_inertia * acc.angvel,
-            );
-            self.accelerations.gemv_tr(
-                1.0,
-                &self.body_jacobians[i],
-                external_forces.as_vector(),
-                1.0,
-            );
+            if inertial {
+                let inertial_forces = Force::new(
+                    -(rb_mass * acc.linvel),
+                    -(gyroscopic + rb_inertia * acc.angvel),
+                );
+                self.accelerations.gemv_tr(
+                    1.0,
+                    &self.body_jacobians[i],
+                    inertial_forces.as_vector(),
+                    1.0,
+                );
+            }
 
-            let applied_forces = Force::new(rb.forces.force, rb.forces.torque);
-            pos_forces.gemv_tr(
-                1.0,
-                &self.body_jacobians[i],
-                applied_forces.as_vector(),
-                1.0,
-            );
+            if applied {
+                let applied_forces = Force::new(rb.forces.force, rb.forces.torque);
+                self.accelerations.gemv_tr(
+                    1.0,
+                    &self.body_jacobians[i],
+                    applied_forces.as_vector(),
+                    1.0,
+                );
+                pos_forces.gemv_tr(
+                    1.0,
+                    &self.body_jacobians[i],
+                    applied_forces.as_vector(),
+                    1.0,
+                );
+            }
         }
 
-        self.accelerations
-            .cmpy(-1.0, &self.damping, &self.velocities, 1.0);
+        if applied {
+            self.accelerations
+                .cmpy(-1.0, &self.damping, &self.velocities, 1.0);
+        }
 
         // Implicit joint springs: backward-Euler at `q⁺ = q + dt·v⁺` gives `-k·(q − rest) − k·dt·v⁺`,
         // with the `v⁺` part implicit via the `dt²·k` mass-matrix diagonal (see `update_mass_matrix`).
@@ -678,7 +719,7 @@ impl Multibody {
             for a in 0..SPATIAL_DIM {
                 if (locked >> a) & 1 == 0 {
                     let k = self.links[li].joint.spring_stiffness[a];
-                    if k != 0.0 {
+                    if k != 0.0 && applied {
                         let q = self.links[li].joint.coords[a];
                         let rest = self.links[li].joint.spring_ref[a];
                         let spring_pos_force = -k * (q - rest);
@@ -706,7 +747,9 @@ impl Multibody {
         if check_implicit_coriolis_divergence {
             self.free_velocity_energy_guard(dt, &gen_forces, &pos_forces);
         }
-        self.workspace.position_forces = pos_forces;
+        if applied {
+            self.workspace.position_forces = pos_forces;
+        }
     }
 
     /// The kinetic energy of the links at the generalized `velocities`, at the configuration the

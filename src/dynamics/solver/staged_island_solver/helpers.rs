@@ -12,7 +12,10 @@ use crate::dynamics::solver::manifold_store::ManifoldStore;
 use crate::dynamics::solver::solver_contact_graph::SolverContactGraph;
 #[cfg(feature = "dim3")]
 use crate::dynamics::solver::velocity_solver::GyroParams;
-use crate::dynamics::{IntegrationParameters, MultibodyJointSet, RigidBodyHandle, RigidBodySet};
+use crate::dynamics::{
+    IntegrationParameters, Multibody, MultibodyForces, MultibodyJointSet, RigidBodyHandle,
+    RigidBodySet,
+};
 use crate::math::DVector;
 use parry::math::SIMD_WIDTH;
 
@@ -140,7 +143,7 @@ impl VelocitySolver {
                 .unwrap();
             multibody.update_velocities(bodies);
             multibody.update_mass_matrix(params.dt, bodies);
-            multibody.update_acceleration(params.dt, bodies);
+            multibody.update_acceleration(params.dt, bodies, MultibodyForces::Applied);
 
             let mut solver_vels_incr = self
                 .generic_solver_vels_increment
@@ -156,12 +159,25 @@ impl VelocitySolver {
 
     /// The multibody part of `integrate_positions`, used by the staged solver (regular solver
     /// bodies are integrated in parallel by the workers): each multibody moves through the
-    /// substep at the velocity its biased solve left. The kinetic energy it moves with, when its
-    /// energy is held, is kept for [`Self::update_multibody_dynamics`].
+    /// substep at the velocity its biased solve left, and its inertial forces then turn that
+    /// velocity for the configuration the move reached. The kinetic energy it moves with, when
+    /// its energy is held, is kept for [`Self::update_multibody_dynamics`].
+    ///
+    /// A move carries each joint's velocity unchanged in its parent's frame, so a link that
+    /// turns over the move turns the velocity of every link below it with it, and velocities
+    /// that cancelled out at the configuration the move began from no longer do: a chain of
+    /// light links whipping under a heavy load stands, after a move that turns a joint a few
+    /// hundredths of a radian, at many times the kinetic energy it moved with. The Coriolis and
+    /// centrifugal forces at the configuration reached take that back, read here at the velocity
+    /// the multibody moved with. The stabilization pass that follows solves the substep's
+    /// contacts and limits at the velocity they leave: solved at the velocity the move left, it
+    /// took a share of that excess out as though the links moved with it, the forces read
+    /// afterwards took out the rest again, and a chain whose link slid on its anchor's body
+    /// gained energy at every swing. The mass matrix built here is the one the applied forces
+    /// and the next substep's rows solve through.
     pub(super) fn integrate_multibody_positions(
         &mut self,
         params: &IntegrationParameters,
-        is_last_substep: bool,
         bodies: &mut RigidBodySet,
         multibodies: &mut MultibodyJointSet,
     ) {
@@ -175,25 +191,30 @@ impl VelocitySolver {
                 .rows(multibody.solver_id as usize, multibody.ndofs());
             multibody.velocities.copy_from(&solver_vels);
             let energy = multibody.kinetic_energy_to_hold(bodies);
-            let refresh = !is_last_substep || energy.is_some();
             multibody.integrate(params.dt);
             multibody.forward_kinematics(bodies, false);
-            multibody.update_rigid_bodies_internal(bodies, refresh, true, false);
+            multibody.update_rigid_bodies_internal(bodies, true, true, false);
+            multibody.update_velocities(bodies);
+            multibody.update_mass_matrix(params.dt, bodies);
+            multibody.update_acceleration(params.dt, bodies, MultibodyForces::Inertial);
+            let Multibody {
+                velocities,
+                accelerations,
+                ..
+            } = &mut *multibody;
+            velocities.axpy(params.dt, accelerations, 1.0);
+            self.generic_solver_vels
+                .rows_mut(multibody.solver_id as usize, multibody.ndofs())
+                .copy_from(&multibody.velocities);
+            multibody.update_velocities(bodies);
             self.multibody_energy_holds.push(energy);
         }
     }
 
     /// The dynamics each multibody starts the next substep with, read once the substep's
-    /// stabilization pass has settled the velocity it ends at: the links' velocities, the mass
-    /// matrix, the accelerations, the energy hold of [`Self::integrate_multibody_positions`] and
-    /// the velocity increment of the next substep.
-    ///
-    /// The stabilization pass changes the velocity a multibody moved with: it takes the corrective
-    /// velocity of its contacts and limits out and solves friction. The Coriolis, centrifugal and
-    /// gyroscopic forces of the next substep turn the velocity the multibody carries on, so they
-    /// are read at that velocity: read at the one it moved with, they did work on the one it
-    /// carried, and a chain whose link slid on a fixed body near its root gained energy each
-    /// substep until it was flung.
+    /// stabilization pass has settled the velocity it ends at: the links' velocities, the
+    /// accelerations its applied forces give it, the energy hold of
+    /// [`Self::integrate_multibody_positions`] and the velocity increment of the next substep.
     pub(super) fn update_multibody_dynamics(
         &mut self,
         params: &IntegrationParameters,
@@ -213,8 +234,7 @@ impl VelocitySolver {
                 .rows(multibody.solver_id as usize, multibody.ndofs());
             multibody.velocities.copy_from(&solver_vels);
             multibody.update_velocities(bodies);
-            multibody.update_mass_matrix(params.dt, bodies);
-            multibody.update_acceleration(params.dt, bodies);
+            multibody.update_acceleration(params.dt, bodies, MultibodyForces::Applied);
             if let Some(energy) = *energy {
                 let scale = multibody.kinetic_energy_scale(energy, params.dt, bodies);
                 if scale < 1.0 {

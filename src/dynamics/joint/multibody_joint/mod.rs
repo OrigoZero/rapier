@@ -3,6 +3,8 @@
 #[cfg(feature = "alloc")]
 pub use self::multibody::{Multibody, MultibodyDofCoupling, MultibodyMassFactorization};
 #[cfg(feature = "alloc")]
+pub(crate) use self::multibody::MultibodyForces;
+#[cfg(feature = "alloc")]
 pub use self::multibody_ik::InverseKinematicsOption;
 #[cfg(feature = "alloc")]
 pub use self::multibody_joint::MultibodyJoint;
