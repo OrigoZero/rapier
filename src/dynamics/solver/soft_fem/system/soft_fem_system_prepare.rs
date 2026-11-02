@@ -10,7 +10,9 @@ use crate::dynamics::solver::soft_constraint::soft_element_constraint::dihedral_
 use crate::dynamics::solver::soft_constraint::soft_element_constraint::{
     MAX_CONSTRAINT_PARTICLES, STRAIN_ROWS, SoftElasticConstraint, StrainMatrix, StrainVector,
 };
-use crate::dynamics::{SoftBody, SoftBodyCellModel, SoftBodyEdgeKind, SpringCoefficients};
+use crate::dynamics::{
+    SoftBody, SoftBodyCellModel, SoftBodyEdgeKind, SoftFemParameters, SpringCoefficients,
+};
 use crate::math::{DIM, Real, Vector};
 #[cfg(not(feature = "std"))]
 #[allow(unused_imports)]
@@ -18,8 +20,10 @@ use simba::scalar::{ComplexField as _, RealField as _};
 
 impl SoftFemSystem {
     /// Updates everything that is constant over a step: the sparsity pattern (rebuilt when the
-    /// topology changed), the per-cell material and shape functions, and the particle masses.
-    pub fn prepare(&mut self, sb: &SoftBody, slots: &[u32]) {
+    /// topology changed), the per-cell material and shape functions, the particle masses, and the
+    /// solver's stiffness-proportional damping.
+    pub fn prepare(&mut self, sb: &SoftBody, slots: &[u32], params: &SoftFemParameters) {
+        self.stiffness_damping = params.stiffness_damping.max(0.0);
         let n = sb.particles.len();
         let rebuild = self.matrix.num_rows() != n
             || self.cells.len() != sb.cells.len()
@@ -44,6 +48,10 @@ impl SoftFemSystem {
         self.slots.clear();
         self.slots.extend_from_slice(slots);
         self.force.resize(n, Vector::ZERO);
+        self.ended.clear();
+        self.ended.extend_from_slice(&self.velocity);
+        self.increment.resize(n, Vector::ZERO);
+        self.product.resize(n, Vector::ZERO);
         self.rhs.resize(n, Vector::ZERO);
         self.delta.resize(n, Vector::ZERO);
         self.response_rhs.resize(n, Vector::ZERO);

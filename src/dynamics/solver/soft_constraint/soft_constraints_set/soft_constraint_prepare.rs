@@ -7,7 +7,8 @@ use simba::scalar::{ComplexField as _, RealField as _};
 use crate::alloc_prelude::*;
 use crate::dynamics::SoftBody;
 use crate::dynamics::solver::solver_body::{
-    SOLVER_BODY_GRAVITY_FIELD, SOLVER_BODY_RECORD_SUBSTEPS, SolverBodies, SolverPose, SolverVel,
+    SOLVER_BODY_GRAVITY_FIELD, SOLVER_BODY_KEEP_ENDED, SOLVER_BODY_RECORD_SUBSTEPS, SolverBodies,
+    SolverPose, SolverVel,
 };
 use crate::dynamics::solver::velocity_solver::SubstepRecord;
 use crate::math::{AngVector, Matrix, Real, Vector};
@@ -267,7 +268,8 @@ impl SoftConstraintsSet {
     /// A free particle of a body whose gravity comes from the hooks
     /// (`SoftBody::set_gravity_field`) gets its user force alone here, and is flagged to have its
     /// gravity asked at every substep, about the body, scaled by the particle gravity scale (its
-    /// `gravity` slot).
+    /// `gravity` slot). A free particle of a FEM body keeps the velocity it ends each substep with
+    /// (`SOLVER_BODY_KEEP_ENDED`).
     /// `group_dt(group)` is the group's substep length, `step_dt` the whole step's. The slots of
     /// the particles a body records (`SoftBody::set_recorded_particles`) are flagged to keep
     /// their substep states, starting from an empty record in `substep_vels`.
@@ -289,6 +291,7 @@ impl SoftConstraintsSet {
             let dt = group_dt(awake.group as usize);
             let settings = &sb.particle_settings;
             let field = settings.gravity_field;
+            let fem = sb.uses_fem();
             for (p, &slot) in sb.particles.iter().zip(slots) {
                 let slot = slot as usize;
                 let (vel, incr) = if p.inv_mass == 0.0 {
@@ -320,6 +323,9 @@ impl SoftConstraintsSet {
                             subject: crate::pipeline::GravitySubject::SoftBody(awake.handle),
                             scale: Vector::splat(settings.gravity_scale),
                         };
+                }
+                if fem && p.inv_mass != 0.0 {
+                    bodies.flags[slot] |= SOLVER_BODY_KEEP_ENDED;
                 }
                 let inc = &mut increments[slot];
                 *inc = SolverVel::zero();

@@ -68,6 +68,7 @@ impl SoftBodiesSettings {
 #[cfg(feature = "fem")]
 #[derive(Copy, Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde-serialize", serde(default))]
 pub struct SoftFemParameters {
     /// Relative residual at which the conjugate gradient stops (default: `1.0e-5`).
     pub linear_tolerance: Real,
@@ -80,6 +81,13 @@ pub struct SoftFemParameters {
     /// matrix `A` of a body is factorized directly (default: `600`). Each constraint on a FEM body
     /// needs one solve against `A` per step; larger bodies fall back to a conjugate gradient.
     pub max_dense_dofs: usize,
+    /// Stiffness-proportional damping every element of a FEM body carries on top of the one its
+    /// material's damping ratio gives, in seconds (default: `1/120`): the element's elastic force
+    /// is damped by this coefficient times its stiffness times its strain rate, so a mode of the
+    /// body ringing at `ω` loses its energy at about `stiffness_damping · ω²` a second. The modes a
+    /// substep cannot follow die out, and every mode loses energy at the same rate whatever the
+    /// substep length; `0` leaves a body only its material's damping.
+    pub stiffness_damping: Real,
 }
 
 #[cfg(feature = "fem")]
@@ -89,6 +97,7 @@ impl Default for SoftFemParameters {
             linear_tolerance: 1.0e-5,
             max_linear_iterations: 20,
             max_dense_dofs: 600,
+            stiffness_damping: 1.0 / 120.0,
         }
     }
 }

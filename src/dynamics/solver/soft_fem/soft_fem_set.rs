@@ -156,7 +156,7 @@ impl SoftFemSet {
             let slots = &slots_all[awake.slot_start..awake.slot_start + awake.num_particles];
             let dt = group_dt(awake.group as usize);
             let system = self.systems.entry(awake.handle).or_default();
-            system.prepare(sb, slots);
+            system.prepare(sb, slots, params);
             awake.fem = Some(AwakeFem {
                 system: &mut **system as *mut SoftFemSystem,
                 params: *params,
@@ -711,12 +711,14 @@ impl SoftFemSet {
         &self,
         index: usize,
         bodies: &mut SolverBodies,
+        ended: &[Vector],
         params: &SoftFemParameters,
     ) {
         let entry = &self.active[index];
         let system = unsafe { &mut *entry.system };
         system.predict(
             bodies,
+            ended,
             entry.dt,
             params.linear_tolerance,
             params.max_linear_iterations,

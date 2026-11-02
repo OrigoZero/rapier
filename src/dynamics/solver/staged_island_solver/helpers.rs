@@ -104,6 +104,10 @@ impl VelocitySolver {
             self.solver_gravity
                 .resize(aligned_solver_bodies_len, Default::default());
         }
+        if self.ended_vels.len() < aligned_solver_bodies_len {
+            self.ended_vels
+                .resize(aligned_solver_bodies_len, crate::math::Vector::ZERO);
+        }
 
         // Grown, never shrunk: the slots of bodies that record their substeps keep their
         // allocations from one step to the next, and a slot no recording body holds is never read.

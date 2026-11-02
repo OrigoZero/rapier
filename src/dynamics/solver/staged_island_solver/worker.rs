@@ -12,8 +12,8 @@ use crate::dynamics::solver::contact_constraint::ContactWithCoulombFrictionBuild
 use crate::dynamics::solver::contact_constraint::ContactWithTwistFrictionBuilder;
 use crate::dynamics::solver::joint_constraint::GenericJointConstraintBuilder;
 use crate::dynamics::solver::solver_body::{
-    SOLVER_BODY_ALLOW_FAST_ROTATION, SOLVER_BODY_GRAVITY_FIELD, SOLVER_BODY_PLANE_HOLD,
-    SOLVER_BODY_RECORD_SUBSTEPS,
+    SOLVER_BODY_ALLOW_FAST_ROTATION, SOLVER_BODY_GRAVITY_FIELD, SOLVER_BODY_KEEP_ENDED,
+    SOLVER_BODY_PLANE_HOLD, SOLVER_BODY_RECORD_SUBSTEPS,
 };
 use crate::dynamics::solver::solver_contact_graph::ContactRef;
 use crate::dynamics::solver::velocity_solver::SolverGravity;
@@ -326,6 +326,9 @@ pub(super) unsafe fn run_worker(ctx: &SharedCtx, worker_id: usize) {
                             let (translation, rotation) = (pose.translation, pose.rotation);
                             vs.substep_vels[i].push((ended, translation, rotation));
                         }
+                        if vs.solver_bodies.flags[i] & SOLVER_BODY_KEEP_ENDED != 0 {
+                            vs.ended_vels[i] = vs.solver_bodies.vels[i].linear;
+                        }
                         let incr = vs.solver_vels_increment[i];
                         {
                             let vels = &mut vs.solver_bodies.vels[i];
@@ -379,8 +382,9 @@ pub(super) unsafe fn run_worker(ctx: &SharedCtx, worker_id: usize) {
 
             /*
              * Stage: the FEM soft bodies' implicit elastic step (parallel over the group's FEM
-             * bodies): assemble `A = M + h D + h² K` and solve `A Δv = h f - (A - M) v`. One body
-             * per claim; nothing else touches its system or particle slots during this stage.
+             * bodies): assemble `A = M + h D + h² K` and solve it for the substep's velocity
+             * change (`SoftFemSystem::predict`). One body per claim; nothing else touches its
+             * system or particle slots during this stage.
              */
             #[cfg(feature = "fem")]
             if has_fem {
@@ -409,9 +413,14 @@ pub(super) unsafe fn run_worker(ctx: &SharedCtx, worker_id: usize) {
                                 );
                             }
                         }
-                        let solver_bodies = unsafe { &mut (*ctx.velocity_solver).solver_bodies };
+                        let vs = unsafe { &mut *ctx.velocity_solver };
                         unsafe {
-                            soft_fem.predict(index, solver_bodies, &params.soft_bodies.fem);
+                            soft_fem.predict(
+                                index,
+                                &mut vs.solver_bodies,
+                                &vs.ended_vels,
+                                &params.soft_bodies.fem,
+                            );
                         }
                     }
                     done += claimed_len;
