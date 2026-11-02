@@ -678,14 +678,44 @@ impl MultibodyJoint {
         if cone != 0 {
             let axis = (!cone & 0b111).trailing_zeros() as usize;
             let axis1 = Vector::ith(axis, 1.0);
-            let axis2 = q * axis1;
-            let swing = axis1.dot(axis2).clamp(-1.0, 1.0).simd_acos();
-            let turn = axis1.cross(axis2);
-            let dir = if turn.length() > 1.0e-6 {
-                turn.normalize()
-            } else {
-                Vector::ith((axis + 1) % 3, 1.0)
+            // The swing of a rotation (the angle between the two frames' cone axes) and the
+            // axis it turns about, along which the cone pushes.
+            let swing_of = |rotation: Rotation| {
+                let axis2 = rotation * axis1;
+                let swing = axis1.dot(axis2).clamp(-1.0, 1.0).simd_acos();
+                let turn = axis1.cross(axis2);
+                let dir = if turn.length() > 1.0e-6 {
+                    turn.normalize()
+                } else {
+                    Vector::ith((axis + 1) % 3, 1.0)
+                };
+                (swing, dir)
             };
+            // The cone's bound is curved and the axis it pushes about turns round the cone, so a
+            // row read where the substep begins holds the link only along the way it then stands
+            // off the cone's axis: a link sliding round its bound, or swung through the cone's
+            // axis, in a substep ends past the bound along a way the row did not hold. The row is
+            // read where the joint's angular velocity takes its rotation over the substep, or over
+            // the part of it that turns the joint `MAX_CONE_ROW_TURN`, along the axis the cone
+            // pushes about there, at the swing it starts from along that axis: the swing reached,
+            // less the part of it the joint's velocity along that axis makes. A head flung round
+            // its swing cone as a ragdoll's chest struck stairs went 4 to 14 degrees past it read
+            // where its substep began.
+            let first_vel = link.assembly_id + first_ang_dof;
+            let angvel = Vector::new(
+                multibody.velocities[first_vel],
+                multibody.velocities[first_vel + 1],
+                multibody.velocities[first_vel + 2],
+            );
+            let turn_rate = angvel.length();
+            let time = if turn_rate * params.dt > MAX_CONE_ROW_TURN {
+                MAX_CONE_ROW_TURN / turn_rate
+            } else {
+                params.dt
+            };
+            let reached = Rotation::from_scaled_axis(angvel * time) * q;
+            let (reached_swing, dir) = swing_of(reached);
+            let swing = reached_swing - dir.dot(angvel) * time;
             let first_coupled = (cone.trailing_zeros() as usize) + DIM;
             let limits = [
                 self.data.limits[first_coupled].min,
@@ -709,6 +739,14 @@ impl MultibodyJoint {
         }
     }
 }
+
+/// The most a spherical joint's rotation is carried ahead, in radians, as its swing cone's row is
+/// read where its substep takes it ([`MultibodyJoint::velocity_constraints`]): the row is the
+/// cone's bound linearised there, which holds within a fraction of a radian of it. A link spun
+/// round its cone at 300 rad/s in 30 Hz substeps, its row read where a whole substep took it, 2.5
+/// rad on, ended 19 degrees past a 30 degree cone.
+#[cfg(feature = "dim3")]
+const MAX_CONE_ROW_TURN: Real = 0.5;
 
 /// `angle` wrapped into `[-π, π]`.
 #[cfg(feature = "dim3")]

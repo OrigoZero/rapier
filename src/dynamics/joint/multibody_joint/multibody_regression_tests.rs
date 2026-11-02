@@ -2592,3 +2592,94 @@ fn an_undamped_hinge_swings_as_high_as_it_was_let_go() {
         "an undamped hinge lost or gained energy: {failed:?}"
     );
 }
+
+/// The ragdoll of [`ragdoll_landing_on_stairs`] landing on the stairs from seven heights (2.35
+/// to 2.95 m) under five pushes (30 to 90 N·s), at 30 steps a second in 2 substeps, with the
+/// continuous-collision pass and without it, goes no more than a degree past any limit. Its
+/// head, struck round its swing cone as the chest hit a step, turned 50 degrees in a substep:
+/// the cone's row, read where the substep began along the way the head then stood off the
+/// cone's axis, held neither the head swinging through the cone's axis nor sliding round its
+/// bound, and a joint went 14.1 degrees past its limit with the pass and 13.1 without it; with
+/// the substeps of the commit before, 1.9 degrees.
+#[test]
+#[cfg(feature = "dim3")]
+fn a_ragdoll_landing_on_stairs_keeps_every_joint_within_a_degree_of_its_limits() {
+    let at = Vector::new(1837.0, 20.0, 6.0);
+    let mut failed = Vec::new();
+    for height in [2.35 as Real, 2.45, 2.55, 2.65, 2.75, 2.85, 2.95] {
+        for push in [30.0 as Real, 45.0, 60.0, 75.0, 90.0] {
+            for ccd_substeps in [1, 0] {
+                let (past, _) =
+                    ragdoll_landing_on_stairs(at, 30.0, 2, ccd_substeps, height, push);
+                if !(past <= 1.0) {
+                    failed.push(alloc::format!(
+                        "height {height}, push {push}, continuous passes {ccd_substeps}: {past} degrees past a limit"
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        failed.is_empty(),
+        "a joint of the ragdoll went past its limit: {failed:?}"
+    );
+}
+
+/// A link on a spherical joint whose swing is held to a 30° cone, standing 29° off the cone's
+/// axis and spun round the cone at 300 rad/s, with no gravity, stays within one and a half
+/// degrees of its cone over ten steps at 30 steps a second in 1 substep. Its substeps each turn
+/// it more than a radian: its cone row read where a whole substep carried the joint, 2.5 rad on,
+/// left it 48.7 degrees off the cone's axis.
+#[test]
+#[cfg(feature = "dim3")]
+fn a_link_spun_round_its_cone_faster_than_its_substeps_hold_stays_on_its_cone() {
+    let mut world = PhysicsWorld::new();
+    world.gravity = Vector::ZERO;
+    world.integration_parameters.dt = 1.0 / 30.0;
+    world.integration_parameters.num_solver_iterations = 1;
+    let (root, _) = world.insert(
+        RigidBodyBuilder::fixed(),
+        ColliderBuilder::ball(0.05).sensor(true),
+    );
+    let off = Rotation::from_axis_angle(Vector::Z, (29.0 as Real).to_radians());
+    let (link, _) = world.insert(
+        RigidBodyBuilder::dynamic()
+            .translation(off * Vector::new(0.5, 0.0, 0.0))
+            .rotation(off.to_scaled_axis())
+            .can_sleep(false),
+        ColliderBuilder::cuboid(0.5, 0.05, 0.05).mass(1.0),
+    );
+    let mut joint: GenericJoint = SphericalJointBuilder::new()
+        .local_anchor1(Vector::ZERO)
+        .local_anchor2(Vector::new(-0.5, 0.0, 0.0))
+        .contacts_enabled(false)
+        .build()
+        .into();
+    let cone = (30.0 as Real).to_radians();
+    joint.coupled_axes |= JointAxesMask::ANG_Y | JointAxesMask::ANG_Z;
+    joint.set_limits(JointAxis::AngY, [-cone, cone]);
+    joint.set_limits(JointAxis::AngZ, [-cone, cone]);
+    world.insert_multibody_joint(root, link, joint).unwrap();
+    let id = *world.multibody_joints.rigid_body_link(link).unwrap();
+    let multibody = world
+        .multibody_joints
+        .get_multibody_mut(id.multibody)
+        .unwrap();
+    multibody.damping_mut().fill(0.0);
+    let first = multibody.link(id.id).unwrap().assembly_id;
+    // Square to the link and to the cone's axis: the link's own way round the cone.
+    let round = (off * Vector::X).cross(Vector::Z).normalize() * 300.0;
+    multibody.velocities[first] = round.x;
+    multibody.velocities[first + 1] = round.y;
+    multibody.velocities[first + 2] = round.z;
+    let mut widest: Real = 0.0;
+    for _ in 0..10 {
+        world.step();
+        let axis = *world.bodies[link].rotation() * Vector::X;
+        widest = widest.max(axis.dot(Vector::X).clamp(-1.0, 1.0).acos().to_degrees());
+    }
+    assert!(
+        widest <= 31.5,
+        "the link stood {widest} degrees off its cone's axis, on a 30 degree cone"
+    );
+}
