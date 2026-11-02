@@ -37,9 +37,9 @@ impl SoftFemSystem {
         }
     }
 
-    /// Assembles `A = M + (h² + h β) K` and the elastic force at the current positions; pinned
-    /// degrees of freedom become Dirichlet rows, with their coupling to the free rows
-    /// (`Σ_{q pinned} A_pq v_q`) kept for the right-hand side; a step's first substep reuses it.
+    /// Assembles `A = M + (h² + h β) K`, the damping `h D = h β K` on its pattern and the elastic
+    /// force at the current positions; pinned degrees of freedom become Dirichlet rows of `A`; a
+    /// step's first substep reuses it.
     ///
     /// It runs once per substep (`dt`: the substep length), and each plastic element's rest
     /// shape flows first, at the strain the substep starts from, over the substep: a body's
@@ -47,6 +47,8 @@ impl SoftFemSystem {
     /// per second, whatever the step length.
     pub(super) fn assemble_operator(&mut self, dt: Real) {
         self.matrix.clear_values();
+        self.damping.clear();
+        self.damping.resize(self.matrix.blocks.len(), Matrix::ZERO);
         for (k, m) in self.mass.iter().enumerate() {
             let idx = self.matrix.diagonal_index(k as u32) as usize;
             self.matrix.blocks[idx] = Matrix::IDENTITY * *m;
@@ -130,6 +132,7 @@ impl SoftFemSystem {
             // Tangent `K_pq = Σᵣₛ Hᵣₛ g̃ᵣ[p] g̃ₛ[q]ᵀ = J_p H J_qᵀ`, scaled by `h² + h β` (the
             // stiffness and its Rayleigh damping share the same matrix); `K_qp = K_pqᵀ`.
             let scale = dt * dt + dt * cell.beta;
+            let damping = dt * cell.beta;
             let blocks = &self.cell_blocks[ci];
             for q in 0..MAX_CONSTRAINT_PARTICLES {
                 let hq = cell.tangent * jacobians[q].transpose();
@@ -139,11 +142,12 @@ impl SoftFemSystem {
                         continue;
                     }
                     let block: Matrix = (jacobians[p] * hq).into();
-                    let block = block * scale;
-                    self.matrix.blocks[slot as usize] += block;
+                    self.matrix.blocks[slot as usize] += block * scale;
+                    self.damping[slot as usize] += block * damping;
                     if p != q {
                         let mirror = blocks[q * MAX_CONSTRAINT_PARTICLES + p];
-                        self.matrix.blocks[mirror as usize] += block.transpose();
+                        self.matrix.blocks[mirror as usize] += block.transpose() * scale;
+                        self.damping[mirror as usize] += block.transpose() * damping;
                     }
                 }
             }
@@ -154,32 +158,30 @@ impl SoftFemSystem {
         self.assemble_dihedrals(dt);
         self.assemble_volume_cells(dt);
 
-        // The pinned particles' coupling to the free rows (`A_pq = A_qpᵀ`), then their Dirichlet
-        // rows.
-        self.pinned_coupling.clear();
-        self.pinned_coupling.resize(self.mass.len(), Vector::ZERO);
+        // The pinned particles' Dirichlet rows.
         for (k, &pinned) in self.pinned.iter().enumerate() {
             if pinned {
-                let v = self.velocity[k];
-                let coupling = &mut self.pinned_coupling;
-                self.matrix.for_each_block_of_row(k as u32, |col, block| {
-                    if col as usize != k {
-                        coupling[col as usize] += block.transpose() * v;
-                    }
-                });
                 self.matrix.make_dirichlet(k as u32);
             }
         }
         self.cg.update_preconditioner(&self.matrix);
     }
 
-    /// The predictor's right-hand side `b = h f − (A − M) v` from the assembled operator and
-    /// the current velocities.
+    /// The predictor's right-hand side `b = h f − h D v` from the assembled operator and the
+    /// current velocities.
+    ///
+    /// The substep solves `M Δv = h f(x + h Δv) − h D (v + Δv)`, linearized: the elastic force
+    /// at the positions the substep starts from, moved by the velocity change the substep
+    /// makes, and the damping at the velocity it ends at. Positions then advance by the
+    /// velocity the substep ends at, so an undamped linear body's oscillation keeps its energy
+    /// at every substep length (its update has unit determinant and is stable at any `h`), and
+    /// a body loses energy at the rate its damping states: a body struck elastically rebounds
+    /// with the share of its speed its material gives it, whatever the substep length.
     fn assemble_rhs(&mut self, dt: Real) {
-        self.matrix.mul(&self.velocity, &mut self.rhs);
+        self.matrix
+            .mul_values(&self.damping, &self.velocity, &mut self.rhs);
         for k in 0..self.rhs.len() {
-            self.rhs[k] = self.force[k] * dt - (self.rhs[k] + self.pinned_coupling[k])
-                + self.velocity[k] * self.mass[k];
+            self.rhs[k] = self.force[k] * dt - self.rhs[k];
         }
         for (k, &pinned) in self.pinned.iter().enumerate() {
             if pinned {
@@ -203,13 +205,15 @@ impl SoftFemSystem {
                 self.force[cell.vertices[k] as usize] -= grad[k] * (element.stiffness * c);
             }
             let scale = element.stiffness * (dt * dt + dt * element.beta);
+            let damping = element.stiffness * dt * element.beta;
             let blocks = &self.cell_blocks[element.cell as usize];
             for p in 0..MAX_CONSTRAINT_PARTICLES {
                 for q in 0..MAX_CONSTRAINT_PARTICLES {
                     let slot = blocks[p * MAX_CONSTRAINT_PARTICLES + q];
                     if slot != u32::MAX {
-                        self.matrix.blocks[slot as usize] +=
-                            outer_product(grad[p], grad[q]) * scale;
+                        let block = outer_product(grad[p], grad[q]);
+                        self.matrix.blocks[slot as usize] += block * scale;
+                        self.damping[slot as usize] += block * damping;
                     }
                 }
             }
@@ -224,6 +228,7 @@ impl SoftFemSystem {
             position,
             force: forces,
             matrix,
+            damping,
             materials,
             ..
         } = self;
@@ -258,7 +263,9 @@ impl SoftFemSystem {
                 continue;
             }
 
-            let mut block = outer_product(n, n) * (spring.stiffness * (dt * dt + dt * spring.beta));
+            let axial = outer_product(n, n) * spring.stiffness;
+            let mut block = axial * (dt * dt + dt * spring.beta);
+            let damped = axial * (dt * spring.beta);
             // A pulled element also resists turning: its pull, over its length, across it.
             // This is the tensile part of the element's geometric stiffness (`f / |d|` times
             // `I − nnᵀ`), positive semi-definite while the element pulls; it is what holds a
@@ -272,6 +279,7 @@ impl SoftFemSystem {
                     // Diagonal blocks (k = 0, 3) get `+k nnᵀ`, off-diagonal ones `−k nnᵀ`.
                     let sign = if k == 0 || k == 3 { 1.0 } else { -1.0 };
                     matrix.blocks[slot as usize] += block * sign;
+                    damping[slot as usize] += damped * sign;
                 }
             }
         }
@@ -310,20 +318,22 @@ impl SoftFemSystem {
                 self.force[dihedral.vertices[k] as usize] -= grad[k] * (dihedral.stiffness * c);
             }
             let scale = dihedral.stiffness * (dt * dt + dt * dihedral.beta);
+            let damping = dihedral.stiffness * dt * dihedral.beta;
             for p in 0..4 {
                 for q in 0..4 {
                     let slot = dihedral.blocks[p * 4 + q];
                     if slot != u32::MAX {
-                        self.matrix.blocks[slot as usize] +=
-                            outer_product(grad[p], grad[q]) * scale;
+                        let block = outer_product(grad[p], grad[q]);
+                        self.matrix.blocks[slot as usize] += block * scale;
+                        self.damping[slot as usize] += block * damping;
                     }
                 }
             }
         }
     }
 
-    /// The implicit elastic step of one substep: assemble, solve `A Δv = b`, and add `Δv` to the
-    /// particles' solver velocities. Returns the conjugate-gradient iteration count.
+    /// The implicit elastic step of one substep: assemble, solve `A Δv = h f − h D v` (see
+    /// [`Self::assemble_rhs`]), and add `Δv` to the particles' solver velocities. Returns the conjugate-gradient iteration count.
     pub fn predict(
         &mut self,
         bodies: &mut SolverBodies,

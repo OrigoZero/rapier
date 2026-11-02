@@ -125,13 +125,20 @@ impl BlockMatrix {
 
     /// `out = A · x`.
     pub fn mul(&self, x: &[Vector], out: &mut [Vector]) {
+        self.mul_values(&self.blocks, x, out);
+    }
+
+    /// `out = B · x`, `B` the matrix of this pattern whose block values are `values` (parallel to
+    /// [`Self::blocks`]).
+    pub fn mul_values(&self, values: &[Matrix], x: &[Vector], out: &mut [Vector]) {
         debug_assert_eq!(x.len(), self.num_rows());
+        debug_assert_eq!(values.len(), self.cols.len());
         for (r, o) in out.iter_mut().enumerate() {
             let start = self.row_offsets[r] as usize;
             let end = self.row_offsets[r + 1] as usize;
             let mut acc = Vector::ZERO;
             for k in start..end {
-                acc += self.blocks[k] * x[self.cols[k] as usize];
+                acc += values[k] * x[self.cols[k] as usize];
             }
             *o = acc;
         }

@@ -243,10 +243,10 @@ pub(crate) struct SoftFemSystem {
     pub(super) velocity: Vec<Vector>,
     /// Elastic force of the current configuration.
     pub(super) force: Vec<Vector>,
-    /// `Σ_{q pinned} A_pq v_q` per free row: the pinned particles' right-hand-side term, kept when
-    /// their rows become Dirichlet rows.
-    pub(super) pinned_coupling: Vec<Vector>,
-    /// The operator (`matrix`, `force`, `pinned_coupling`) was just assembled at the current
+    /// The values of `h D` (the Rayleigh damping `h β K` of every element) on `matrix`'s
+    /// pattern, with no Dirichlet rows: the right-hand side's damping force `−h D v`.
+    pub(super) damping: Vec<Matrix>,
+    /// The operator (`matrix`, `force`, `damping`) was just assembled at the current
     /// positions by the step-start factorization: the first substep's predict reuses it.
     pub(super) operator_fresh: bool,
     pub(super) rhs: Vec<Vector>,

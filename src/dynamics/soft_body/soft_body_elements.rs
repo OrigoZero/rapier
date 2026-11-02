@@ -436,8 +436,9 @@ pub enum SoftBodySolver {
     /// sweep count: a stiff body keeps a residual compliance, a load crosses a long body slowly.
     #[default]
     Constraints,
-    /// Implicit Euler elasticity: forces and tangent stiffness from the strain-energy density,
-    /// `(M + h D + h² K) Δv = b` solved over the whole body once per substep; constraints see the
+    /// Implicit elasticity: forces and tangent stiffness from the strain-energy density,
+    /// `(M + h D + h² K) Δv = h f − h D v` solved over the whole body once per substep, which
+    /// keeps an undamped body's energy at every substep length; constraints see the
     /// body through its augmented mass. Costs a factorization per step and a solve per constraint.
     Fem,
 }

@@ -379,7 +379,7 @@ pub(super) unsafe fn run_worker(ctx: &SharedCtx, worker_id: usize) {
 
             /*
              * Stage: the FEM soft bodies' implicit elastic step (parallel over the group's FEM
-             * bodies): assemble `A = M + h D + h² K` and solve `A Δv = h f - (A - M) v`. One body
+             * bodies): assemble `A = M + h D + h² K` and solve `A Δv = h f - h D v`. One body
              * per claim; nothing else touches its system or particle slots during this stage.
              */
             #[cfg(feature = "fem")]
