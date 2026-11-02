@@ -3,6 +3,7 @@
 //! multibody-only halves of buffer init and position integration.
 
 use crate::alloc_prelude::*;
+use crate::dynamics::solver::GenericJointConstraint;
 use crate::dynamics::solver::SolverVel;
 use crate::dynamics::solver::VelocitySolver;
 use crate::dynamics::solver::contact_constraint::{
@@ -16,7 +17,7 @@ use crate::dynamics::{
     IntegrationParameters, Multibody, MultibodyForces, MultibodyJointSet, RigidBodyHandle,
     RigidBodySet,
 };
-use crate::math::DVector;
+use crate::math::{AngVector, DVector, Vector};
 use parry::math::SIMD_WIDTH;
 
 impl ContactConstraintsSet {
@@ -160,8 +161,19 @@ impl VelocitySolver {
     /// The multibody part of `integrate_positions`, used by the staged solver (regular solver
     /// bodies are integrated in parallel by the workers): each multibody moves through the
     /// substep at the velocity its biased solve left, and its inertial forces then turn that
-    /// velocity for the configuration the move reached. The kinetic energy it moves with, when
-    /// its energy is held, is kept for [`Self::update_multibody_dynamics`].
+    /// velocity for the configuration the move reached. The kinetic energy the substep is held
+    /// to, when its energy is held, is kept for [`Self::update_multibody_dynamics`]: the energy
+    /// it moves with, or, for a multibody no row of the substep ties to something that moves or
+    /// drives it ([`Self::mark_driven_multibodies`]), the energy it started the substep with
+    /// before any row was solved if that is less.
+    ///
+    /// The rows that hold a multibody against fixed bodies and bodies at rest, and its own
+    /// joints' limits, give it no energy, but their biased pass pushes it out of what it sank
+    /// into and that push stood in the energy the substep was held to: a chain hanging from its
+    /// anchor with its second link knocking on the anchor's box took tens of kilojoules from a
+    /// knock, read back as a ball flung at 14 m/s, and at 951 m/s once the continuous pass
+    /// swept it. A row that ties it to something that moves, or a motor, gives a struck or
+    /// driven multibody energy it keeps.
     ///
     /// A move carries each joint's velocity unchanged in its parent's frame, so a link that
     /// turns over the move turns the velocity of every link below it with it, and velocities
@@ -180,9 +192,12 @@ impl VelocitySolver {
         params: &IntegrationParameters,
         bodies: &mut RigidBodySet,
         multibodies: &mut MultibodyJointSet,
+        contacts: &[GenericContactConstraint],
+        joints: &[GenericJointConstraint],
     ) {
+        self.mark_driven_multibodies(multibodies, contacts, joints);
         self.multibody_energy_holds.clear();
-        for link in &self.multibody_roots {
+        for (root, link) in self.multibody_roots.iter().enumerate() {
             let multibody = multibodies
                 .get_multibody_mut_internal(link.multibody)
                 .unwrap();
@@ -190,7 +205,17 @@ impl VelocitySolver {
                 .generic_solver_vels
                 .rows(multibody.solver_id as usize, multibody.ndofs());
             multibody.velocities.copy_from(&solver_vels);
-            let energy = multibody.kinetic_energy_to_hold(bodies);
+            let mut energy =
+                multibody.kinetic_energy_to_hold(multibody.velocities.as_view(), bodies);
+            if !self.multibody_driven[root] {
+                let free = self
+                    .generic_free_vels
+                    .rows(multibody.solver_id as usize, multibody.ndofs());
+                if let (Some(e), Some(f)) = (energy, multibody.kinetic_energy_to_hold(free, bodies))
+                {
+                    energy = Some(e.min(f));
+                }
+            }
             multibody.integrate(params.dt);
             multibody.forward_kinematics(bodies, false);
             multibody.update_rigid_bodies_internal(bodies, true, true, false);
@@ -211,6 +236,89 @@ impl VelocitySolver {
         }
     }
 
+    /// Marks in `multibody_driven` each multibody of `multibody_roots` that something moves or
+    /// drives through this substep's rows: a motor of one of its joints, a contact of `contacts`
+    /// with a dynamic body, a moving kinematic body or another multibody, or a row of `joints`
+    /// tying it to a rigid body or another multibody.
+    fn mark_driven_multibodies(
+        &mut self,
+        multibodies: &MultibodyJointSet,
+        contacts: &[GenericContactConstraint],
+        joints: &[GenericJointConstraint],
+    ) {
+        self.multibody_driven.clear();
+        self.multibody_driven
+            .resize(self.multibody_roots.len(), false);
+        // The roots take their solver ids in order, each after the one before it.
+        let solver_ids: Vec<u32> = self
+            .multibody_roots
+            .iter()
+            .map(|link| {
+                multibodies
+                    .get_multibody(link.multibody)
+                    .map_or(u32::MAX, |multibody| multibody.solver_id)
+            })
+            .collect();
+        let root_of = |solver_vel: u32| solver_ids.binary_search(&solver_vel).ok();
+        for (root, link) in self.multibody_roots.iter().enumerate() {
+            let motorized = multibodies
+                .get_multibody(link.multibody)
+                .is_some_and(|multibody| {
+                    multibody
+                        .links()
+                        .any(|link| !link.joint.data.motor_axes.is_empty())
+                });
+            self.multibody_driven[root] = motorized;
+        }
+        for c in contacts {
+            let generic1 = c.solver_vel1 != u32::MAX && c.generic_constraint_mask & 0b01 != 0;
+            let generic2 = c.solver_vel2 != u32::MAX && c.generic_constraint_mask & 0b10 != 0;
+            // Whether the side `solver_vel` of a contact whose other side is the multibody
+            // `own` moves: another multibody, a dynamic body, or a kinematic one in motion.
+            let moves = |solver_vel: u32, generic: bool, im: Vector, own: u32| {
+                if solver_vel == u32::MAX {
+                    false
+                } else if generic {
+                    solver_vel != own
+                } else {
+                    let vel = &self.solver_bodies.vels[solver_vel as usize];
+                    im != Vector::ZERO
+                        || vel.linear != Vector::ZERO
+                        || vel.angular != AngVector::default()
+                }
+            };
+            if generic1 && moves(c.solver_vel2, generic2, c.im2, c.solver_vel1) {
+                if let Some(root) = root_of(c.solver_vel1) {
+                    self.multibody_driven[root] = true;
+                }
+            }
+            if generic2 && moves(c.solver_vel1, generic1, c.im1, c.solver_vel2) {
+                if let Some(root) = root_of(c.solver_vel2) {
+                    self.multibody_driven[root] = true;
+                }
+            }
+        }
+        for j in joints {
+            let sides = [
+                (j.solver_vel1, j.is_rigid_body1),
+                (j.solver_vel2, j.is_rigid_body2),
+            ];
+            for (own, other) in [(sides[0], sides[1]), (sides[1], sides[0])] {
+                let (own_vel, own_rigid) = own;
+                if own_vel == u32::MAX || own_rigid {
+                    continue;
+                }
+                let (other_vel, other_rigid) = other;
+                let tied = other_vel != u32::MAX && (other_rigid || other_vel != own_vel);
+                if tied {
+                    if let Some(root) = root_of(own_vel) {
+                        self.multibody_driven[root] = true;
+                    }
+                }
+            }
+        }
+    }
+
     /// The dynamics each multibody starts the next substep with, read once the substep's
     /// stabilization pass has settled the velocity it ends at: the links' velocities, the
     /// accelerations its applied forces give it, the energy hold of
@@ -222,7 +330,11 @@ impl VelocitySolver {
         bodies: &mut RigidBodySet,
         multibodies: &mut MultibodyJointSet,
     ) {
-        for (link, energy) in self.multibody_roots.iter().zip(&self.multibody_energy_holds) {
+        for (link, energy) in self
+            .multibody_roots
+            .iter()
+            .zip(&self.multibody_energy_holds)
+        {
             if is_last_substep && energy.is_none() {
                 continue;
             }

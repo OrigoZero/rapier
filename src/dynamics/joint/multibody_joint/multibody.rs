@@ -773,7 +773,7 @@ impl Multibody {
 
     /// The kinetic energy of the links at the generalized `velocities`, at the configuration the
     /// body jacobians and the links' mass properties stand at.
-    fn kinetic_energy_at(&self, velocities: &DVector, bodies: &RigidBodySet) -> Real {
+    fn kinetic_energy_at(&self, velocities: DVectorView<Real>, bodies: &RigidBodySet) -> Real {
         let mut energy = 0.0;
         for i in 0..self.links.len() {
             let rb = &bodies[self.links[i].rigid_body];
@@ -797,11 +797,15 @@ impl Multibody {
         0.5 * energy
     }
 
-    /// The kinetic energy the links move through this substep with, at the configuration the
+    /// The kinetic energy of the links at the generalized `velocities`, at the configuration the
     /// substep starts from, for [`Self::kinetic_energy_scale`] to hold the substep to: `None`
     /// for a multibody with no degree of freedom, or while a prescribed motion, which does work
     /// no generalized force states, drives it.
-    pub(crate) fn kinetic_energy_to_hold(&self, bodies: &RigidBodySet) -> Option<Real> {
+    pub(crate) fn kinetic_energy_to_hold(
+        &self,
+        velocities: DVectorView<Real>,
+        bodies: &RigidBodySet,
+    ) -> Option<Real> {
         if self.ndofs == 0 {
             return None;
         }
@@ -811,11 +815,11 @@ impl Multibody {
             let held = link.joint.kinematic || !rb.is_dynamic();
             held && (rb.vels.linvel != Vector::ZERO || rb.vels.angvel != AngVector::default())
         });
-        (!prescribed).then(|| self.kinetic_energy_at(&self.velocities, bodies))
+        (!prescribed).then(|| self.kinetic_energy_at(velocities, bodies))
     }
 
     /// The factor that brings the free velocity of this substep (`velocities + dt · accelerations`)
-    /// down to the kinetic energy `held` the links moved through the substep before with, plus
+    /// down to the kinetic energy `held` the substep was held to, plus
     /// the work of the position forces over `dt` and a margin; 1 while it stands within that.
     ///
     /// The work of the position forces `f` is the kinetic energy they give the links over a
@@ -833,7 +837,7 @@ impl Multibody {
     pub(crate) fn kinetic_energy_scale(&self, held: Real, dt: Real, bodies: &RigidBodySet) -> Real {
         let mut free = self.velocities.clone();
         free.axpy(dt, &self.accelerations, 1.0);
-        let energy = self.kinetic_energy_at(&free, bodies);
+        let energy = self.kinetic_energy_at(free.as_view(), bodies);
         let forces = &self.workspace.position_forces;
         let mut response = forces.clone();
         self.augmented_mass_indices

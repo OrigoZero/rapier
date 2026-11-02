@@ -48,6 +48,13 @@ pub(crate) struct VelocitySolver {
     /// with, when its energy is held, indexed like `multibody_roots`: read as the substep moves
     /// the multibody, applied once its stabilization pass has settled the velocity it ends at.
     pub multibody_energy_holds: Vec<Option<Real>>,
+    /// The generalized velocity every multibody starts the current substep with, its velocity
+    /// increment applied and before any row of the substep is solved, indexed like
+    /// `generic_solver_vels`.
+    pub generic_free_vels: DVector,
+    /// Whether something moves or drives each multibody of `multibody_roots` through the
+    /// current substep's rows, indexed like `multibody_roots`.
+    pub multibody_driven: Vec<bool>,
     /// The multibody joint rows each pass solves its multibody contacts together with, and the
     /// buffers of those blocks (see [`crate::dynamics::solver::coupled_multibody_rows`]).
     pub coupled_rows: CoupledRows,
@@ -107,6 +114,8 @@ impl VelocitySolver {
             generic_solver_vels_increment: DVector::zeros(0),
             multibody_roots: Vec::new(),
             multibody_energy_holds: Vec::new(),
+            generic_free_vels: DVector::zeros(0),
+            multibody_driven: Vec::new(),
             coupled_rows: CoupledRows::default(),
             #[cfg(feature = "dim3")]
             solver_gyro: Vec::new(),
