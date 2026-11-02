@@ -860,8 +860,16 @@ impl Multibody {
         self.energy_hold_scale(energy, cap, dt)
     }
 
-    /// The factor that brings `energy` down to `held` plus the work of the position forces over
-    /// `dt` and [`ENERGY_HOLD_MARGIN`]; 1 while it stands within that.
+    /// The factor `s` that brings `energy`, the kinetic energy of a velocity `velocities` scales
+    /// with, down to `held` plus the work of the position forces over `dt` and
+    /// [`ENERGY_HOLD_MARGIN`]; 1 while it stands within that.
+    ///
+    /// The work's first term, `dt · v · f`, is read at the velocity the factor leaves: the scaled
+    /// velocity `s · v` does `s` times the work, so `s` solves `energy · s² = (held + s · dt · v
+    /// · f + dt² · f · M⁻¹f / 2)` (with the margin). Read at `velocities` before the hold, the
+    /// work of a velocity a substep had blown up allowed that velocity much of its excess: a
+    /// chain ending a substep at 17.8 MJ, held to 1.4 kJ, was allowed 22.6 kJ and its 500 kg end
+    /// left the step at 9.4 m/s where it hung at 2.4.
     fn energy_hold_scale(&self, energy: Real, held: Real, dt: Real) -> Real {
         let forces = &self.workspace.position_forces;
         let mut response = forces.clone();
@@ -869,13 +877,20 @@ impl Multibody {
             .with_rearranged_rows_mut(&mut response, |response| {
                 self.inv_augmented_mass.solve_mut(response);
             });
-        let work = dt * self.velocities.dot(forces) + 0.5 * dt * dt * response.dot(forces);
-        let allowed = (held + work.max(0.0)) * (1.0 + ENERGY_HOLD_MARGIN);
-        if energy > allowed {
-            (allowed / energy).simd_sqrt()
-        } else {
-            1.0
+        let margin = 1.0 + ENERGY_HOLD_MARGIN;
+        let moving = dt * self.velocities.dot(forces);
+        let response_work = 0.5 * dt * dt * response.dot(forces);
+        let allowed = (held + (moving + response_work).max(0.0)) * margin;
+        if energy <= allowed {
+            return 1.0;
         }
+        if moving <= 0.0 {
+            return (allowed / energy).simd_sqrt();
+        }
+        // energy · s² − margin · moving · s − margin · (held + response_work) = 0, for s > 0.
+        let b = margin * moving;
+        let c = margin * (held + response_work.max(0.0));
+        ((b + (b * b + 4.0 * energy * c).simd_sqrt()) / (2.0 * energy)).min(1.0)
     }
 
     // If the semi-implicit coriolis solve introduces more energy than the external
