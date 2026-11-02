@@ -66,6 +66,11 @@ pub(crate) struct VelocitySolver {
     /// scale the answer is applied with, indexed like `solver_bodies`. Only flagged slots are
     /// written and read, each by the stage that owns the slot.
     pub solver_gravity: Vec<SolverGravity>,
+    /// The linear velocity each solver body flagged `SOLVER_BODY_KEEP_ENDED` ended the last
+    /// substep with (for the first substep: the one it started the step with), before this
+    /// substep's increments, indexed like `solver_bodies`. Only flagged slots are written and
+    /// read: written by the increment stage, read by the FEM step after it.
+    pub ended_vels: Vec<Vector>,
 }
 
 /// What a solver body whose gravity comes from the hooks asks them about, and how the answer is
@@ -107,6 +112,7 @@ impl VelocitySolver {
             solver_gyro: Vec::new(),
             substep_vels: Vec::new(),
             solver_gravity: Vec::new(),
+            ended_vels: Vec::new(),
         }
     }
 }

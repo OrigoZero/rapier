@@ -240,13 +240,25 @@ pub(crate) struct SoftFemSystem {
     /// Whether the particle is pinned (`inv_mass == 0`).
     pub(super) pinned: Vec<bool>,
     pub(super) position: Vec<Vector>,
+    /// The velocity the substep starts from: the one the particle ended the last substep with,
+    /// plus this substep's increments (gravity, applied forces).
     pub(super) velocity: Vec<Vector>,
+    /// The velocity the particle ended the last substep with, before this substep's increments
+    /// (a pinned particle: its velocity).
+    pub(super) ended: Vec<Vector>,
+    /// The velocity this substep's increments gave the particle (`velocity − ended`), and a
+    /// product of the operator with it.
+    pub(super) increment: Vec<Vector>,
+    pub(super) product: Vec<Vector>,
     /// Elastic force of the current configuration.
     pub(super) force: Vec<Vector>,
-    /// `Σ_{q pinned} A_pq v_q` per free row: the pinned particles' right-hand-side term, kept when
-    /// their rows become Dirichlet rows.
-    pub(super) pinned_coupling: Vec<Vector>,
-    /// The operator (`matrix`, `force`, `pinned_coupling`) was just assembled at the current
+    /// The values of `h D` (the Rayleigh damping `h β K` of every element) on `matrix`'s
+    /// pattern, with no Dirichlet rows: the right-hand side's damping force `−h D v`.
+    pub(super) damping: Vec<Matrix>,
+    /// [`SoftFemParameters::stiffness_damping`](crate::dynamics::SoftFemParameters): added to
+    /// every element's Rayleigh coefficient.
+    pub(super) stiffness_damping: Real,
+    /// The operator (`matrix`, `force`, `damping`) was just assembled at the current
     /// positions by the step-start factorization: the first substep's predict reuses it.
     pub(super) operator_fresh: bool,
     pub(super) rhs: Vec<Vector>,

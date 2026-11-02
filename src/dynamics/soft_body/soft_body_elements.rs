@@ -436,9 +436,13 @@ pub enum SoftBodySolver {
     /// sweep count: a stiff body keeps a residual compliance, a load crosses a long body slowly.
     #[default]
     Constraints,
-    /// Implicit Euler elasticity: forces and tangent stiffness from the strain-energy density,
-    /// `(M + h D + h² K) Δv = b` solved over the whole body once per substep; constraints see the
-    /// body through its augmented mass. Costs a factorization per step and a solve per constraint.
+    /// Implicit elasticity: forces and tangent stiffness from the strain-energy density,
+    /// `(M + h D + h² K) Δv = b` solved over the whole body once per substep, the elastic force
+    /// taken where the substep's own velocity change moves the body, so a body keeps or loses its
+    /// energy at the rate its damping (its material's and
+    /// [`SoftFemParameters::stiffness_damping`](crate::dynamics::SoftFemParameters)) states,
+    /// at every substep length; constraints see the body through its augmented mass. Costs a
+    /// factorization per step and a solve per constraint.
     Fem,
 }
 

@@ -42,7 +42,7 @@ fn response_solves_the_step_matrix() {
             ..Default::default()
         };
         let mut system = SoftFemSystem::default();
-        system.prepare(sb, &slots);
+        system.prepare(sb, &slots, &params);
         system.factorize_step_matrix(dt, &params);
         let mut pool = vec![Vector::ZERO; n];
         let gain = system.response_into(entries.iter().copied(), &mut pool, &params);
@@ -67,7 +67,7 @@ fn response_solves_the_step_matrix() {
             ..Default::default()
         };
         let mut system = SoftFemSystem::default();
-        system.prepare(sb, &slots);
+        system.prepare(sb, &slots, &params);
         system.factorize_step_matrix(dt, &params);
         #[cfg(feature = "dim2")]
         let entries = [(1u32, Vector::new(0.3, -0.7)), (2u32, Vector::ONE * 0.5)];

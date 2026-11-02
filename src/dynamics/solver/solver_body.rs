@@ -46,6 +46,11 @@ pub(crate) const SOLVER_BODY_PLANE_HOLD: u8 = 4;
 /// substep where the body stands (`RigidBody::set_gravity_field`, `SoftBody::set_gravity_field`),
 /// about the subject and with the scale `VelocitySolver::solver_gravity` holds at its slot.
 pub(crate) const SOLVER_BODY_GRAVITY_FIELD: u8 = 8;
+/// Per-solver-body flag: the linear velocity the body ended each substep with, before the next
+/// substep's increments, is kept in `VelocitySolver::ended_vels` at its slot (a free particle of
+/// a FEM soft body, whose elastic step takes the increments' motion within the substep into its
+/// implicit solve).
+pub(crate) const SOLVER_BODY_KEEP_ENDED: u8 = 16;
 
 #[derive(Default)]
 pub struct SolverBodies {
