@@ -200,6 +200,13 @@ pub(crate) struct SoftElasticBatch {
     inv_schur: SimdReal,
     strain_impulse: [SimdReal; STRAIN_ROWS],
     vol_impulse: SimdReal,
+    /// Each lane's plastic yield (`0.0` for a cell that does not flow) and elastic strain per unit
+    /// of strain-row impulse: what the lanes' plastic flow reads.
+    plastic_yield: SimdReal,
+    strain_per_impulse: [SimdReal; STRAIN_ROWS],
+    /// Whether a substep of this step has been solved: the next update flows the lanes' plastic
+    /// cells over it first.
+    pub flow_pending: bool,
 }
 
 impl SoftElasticBatch {
@@ -215,7 +222,9 @@ impl SoftElasticBatch {
             + 4 * STRAIN_ROWS
             + 3
             + 4
-            + 1;
+            + 1
+            + 1
+            + STRAIN_ROWS;
         let mut staged = [[0.0; SIMD_WIDTH]; FIELDS];
         let mut ids = [[u32::MAX; SIMD_WIDTH]; MAX_CONSTRAINT_PARTICLES];
         let mut simulated = [[false; SIMD_WIDTH]; MAX_CONSTRAINT_PARTICLES];
@@ -274,6 +283,10 @@ impl SoftElasticBatch {
             put(c.rotation.z);
             put(c.rotation.w);
             put(c.vol_impulse);
+            put(c.flow.map_or(0.0, |flow| flow.yield_strain));
+            for r in 0..STRAIN_ROWS {
+                put(c.strain_per_impulse[r]);
+            }
             volumetric[l] = model.volumetric;
         }
         let mut fields = staged.iter().map(|lanes| SimdReal::from(*lanes));
@@ -303,6 +316,8 @@ impl SoftElasticBatch {
         let vol_cap = next();
         let quaternion = [next(), next(), next(), next()];
         let vol_impulse = next();
+        let plastic_yield = next();
+        let strain_per_impulse: [SimdReal; STRAIN_ROWS] = core::array::from_fn(|_| next());
         let zero = splat(0.0);
         let zero3 = [zero; 3];
         Self {
@@ -332,7 +347,31 @@ impl SoftElasticBatch {
             inv_schur: zero,
             strain_impulse,
             vol_impulse,
+            plastic_yield,
+            strain_per_impulse,
+            flow_pending: false,
         }
+    }
+
+    /// The lanes whose cells flow plastically and carried a deviatoric strain past their yield
+    /// over the substep just solved: their strain impulses read through the row stiffness (see
+    /// `flow_elastic_cell`).
+    pub fn lanes_past_yield(&self) -> SimdBool {
+        let strain: [SimdReal; STRAIN_ROWS] =
+            core::array::from_fn(|r| self.strain_impulse[r] * self.strain_per_impulse[r]);
+        let mean = (strain[0] + strain[1] + strain[2]) * splat(1.0 / 3.0);
+        let mut norm_sq = splat(0.0);
+        for (r, value) in strain.iter().enumerate() {
+            if r < 3 {
+                let d = *value - mean;
+                norm_sq += d * d;
+            } else {
+                // An off-diagonal row is two entries of the tensor.
+                norm_sq += splat(2.0) * *value * *value;
+            }
+        }
+        let flows = self.plastic_yield.simd_gt(splat(0.0));
+        flows & norm_sq.simd_gt(self.plastic_yield * self.plastic_yield)
     }
 
     /// Takes lane `l`'s rest shape, strain coefficients and rows from its cell `c` after the cell
@@ -609,6 +648,23 @@ impl SoftElasticBatch {
             self.constraints[l] != u32::MAX && strained(self.constraints[l])
         });
         lanes.iter().any(|s| *s).then(|| SimdBool::from(lanes))
+    }
+
+    /// The strain impulses lane `l`'s cell has accumulated (cell frame).
+    pub fn lane_strain_impulse(&self, l: usize) -> StrainVector {
+        StrainVector::from_fn(|r, _| self.strain_impulse[r].extract(l))
+    }
+
+    /// Lane `l`'s cell rotation at its last update, as a matrix.
+    pub fn lane_rotation(&self, l: usize) -> crate::math::Matrix {
+        let column = |c: usize| {
+            crate::math::Vector::new(
+                self.rotation[c][0].extract(l),
+                self.rotation[c][1].extract(l),
+                self.rotation[c][2].extract(l),
+            )
+        };
+        crate::math::Matrix::from_cols(column(0), column(1), column(2))
     }
 
     /// Lane `l`'s cell as the step left it.

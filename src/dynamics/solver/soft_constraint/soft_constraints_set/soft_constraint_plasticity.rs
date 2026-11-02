@@ -8,14 +8,11 @@ use simba::scalar::{ComplexField as _, RealField as _};
 use simba::simd::SimdComplexField as _;
 
 use crate::dynamics::soft_body::creep_share;
-use crate::dynamics::soft_body::soft_body_shape_matching::extract_rotation_within;
 use crate::dynamics::{SoftBody, SoftBodyCellModel};
-use crate::math::{DIM, Matrix, Real, Rotation, Vector};
-use crate::utils::RotationOps;
+use crate::math::{DIM, Matrix, Real, Vector};
 
 use super::super::soft_element_constraint::{
-    CELL_ROTATION_TOLERANCE, ElementCreep, MAX_CONSTRAINT_PARTICLES, SoftElasticConstraint,
-    SoftScalarConstraint, SoftScalarConstraintWriteback, StrainVector, max_symmetric_eigenvalue,
+    MAX_CONSTRAINT_PARTICLES, SoftElasticConstraint, StrainVector, max_symmetric_eigenvalue,
     strain_matrix, strain_rows_of,
 };
 use super::super::{ElasticCellTerms, elastic_cell_rows, elastic_cell_weight};
@@ -99,21 +96,20 @@ pub(crate) fn stretch_moved(before: &Matrix, after: &Matrix) -> bool {
     frobenius_norm(&(*after - *before)) > 1.0e-4
 }
 
-/// The elastic energy `V₀ Ψ` a cell of the constraint solver holds at deformation gradient `f`,
-/// its rotation extracted from `rotation` (returned): `μ V₀ ‖ε‖² + ½ λ V₀ (det F − 1)²` with the
+/// The elastic energy `V₀ Ψ` a cell of the constraint solver holds at deformation gradient `f` in
+/// the frame of `rotation` (a rotation matrix): `μ V₀ ‖ε‖² + ½ λ V₀ (det F − 1)²` with the
 /// corotated strain `ε = sym(RᵀF) − I` (the corotational model's strain rows and volumetric row),
 /// or the stable Neo-Hookean energy `½ μ (‖S‖² − d) − μ (J − 1) + ½ (λ + μ) (J − 1)²` of
 /// `S = sym(RᵀF)`, `J = det S` (`mu`, `lambda`: the Lamé parameters times the rest volume). Never
 /// below zero.
 pub(crate) fn corotated_cell_energy(
     f: &Matrix,
-    rotation: Rotation,
+    rotation: &Matrix,
     mu: Real,
     lambda: Real,
     neo_hookean: bool,
-) -> (Real, Rotation) {
-    let rotation = extract_rotation_within(*f, rotation, CELL_ROTATION_TOLERANCE);
-    let strain = strain_rows_of(&(rotation.to_mat().transpose() * *f - Matrix::IDENTITY));
+) -> Real {
+    let strain = strain_rows_of(&(rotation.transpose() * *f - Matrix::IDENTITY));
     let eps = strain_matrix(&strain);
     let energy = if neo_hookean {
         let s = Matrix::IDENTITY + eps;
@@ -124,7 +120,7 @@ pub(crate) fn corotated_cell_energy(
         let j = f.determinant() - 1.0;
         mu * frobenius_norm(&eps).powi(2) + 0.5 * lambda * j * j
     };
-    (energy.max(0.0), rotation)
+    energy.max(0.0)
 }
 
 /// One plastic flow of an elastic cell of the constraint solver over the substep `dt` that ended
@@ -136,31 +132,60 @@ pub(crate) struct CellSubstepFlow {
     pub share: Real,
 }
 
+/// Whether `strain`'s deviatoric part (its Frobenius norm) lies past `yield_strain`: the strains a
+/// cell flows at (see [`flowed_rest_shape`]).
+#[inline]
+pub(crate) fn past_yield(strain: &StrainVector, yield_strain: Real) -> bool {
+    if yield_strain <= 0.0 {
+        return false;
+    }
+    let trace = strain.fixed_rows::<DIM>(0).sum();
+    let mean = trace / DIM as Real;
+    let mut norm_sq = 0.0;
+    for r in 0..strain.len() {
+        if r < DIM {
+            norm_sq += (strain[r] - mean) * (strain[r] - mean);
+        } else {
+            // An off-diagonal row is two entries of the tensor.
+            norm_sq += 2.0 * strain[r] * strain[r];
+        }
+    }
+    norm_sq > yield_strain * yield_strain
+}
+
 /// Flows the plastic elastic cell `constraint` of `sb` over the substep `dt` it was just solved
 /// through, at the stress its strain rows carried over it (`strain_impulse`, the impulses the
 /// substep accumulated, read through `strain_per_impulse`: the sweep's unconverged residual is
-/// geometric but transmits no load), the particles where the substep left them (`x`). Past the
-/// yield the rest shape flows at the creep rate over the substep (see [`flowed_rest_shape`]); an
-/// inverted cell does not flow. The constraint's plastic state takes the new rest shape and the
-/// flow's energy, and with `refit` its strain coefficients and rows follow the new rest shape for
-/// the substeps still to come. `max_corrective_velocity` bounds the rows' snap-back. `None` when
-/// the cell does not flow.
+/// geometric but transmits no load), its particles where the substep left them (`positions`
+/// reads them, for a cell strained past its yield). Past the yield the rest shape flows at the
+/// creep rate over the substep (see [`flowed_rest_shape`]); an inverted cell does not flow. The
+/// constraint's plastic state takes the new rest shape and the flow's energy, the cell's energy
+/// at those positions against the rest shape it flowed from less against the one it flowed to,
+/// both read in the frame of `rotation` (the cell's rotation at its last update, which the two
+/// readings share, so the difference holds the flow alone), and with `refit` its
+/// strain coefficients and rows follow the new rest shape for the substeps still to come.
+/// `max_corrective_velocity` bounds the rows' snap-back. `None` when the cell does not flow.
 pub(crate) fn flow_elastic_cell(
     constraint: &mut SoftElasticConstraint,
     sb: &SoftBody,
-    x: &[Vector; MAX_CONSTRAINT_PARTICLES],
+    positions: impl FnOnce(&mut SoftElasticConstraint) -> [Vector; MAX_CONSTRAINT_PARTICLES],
     strain_impulse: &StrainVector,
+    rotation: &Matrix,
     dt: Real,
     max_corrective_velocity: Real,
     refit: bool,
 ) -> Option<CellSubstepFlow> {
     let state = constraint.flow?;
+    let stress_strain = strain_impulse.component_mul(&constraint.strain_per_impulse);
+    if !past_yield(&stress_strain, state.yield_strain) {
+        return None;
+    }
     let cell = sb.cells.get(constraint.element as usize)?;
     let material = sb.element_material(cell.material);
+    let x = positions(constraint);
     let rest0: [Vector; DIM + 1] =
         core::array::from_fn(|k| sb.particles[cell.vertices[k] as usize].initial_rest_position);
-    let stress_strain = strain_impulse.component_mul(&constraint.strain_per_impulse);
-    let ds = SoftBody::cell_edge_matrix(*x);
+    let ds = SoftBody::cell_edge_matrix(x);
     let f = ds * constraint.inv_rest_matrix;
     let flowed = flowed_rest_shape(
         &state.plastic_stretch,
@@ -177,8 +202,8 @@ pub(crate) fn flow_elastic_cell(
         lambda * cell.stiffness_scale * volume,
     );
     let neo_hookean = sb.cell_model == SoftBodyCellModel::NeoHookean;
-    let (held, rotation) = corotated_cell_energy(&f, constraint.rotation, mu, lambda, neo_hookean);
-    let (left, _) = corotated_cell_energy(
+    let held = corotated_cell_energy(&f, rotation, mu, lambda, neo_hookean);
+    let left = corotated_cell_energy(
         &(ds * flowed.inv_rest_matrix),
         rotation,
         mu,
@@ -213,33 +238,6 @@ pub(crate) fn flow_elastic_cell(
     })
 }
 
-/// What scalar element `constraint` of `sb` creeps by, when it creeps (see
-/// `SoftScalarConstraint::creep`): its material and the rest length (an edge) or rest angle (a
-/// dihedral) it was created with.
-pub(crate) fn element_creep<'a>(
-    sb: &'a SoftBody,
-    constraint: &SoftScalarConstraint,
-) -> Option<ElementCreep<'a>> {
-    match constraint.writeback {
-        SoftScalarConstraintWriteback::Edge => {
-            let e = sb.edges.get(constraint.element as usize)?;
-            Some(ElementCreep {
-                material: sb.element_material(e.material),
-                initial: e.initial_rest_length(),
-            })
-        }
-        #[cfg(feature = "dim3")]
-        SoftScalarConstraintWriteback::Dihedral => {
-            let d = sb.dihedrals.get(constraint.element as usize)?;
-            Some(ElementCreep {
-                material: sb.element_material(d.material),
-                initial: d.initial_rest_angle(),
-            })
-        }
-        SoftScalarConstraintWriteback::CellVolume => None,
-    }
-}
-
 /// The largest tensile strain of a cell, plastic flow included: the largest principal value of the
 /// symmetric part of the total stretch `(I + ε) P` minus one (the tearing criterion, so a creeping
 /// cell tears at the strain an elastic one would); without plastic flow, that of `ε`.
@@ -264,6 +262,7 @@ mod tests {
     use super::super::super::soft_element_constraint::STRAIN_ROWS;
     use super::*;
     use crate::dynamics::{SoftBodyCell, SoftBodyMaterial};
+    use crate::math::Rotation;
 
     /// Plastic flow of an elastic cell over `dt` (see [`flowed_rest_shape`]), its strain rows' warm
     /// start following what is left of the strain. Returns whether it flowed significantly.

@@ -267,6 +267,8 @@ pub(crate) struct SoftElasticConstraint {
 pub(crate) struct SoftCellFlow {
     /// The plastic stretch the cell's rest shape `inv_rest_matrix` holds.
     pub plastic_stretch: Matrix,
+    /// The cell material's plastic yield: the deviatoric strain past which it flows.
+    pub yield_strain: Real,
     /// Whether a substep of this step has been solved: the next update flows the cell over it
     /// before reading the cell's strain.
     pub pending: bool,

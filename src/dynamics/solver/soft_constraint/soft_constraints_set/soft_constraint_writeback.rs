@@ -10,6 +10,7 @@ use crate::alloc_prelude::*;
 use crate::dynamics::solver::solver_body::SolverBodies;
 use crate::dynamics::solver::velocity_solver::SubstepRecord;
 use crate::math::{DIM, Real, Vector};
+use crate::utils::RotationOps;
 
 use super::super::soft_element_constraint::SoftScalarConstraintWriteback;
 use super::*;
@@ -37,10 +38,8 @@ impl SoftConstraintsSet {
                 let impulse = crate::utils::canonicalize_zero(constraint.impulse);
                 // The last substep's creep, at the positions it ended at.
                 let mut flowed = *constraint;
-                if constraint.creeps
-                    && let Some(creep) = element_creep(sb, constraint)
-                {
-                    flowed.creep_at(bodies, creep, awake.substep_dt);
+                if constraint.creep_yield > 0.0 {
+                    flowed.creep_at(bodies, sb, awake.substep_dt);
                 }
                 match constraint.writeback {
                     SoftScalarConstraintWriteback::Edge => {
@@ -119,17 +118,15 @@ impl SoftConstraintsSet {
                 // The last substep's flow, at the positions it ended at.
                 let mut flowed = *constraint;
                 if constraint.flow.is_some() {
-                    let mut x = constraint.pos;
-                    for (k, &id) in constraint.solver_ids.iter().enumerate() {
-                        if id != u32::MAX {
-                            x[k] = bodies.get_pose(id).translation;
-                        }
-                    }
                     if let Some(flow) = flow_elastic_cell(
                         &mut flowed,
                         sb,
-                        &x,
+                        |c| {
+                            c.read_positions(bodies);
+                            c.pos
+                        },
                         &end.strain_impulse,
+                        &end.rotation.to_mat(),
                         awake.substep_dt,
                         self.max_corrective_velocity,
                         false,

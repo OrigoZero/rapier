@@ -731,7 +731,7 @@ impl SoftConstraintsSet {
                 yield_bounds: [Real::MAX, Real::MAX],
                 rest_range: [0.0, Real::MAX],
                 omega_sq: omega * omega,
-                creeps: false,
+                creep_yield: 0.0,
                 creep_pending: false,
                 flow_work: 0.0,
             }
@@ -764,8 +764,9 @@ impl SoftConstraintsSet {
                 &softness,
                 e.impulse,
             );
-            constraint.creeps =
-                material.edge_plastic_yield > 0.0 && material.edge_plastic_creep > 0.0;
+            if material.edge_plastic_creep > 0.0 {
+                constraint.creep_yield = material.edge_plastic_yield.max(0.0);
+            }
             // The force bounds (a cable pushes with nothing, a strut pulls with nothing, a
             // bounded edge carries no more than its bound) and the forces a yielding edge gives
             // way at, as impulses per substep; the substeps flow a yielding edge's rest length
@@ -815,8 +816,9 @@ impl SoftConstraintsSet {
                 &material.bend_softness,
                 d.impulse,
             );
-            constraint.creeps =
-                material.edge_plastic_yield > 0.0 && material.edge_plastic_creep > 0.0;
+            if material.edge_plastic_creep > 0.0 {
+                constraint.creep_yield = material.edge_plastic_yield.max(0.0);
+            }
             out.push_constraint(d.color, constraint);
         }
 
@@ -921,6 +923,7 @@ impl SoftConstraintsSet {
                         model: rows.model,
                         flow: plastic.then(|| SoftCellFlow {
                             plastic_stretch: c.plastic_stretch,
+                            yield_strain: material.plastic_yield,
                             pending: false,
                             work: 0.0,
                         }),

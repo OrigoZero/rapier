@@ -83,9 +83,10 @@ pub(crate) struct SoftScalarConstraint {
     /// The squared natural frequency of the element's spring (its softness's), `ω² = k w` with
     /// `w` its effective mass: its stiffness is `ω² / w`, which its elastic energy reads.
     pub omega_sq: Real,
-    /// Whether the element's rest length (distance) or rest angle (dihedral) creeps past its
-    /// material's edge yield (see [`Self::creep`]).
-    pub creeps: bool,
+    /// The edge yield past which the element's rest length (distance, as a strain) or rest angle
+    /// (dihedral, in radians) creeps, its material's when it states a creep rate (see
+    /// [`Self::creep`]); `0.0` for an element that does not creep.
+    pub creep_yield: Real,
     /// Whether a substep of this step has been solved: the next update creeps the element over
     /// it before reading its error.
     pub creep_pending: bool,
@@ -160,10 +161,10 @@ impl SoftScalarConstraint {
     /// poses. Soft constraints are springs whose bias is the spring force, not an error-correction
     /// velocity, so they are solved once per substep (biased pass only) with the bias always on.
     /// A yielding distance constraint gives way first (see [`Self::return_map`], `dt` the substep
-    /// length), and with `creep` the element creeps over the substep just solved (see
-    /// [`Self::creep`]).
+    /// length), and with `creep_body`, the soft body it belongs to, the element creeps over the
+    /// substep just solved (see [`Self::creep`]).
     #[inline]
-    pub fn update(&mut self, bodies: &SolverBodies, dt: Real, creep: Option<ElementCreep>) {
+    pub fn update(&mut self, bodies: &SolverBodies, dt: Real, creep_body: Option<&SoftBody>) {
         self.read_positions(bodies);
         let mut c = self.compute_gradients();
         if self.kind == SoftScalarConstraintKind::Distance {
@@ -172,8 +173,8 @@ impl SoftScalarConstraint {
 
         // Effective mass and softness.
         let w = self.effective_mass();
-        if let Some(creep) = creep {
-            c = self.creep(c, w, creep, dt);
+        if let Some(sb) = creep_body {
+            c = self.creep(c, w, sb, dt);
         }
         let cfm_gain = w * self.cfm_coeff;
         self.cfm_gain = cfm_gain;
@@ -208,14 +209,37 @@ impl SoftScalarConstraint {
         w
     }
 
-    /// Creeps the element over the substep `dt` that just ended with its particles where the
-    /// solver bodies hold them (see [`Self::creep`]): the step's write-back takes its last
-    /// substep's flow this way.
-    pub fn creep_at(&mut self, bodies: &SolverBodies, creep: ElementCreep, dt: Real) {
+    /// Creeps the element of soft body `sb` over the substep `dt` that just ended with its
+    /// particles where the solver bodies hold them (see [`Self::creep`]): the step's write-back
+    /// takes its last substep's flow this way.
+    pub fn creep_at(&mut self, bodies: &SolverBodies, sb: &SoftBody, dt: Real) {
         self.read_positions(bodies);
         let c = self.compute_gradients();
         let w = self.effective_mass();
-        self.creep(c, w, creep, dt);
+        self.creep(c, w, sb, dt);
+    }
+
+    /// What this element of soft body `sb` creeps by: its material and the rest length (an edge)
+    /// or rest angle (a dihedral) it was created with.
+    fn creep_of<'a>(&self, sb: &'a SoftBody) -> Option<ElementCreep<'a>> {
+        match self.writeback {
+            SoftScalarConstraintWriteback::Edge => {
+                let e = sb.edges.get(self.element as usize)?;
+                Some(ElementCreep {
+                    material: sb.element_material(e.material),
+                    initial: e.initial_rest_length(),
+                })
+            }
+            #[cfg(feature = "dim3")]
+            SoftScalarConstraintWriteback::Dihedral => {
+                let d = sb.dihedrals.get(self.element as usize)?;
+                Some(ElementCreep {
+                    material: sb.element_material(d.material),
+                    initial: d.initial_rest_angle(),
+                })
+            }
+            SoftScalarConstraintWriteback::CellVolume => None,
+        }
     }
 
     /// The elastic energy `f² / 2k` the element holds at error `c`, its stiffness `k = ω² / w`
@@ -238,12 +262,25 @@ impl SoftScalarConstraint {
         0.5 * force * force / k
     }
 
-    /// Creeps the element's rest length (distance) or rest angle (dihedral), at error `c` and
-    /// effective mass `w`, over the substep `dt`: past its material's edge yield the excess flows
-    /// at the edge creep rate (`edge_flowed_rest_length`, `dihedral_flowed_rest_angle`). The
-    /// warm-start impulse keeps the share of the error the flow left, and the flow's energy is
-    /// added to `flow_work`. Returns the error against the rest it leaves.
-    fn creep(&mut self, c: Real, w: Real, creep: ElementCreep, dt: Real) -> Real {
+    /// Creeps the element's rest length (distance) or rest angle (dihedral) of soft body `sb`, at
+    /// error `c` and effective mass `w`, over the substep `dt`: past its material's edge yield the
+    /// excess flows at the edge creep rate (`edge_flowed_rest_length`,
+    /// `dihedral_flowed_rest_angle`). The warm-start impulse keeps the share of the error the flow
+    /// left, and the flow's energy is added to `flow_work`. Returns the error against the rest it
+    /// leaves.
+    fn creep(&mut self, c: Real, w: Real, sb: &SoftBody, dt: Real) -> Real {
+        let strained = match self.kind {
+            SoftScalarConstraintKind::Distance => c.abs() > self.creep_yield * self.rest,
+            #[cfg(feature = "dim3")]
+            SoftScalarConstraintKind::Dihedral => c.abs() > self.creep_yield,
+            SoftScalarConstraintKind::CellVolume => false,
+        };
+        if self.creep_yield <= 0.0 || !strained {
+            return c;
+        }
+        let Some(creep) = self.creep_of(sb) else {
+            return c;
+        };
         let rest = match self.kind {
             SoftScalarConstraintKind::Distance => {
                 crate::dynamics::soft_body::edge_flowed_rest_length(
