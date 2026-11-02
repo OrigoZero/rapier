@@ -818,6 +818,11 @@ impl Multibody {
     /// down to the kinetic energy `held` the links moved through the substep before with, plus
     /// the work of the position forces over `dt` and a margin; 1 while it stands within that.
     ///
+    /// The work of the position forces `f` is the kinetic energy they give the links over a
+    /// substep, `dt · v · f + dt² · f · M⁻¹f / 2`, through the mass matrix `M` alone: a body at
+    /// rest, or at the turn of its swing, gains the second term alone, so a multibody falls as
+    /// fast as a single body and a pendulum swings as high as it was let go.
+    ///
     /// A step moves the links at a fixed generalized velocity and then lets the Coriolis
     /// accelerations turn that velocity for the configuration it reached. Both are first order
     /// in the rotation of a substep, so they cancel only so far: at a few tenths of a radian a
@@ -829,7 +834,13 @@ impl Multibody {
         let mut free = self.velocities.clone();
         free.axpy(dt, &self.accelerations, 1.0);
         let energy = self.kinetic_energy_at(&free, bodies);
-        let work = dt * self.velocities.dot(&self.workspace.position_forces);
+        let forces = &self.workspace.position_forces;
+        let mut response = forces.clone();
+        self.augmented_mass_indices
+            .with_rearranged_rows_mut(&mut response, |response| {
+                self.inv_augmented_mass.solve_mut(response);
+            });
+        let work = dt * self.velocities.dot(forces) + 0.5 * dt * dt * response.dot(forces);
         let allowed = (held + work.max(0.0)) * (1.0 + ENERGY_HOLD_MARGIN);
         if energy > allowed {
             (allowed / energy).simd_sqrt()
