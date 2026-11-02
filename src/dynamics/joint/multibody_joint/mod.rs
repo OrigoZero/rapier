@@ -1,7 +1,7 @@
 //! MultibodyJoints using the reduced-coordinates formalism or using constraints.
 
 #[cfg(feature = "alloc")]
-pub use self::multibody::{Multibody, MultibodyDofCoupling};
+pub use self::multibody::{Multibody, MultibodyDofCoupling, MultibodyMassFactorization};
 #[cfg(feature = "alloc")]
 pub use self::multibody_ik::InverseKinematicsOption;
 #[cfg(feature = "alloc")]

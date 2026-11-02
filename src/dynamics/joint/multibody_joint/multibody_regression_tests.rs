@@ -1862,6 +1862,80 @@ fn a_chain_pushed_off_its_plane_against_its_anchors_body_never_climbs_nor_leaps(
     );
 }
 
+/// The inverse of a multibody's mass matrix holds every degree of freedom with a positive
+/// inertia for a chain of twelve 4 kg capsule links, 0.07 m wide and 0.55 m apart, each turned a
+/// twentieth of a radian off the one above, carrying a 20 t load from a fixed anchor. Its mass
+/// matrix spans nine orders of magnitude, from a link spinning about its own length to the load
+/// swinging 7 m below the anchor; factored in `f32`, the inverse read 18 of its 39 diagonal
+/// entries negative.
+#[test]
+#[cfg(feature = "dim3")]
+fn a_chain_carrying_a_load_five_thousand_times_a_link_keeps_a_positive_inverse_mass() {
+    let mut world = PhysicsWorld::new();
+    let (pitch, links) = (0.55 as Real, 12);
+    let (anchor, _) = world.insert(
+        RigidBodyBuilder::fixed(),
+        ColliderBuilder::ball(0.1).sensor(true),
+    );
+    let mut bodies = Vec::new();
+    let mut at = Vector::ZERO;
+    for i in 0..=links {
+        let side = if i % 2 == 0 { -1.0 } else { 1.0 };
+        let turn = Rotation::from_scaled_axis(Vector::new(
+            0.05 * side,
+            0.0,
+            0.035 * ((i % 3) as Real - 1.0),
+        ));
+        let down = turn * Vector::new(0.0, -1.0, 0.0);
+        let half = if i == links { 0.5 } else { pitch / 2.0 };
+        let collider = if i == links {
+            ColliderBuilder::ball(0.42).mass(20_000.0)
+        } else {
+            ColliderBuilder::capsule_y(pitch * 0.3, 0.07).mass(4.0)
+        };
+        at += down * half;
+        let (body, _) = world.insert(
+            RigidBodyBuilder::dynamic()
+                .translation(at)
+                .rotation(turn.to_scaled_axis())
+                .can_sleep(false),
+            collider,
+        );
+        at += down * half;
+        bodies.push(body);
+    }
+    for (i, body) in bodies.iter().enumerate() {
+        let joint = SphericalJointBuilder::new()
+            .local_anchor1(Vector::new(0.0, if i == 0 { 0.0 } else { -pitch / 2.0 }, 0.0))
+            .local_anchor2(Vector::new(
+                0.0,
+                if i == links { 0.5 } else { pitch / 2.0 },
+                0.0,
+            ))
+            .contacts_enabled(false)
+            .build();
+        let parent = if i == 0 { anchor } else { bodies[i - 1] };
+        world.insert_multibody_joint(parent, *body, joint).unwrap();
+    }
+    world.step();
+    let link = *world.multibody_joints.rigid_body_link(bodies[0]).unwrap();
+    let multibody = &world.multibody_joints[link.multibody];
+    let ndofs = multibody.ndofs();
+    let mut negative = Vec::new();
+    for dof in 0..ndofs {
+        let mut unit = DVector::zeros(ndofs);
+        unit[dof] = 1.0;
+        multibody.inv_augmented_mass().solve_mut(&mut unit);
+        if !(unit[dof] > 0.0) {
+            negative.push((dof, unit[dof]));
+        }
+    }
+    assert!(
+        negative.is_empty(),
+        "the inverse mass matrix read degrees of freedom without a positive inertia: {negative:?}"
+    );
+}
+
 /// A heavy box with a forearm hinged to its end, dropped forearm first onto fixed ground fast
 /// enough that the continuous-collision pass stops the box's body at its moment of impact, ends
 /// every step with the forearm's body where the multibody holds it on the box's body: the turn

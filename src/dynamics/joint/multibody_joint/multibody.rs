@@ -31,6 +31,49 @@ use crate::prelude::{GenericJoint, RigidBody};
 /// a substep was flung off its anchor's body.
 const ENERGY_HOLD_MARGIN: Real = 1.0e-3;
 
+/// The factorization of a multibody's mass matrix, held in `f64` whatever precision the rest of
+/// the solver works in.
+///
+/// A multibody's mass matrix spans the inertia of everything its joints move: a light link
+/// turning about its own long axis and a heavy load swinging at the end of a long chain differ by
+/// eight orders of magnitude or more (a 4 kg capsule 0.07 m wide spins against 0.01 kg·m², a
+/// 500 kg ball 7 m down a chain swings against 10⁵), which is past the seven digits an `f32`
+/// holds. Assembled and factored in `f32`, the smallest of those inertias came out of the
+/// rounding with the wrong sign, and a contact solved through the factorization moved the
+/// multibody with a negative effective mass: each impulse pushed further into the contact it was
+/// meant to stop and a chain resting on a body was flung. The matrix is assembled from the
+/// solver's own values (whose rounding moves the large inertias only), and factored and solved
+/// in `f64`.
+#[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]
+#[derive(Clone, Debug)]
+pub struct MultibodyMassFactorization(LU<f64, Dyn, Dyn>);
+
+impl MultibodyMassFactorization {
+    fn new(mass: DMatrix<f64>) -> Self {
+        Self(LU::new(mass))
+    }
+
+    /// Solves `M x = b` in place for each column of `b`, where `M` is the factored matrix.
+    /// Returns `false` if the matrix is singular, leaving `b` as the factorization left it.
+    pub fn solve_mut<R: na::Dim, C: na::Dim, S: StorageMut<Real, R, C>>(
+        &self,
+        b: &mut na::Matrix<Real, R, C, S>,
+    ) -> bool {
+        let mut solved = true;
+        let mut wide = na::DVector::<f64>::zeros(b.nrows());
+        for mut column in b.column_iter_mut() {
+            for (w, x) in wide.iter_mut().zip(column.iter()) {
+                *w = *x as f64;
+            }
+            solved &= self.0.solve_mut(&mut wide);
+            for (x, w) in column.iter_mut().zip(wide.iter()) {
+                *x = *w as Real;
+            }
+        }
+        solved
+    }
+}
+
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default)]
 struct Force {
@@ -119,14 +162,14 @@ pub struct Multibody {
     //       freedoms only. The `Self::augmented_mass_permutation` sequence can be used to
     //       move dofs from/to a format that matches the augmented mass.
     // TODO: use sparse matrices?
-    augmented_mass: DMatrix<Real>,
-    inv_augmented_mass: LU<Real, Dyn, Dyn>,
+    augmented_mass: DMatrix<f64>,
+    inv_augmented_mass: MultibodyMassFactorization,
     // The indexing sequence for moving all kinematics degrees of
     // freedoms to the end of the generalized coordinates vector.
     augmented_mass_indices: IndexSequence,
 
-    acc_augmented_mass: DMatrix<Real>,
-    acc_inv_augmented_mass: LU<Real, Dyn, Dyn>,
+    acc_augmented_mass: DMatrix<f64>,
+    acc_inv_augmented_mass: MultibodyMassFactorization,
 
     ndofs: usize,
     pub(crate) root_is_dynamic: bool,
@@ -167,9 +210,9 @@ impl Multibody {
             accelerations: DVector::zeros(0),
             body_jacobians: Vec::new(),
             augmented_mass: DMatrix::zeros(0, 0),
-            inv_augmented_mass: LU::new(DMatrix::zeros(0, 0)),
+            inv_augmented_mass: MultibodyMassFactorization::new(DMatrix::zeros(0, 0)),
             acc_augmented_mass: DMatrix::zeros(0, 0),
-            acc_inv_augmented_mass: LU::new(DMatrix::zeros(0, 0)),
+            acc_inv_augmented_mass: MultibodyMassFactorization::new(DMatrix::zeros(0, 0)),
             augmented_mass_indices: IndexSequence::new(),
             ndofs: 0,
             solver_id: 0,
@@ -372,8 +415,9 @@ impl Multibody {
         self.self_contacts_enabled = enabled;
     }
 
-    /// The inverse augmented mass matrix of this multibody.
-    pub fn inv_augmented_mass(&self) -> &LU<Real, Dyn, Dyn> {
+    /// The inverse augmented mass matrix of this multibody, factored in `f64`
+    /// (see [`MultibodyMassFactorization`]).
+    pub fn inv_augmented_mass(&self) -> &MultibodyMassFactorization {
         &self.inv_augmented_mass
     }
 
@@ -757,14 +801,16 @@ impl Multibody {
         self.augmented_mass_indices.rearrange_rows(&mut f_pos, true);
 
         let m = self.augmented_mass.view((0, 0), (eff_dim, eff_dim));
-        let v = v.rows(0, eff_dim);
-        let f = f.rows(0, eff_dim);
-        let f_pos = f_pos.rows(0, eff_dim);
+        let wide = |x: &DVector| x.rows(0, eff_dim).map(|x| x as f64);
+        let v = wide(&v);
+        let f = wide(&f);
+        let f_pos = wide(&f_pos);
+        let dt = dt as f64;
 
         let energy_delta_minus_work = |accelerations: &DVector| -> Option<Real> {
             let mut a = accelerations.clone();
             self.augmented_mass_indices.rearrange_rows(&mut a, true);
-            let a = a.rows(0, eff_dim).into_owned();
+            let a = wide(&a);
             if !a.iter().all(|x| x.is_finite()) {
                 return None;
             }
@@ -773,9 +819,9 @@ impl Multibody {
             let work = dt * v.dot(&f) + 0.5 * dt * dt * a.dot(&f_pos);
             // Margin: a small fraction of the current kinetic energy to absorb
             // discretization error on healthy steps.
-            let kinetic_energy = 0.5 * v.dot(&(m * v));
+            let kinetic_energy = 0.5 * v.dot(&(m * &v));
             let energy_margin = 1.0e-2 * kinetic_energy + 1.0e-8;
-            Some(energy_delta - work - energy_margin)
+            Some((energy_delta - work - energy_margin) as Real)
         };
 
         match energy_delta_minus_work(&self.accelerations) {
@@ -958,10 +1004,15 @@ impl Multibody {
             let rb_mass_matrix_wo_gyro = concat_rb_mass_matrix(rb_mass, rb_inertia.into());
             #[allow(clippy::useless_conversion)] // Needed in 3D, no-op in 2D
             let rb_mass_matrix = concat_rb_mass_matrix(rb_mass, augmented_inertia.into());
-            self.augmented_mass
-                .quadform(1.0, &rb_mass_matrix_wo_gyro, body_jacobian, 1.0);
+            let body_jacobian = body_jacobian.map(|x| x as f64);
+            self.augmented_mass.quadform(
+                1.0,
+                &rb_mass_matrix_wo_gyro.map(|x| x as f64),
+                &body_jacobian,
+                1.0,
+            );
             self.acc_augmented_mass
-                .quadform(1.0, &rb_mass_matrix, body_jacobian, 1.0);
+                .quadform(1.0, &rb_mass_matrix.map(|x| x as f64), &body_jacobian, 1.0);
 
             /*
              *
@@ -1088,8 +1139,12 @@ impl Multibody {
                 i_coriolis_dt_w.gemm(dt, &mat_to_na(rb_inertia), coriolis_w, 0.0);
             }
 
-            self.acc_augmented_mass
-                .gemm_tr(1.0, rb_j, &self.i_coriolis_dt, 1.0);
+            self.acc_augmented_mass.gemm_tr(
+                1.0,
+                &rb_j.map(|x| x as f64),
+                &self.i_coriolis_dt.map(|x| x as f64),
+                1.0,
+            );
         }
 
         /*
@@ -1111,7 +1166,7 @@ impl Multibody {
             let gain = stiffness_dt * dt;
             for r in 0..ANG_DIM {
                 for c in 0..ANG_DIM {
-                    let v = gain * t[r] * t[c];
+                    let v = (gain * t[r] * t[c]) as f64;
                     self.acc_augmented_mass[(base + r, base + c)] += v;
                     self.augmented_mass[(base + r, base + c)] += v;
                 }
@@ -1127,7 +1182,7 @@ impl Multibody {
          * mass and geometry itself): it adds to the diagonal directly.
          */
         for i in 0..self.ndofs {
-            let diag = self.damping[i] * dt + self.armature[i];
+            let diag = (self.damping[i] * dt + self.armature[i]) as f64;
             self.acc_augmented_mass[(i, i)] += diag;
             self.augmented_mass[(i, i)] += diag;
         }
@@ -1143,7 +1198,7 @@ impl Multibody {
                 if (locked >> a) & 1 == 0 {
                     let k = self.links[li].joint.spring_stiffness[a];
                     if k != 0.0 {
-                        let d = k * dt2;
+                        let d = (k * dt2) as f64;
                         self.acc_augmented_mass[(idx, idx)] += d;
                         self.augmented_mass[(idx, idx)] += d;
                     }
@@ -1169,12 +1224,12 @@ impl Multibody {
             .rearrange_rows(&mut self.augmented_mass, true);
 
         // TODO: avoid allocation inside LU at each timestep.
-        self.acc_inv_augmented_mass = LU::new(
+        self.acc_inv_augmented_mass = MultibodyMassFactorization::new(
             self.acc_augmented_mass
                 .view((0, 0), (effective_dim, effective_dim))
                 .into_owned(),
         );
-        self.inv_augmented_mass = LU::new(
+        self.inv_augmented_mass = MultibodyMassFactorization::new(
             self.augmented_mass
                 .view((0, 0), (effective_dim, effective_dim))
                 .into_owned(),
@@ -1949,9 +2004,9 @@ impl IndexSequence {
         }
     }
 
-    fn rearrange_columns<R: na::Dim, C: na::Dim, S: StorageMut<Real, R, C>>(
+    fn rearrange_columns<T: na::Scalar + Copy + num::Zero, R: na::Dim, C: na::Dim, S: StorageMut<T, R, C>>(
         &self,
-        mat: &mut na::Matrix<Real, R, C, S>,
+        mat: &mut na::Matrix<T, R, C, S>,
         clear_removed: bool,
     ) {
         if self.first_to_remove == Self::NONE {
@@ -1967,13 +2022,13 @@ impl IndexSequence {
 
         if clear_removed {
             mat.columns_range_mut(self.start() + self.index_map.len()..)
-                .fill(0.0);
+                .fill(T::zero());
         }
     }
 
-    fn rearrange_rows<R: na::Dim, C: na::Dim, S: StorageMut<Real, R, C>>(
+    fn rearrange_rows<T: na::Scalar + Copy + num::Zero, R: na::Dim, C: na::Dim, S: StorageMut<T, R, C>>(
         &self,
-        mat: &mut na::Matrix<Real, R, C, S>,
+        mat: &mut na::Matrix<T, R, C, S>,
         clear_removed: bool,
     ) {
         if self.first_to_remove == Self::NONE {
@@ -1989,7 +2044,7 @@ impl IndexSequence {
 
             if clear_removed {
                 col.rows_range_mut(self.start() + self.index_map.len()..)
-                    .fill(0.0);
+                    .fill(T::zero());
             }
         }
     }
