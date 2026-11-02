@@ -838,6 +838,31 @@ impl Multibody {
         let mut free = self.velocities.clone();
         free.axpy(dt, &self.accelerations, 1.0);
         let energy = self.kinetic_energy_at(free.as_view(), bodies);
+        self.energy_hold_scale(energy, held, dt)
+    }
+
+    /// The factor that brings the velocity a step ends with (`velocities`, after its last
+    /// substep) down to `cap`, the larger of the kinetic energy that substep was held to and the
+    /// energy it moved with, plus the work of the position forces over `dt` and a margin; 1
+    /// while it stands within that.
+    ///
+    /// The velocity a step ends with is the one read between steps, swept by the continuous pass
+    /// and the one the next step starts from. [`Self::kinetic_energy_scale`] holds the free
+    /// velocity of a next substep, `velocities + dt · accelerations`, whose accelerations are
+    /// solved through the semi-implicit Coriolis terms of the mass matrix: for a chain whipping
+    /// under a heavy end they turn a large part of the velocity back, and the velocity itself
+    /// stood well past the energy the substep was held to. A chain of twelve 4 kg links with a
+    /// 500 kg end, its second link knocking on its anchor's box at 30 steps a second in 4
+    /// substeps, ended a step with 25.5 kJ, held to 16.2 kJ, and its end left the step 4% faster
+    /// than its fall gives it.
+    pub(crate) fn step_end_energy_scale(&self, cap: Real, dt: Real, bodies: &RigidBodySet) -> Real {
+        let energy = self.kinetic_energy_at(self.velocities.as_view(), bodies);
+        self.energy_hold_scale(energy, cap, dt)
+    }
+
+    /// The factor that brings `energy` down to `held` plus the work of the position forces over
+    /// `dt` and [`ENERGY_HOLD_MARGIN`]; 1 while it stands within that.
+    fn energy_hold_scale(&self, energy: Real, held: Real, dt: Real) -> Real {
         let forces = &self.workspace.position_forces;
         let mut response = forces.clone();
         self.augmented_mass_indices

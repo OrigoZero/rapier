@@ -197,6 +197,7 @@ impl VelocitySolver {
     ) {
         self.mark_driven_multibodies(multibodies, contacts, joints);
         self.multibody_energy_holds.clear();
+        self.multibody_moved_energies.clear();
         for (root, link) in self.multibody_roots.iter().enumerate() {
             let multibody = multibodies
                 .get_multibody_mut_internal(link.multibody)
@@ -207,6 +208,7 @@ impl VelocitySolver {
             multibody.velocities.copy_from(&solver_vels);
             let mut energy =
                 multibody.kinetic_energy_to_hold(multibody.velocities.as_view(), bodies);
+            self.multibody_moved_energies.push(energy.unwrap_or(0.0));
             if !self.multibody_driven[root] {
                 let free = self
                     .generic_free_vels
@@ -323,6 +325,9 @@ impl VelocitySolver {
     /// stabilization pass has settled the velocity it ends at: the links' velocities, the
     /// accelerations its applied forces give it, the energy hold of
     /// [`Self::integrate_multibody_positions`] and the velocity increment of the next substep.
+    /// After the last substep the velocity the step ends with is held as well
+    /// (`Multibody::step_end_energy_scale`), to the larger of the energy the substep was held
+    /// to and the energy it moved with.
     pub(super) fn update_multibody_dynamics(
         &mut self,
         params: &IntegrationParameters,
@@ -330,10 +335,11 @@ impl VelocitySolver {
         bodies: &mut RigidBodySet,
         multibodies: &mut MultibodyJointSet,
     ) {
-        for (link, energy) in self
+        for ((link, energy), moved) in self
             .multibody_roots
             .iter()
             .zip(&self.multibody_energy_holds)
+            .zip(&self.multibody_moved_energies)
         {
             if is_last_substep && energy.is_none() {
                 continue;
@@ -348,7 +354,11 @@ impl VelocitySolver {
             multibody.update_velocities(bodies);
             multibody.update_acceleration(params.dt, bodies, MultibodyForces::Applied);
             if let Some(energy) = *energy {
-                let scale = multibody.kinetic_energy_scale(energy, params.dt, bodies);
+                let mut scale = multibody.kinetic_energy_scale(energy, params.dt, bodies);
+                if is_last_substep {
+                    let cap = energy.max(*moved);
+                    scale = scale.min(multibody.step_end_energy_scale(cap, params.dt, bodies));
+                }
                 if scale < 1.0 {
                     multibody.velocities *= scale;
                     multibody.accelerations *= scale;
