@@ -799,7 +799,7 @@ pub(super) unsafe fn run_worker(ctx: &SharedCtx, worker_id: usize) {
                     let vs = unsafe { &mut *ctx.velocity_solver };
                     let bodies = unsafe { &mut *ctx.bodies };
                     let multibodies = unsafe { &mut *ctx.multibodies };
-                    vs.integrate_multibody_positions(params, is_last_substep, bodies, multibodies);
+                    vs.integrate_multibody_positions(params, bodies, multibodies);
                     sync.complete(stage, 1, num_group_bodies + 1);
                 }
                 stage = sync.sync(stage, num_group_bodies + 1);
