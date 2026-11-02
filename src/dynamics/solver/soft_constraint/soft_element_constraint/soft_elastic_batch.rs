@@ -204,6 +204,8 @@ pub(crate) struct SoftElasticBatch {
     /// of strain-row impulse: what the lanes' plastic flow reads.
     plastic_yield: SimdReal,
     strain_per_impulse: [SimdReal; STRAIN_ROWS],
+    /// Whether a lane holds a cell that flows: a batch with none of them skips the flow entirely.
+    pub plastic: bool,
     /// Whether a substep of this step has been solved: the next update flows the lanes' plastic
     /// cells over it first.
     pub flow_pending: bool,
@@ -317,6 +319,7 @@ impl SoftElasticBatch {
         let quaternion = [next(), next(), next(), next()];
         let vol_impulse = next();
         let plastic_yield = next();
+        let plastic = plastic_yield.simd_gt(splat(0.0)).any();
         let strain_per_impulse: [SimdReal; STRAIN_ROWS] = core::array::from_fn(|_| next());
         let zero = splat(0.0);
         let zero3 = [zero; 3];
@@ -349,6 +352,7 @@ impl SoftElasticBatch {
             vol_impulse,
             plastic_yield,
             strain_per_impulse,
+            plastic,
             flow_pending: false,
         }
     }

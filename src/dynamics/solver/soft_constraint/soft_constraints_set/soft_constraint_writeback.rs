@@ -37,10 +37,15 @@ impl SoftConstraintsSet {
                 let sb = unsafe { &mut *awake.ptr };
                 let impulse = crate::utils::canonicalize_zero(constraint.impulse);
                 // The last substep's creep, at the positions it ended at.
-                let mut flowed = *constraint;
-                if constraint.creep_yield > 0.0 {
-                    flowed.creep_at(bodies, sb, awake.substep_dt);
-                }
+                let crept;
+                let flowed = if constraint.creep_yield > 0.0 {
+                    let mut c = *constraint;
+                    c.creep_at(bodies, sb, awake.substep_dt);
+                    crept = c;
+                    &crept
+                } else {
+                    constraint
+                };
                 match constraint.writeback {
                     SoftScalarConstraintWriteback::Edge => {
                         let ei = constraint.element as usize;
@@ -116,8 +121,8 @@ impl SoftConstraintsSet {
                 let awake = &self.awake[constraint.soft_body as usize];
                 let sb = unsafe { &mut *awake.ptr };
                 // The last substep's flow, at the positions it ended at.
-                let mut flowed = *constraint;
-                if constraint.flow.is_some() {
+                let flowed = constraint.flow.is_some().then(|| {
+                    let mut flowed = *constraint;
                     if let Some(flow) = flow_elastic_cell(
                         &mut flowed,
                         sb,
@@ -133,19 +138,14 @@ impl SoftConstraintsSet {
                     ) {
                         strain_impulse *= 1.0 - flow.share;
                     }
-                }
+                    flowed
+                });
                 let material = *sb.element_material(sb.cells[constraint.element as usize].material);
                 let resistance = if material.tear_strain.is_some() {
                     let c = &sb.cells[constraint.element as usize];
                     sb.effective_tear_resistance(c.tear_resistance, &c.vertices)
                 } else {
                     1.0
-                };
-                let rest0: [Vector; DIM + 1] = {
-                    let vertices = sb.cells[constraint.element as usize].vertices;
-                    core::array::from_fn(|k| {
-                        sb.particles[vertices[k] as usize].initial_rest_position
-                    })
                 };
                 let cell = &mut sb.cells[constraint.element as usize];
                 let impulses = (strain_impulse.iter()).chain(core::iter::once(&end.vol_impulse));
@@ -163,11 +163,14 @@ impl SoftConstraintsSet {
                     .tear_strain
                     .is_some()
                     .then(|| total_tensile_strain(&end.strain, &read_against));
-                if let Some(flow) = flowed.flow {
+                if let Some((flowed, flow)) = flowed.as_ref().and_then(|c| Some((c, c.flow?))) {
                     if stretch_moved(&cell.plastic_stretch, &flow.plastic_stretch) {
                         awake.plastic_flow.store(true, Ordering::Relaxed);
                     }
                     if flow.plastic_stretch != cell.plastic_stretch {
+                        let rest0: [Vector; DIM + 1] = core::array::from_fn(|k| {
+                            sb.particles[cell.vertices[k] as usize].initial_rest_position
+                        });
                         let dm = flow.plastic_stretch
                             * crate::dynamics::SoftBody::cell_edge_matrix(rest0);
                         let factorial = if DIM == 2 { 2.0 } else { 6.0 };

@@ -328,7 +328,7 @@ impl SoftConstraintsSet {
                 let past_yield = if batch.flow_pending {
                     batch.lanes_past_yield()
                 } else {
-                    batch.flow_pending = true;
+                    batch.flow_pending = batch.plastic;
                     crate::math::SimdBool::splat(false)
                 };
                 if past_yield.any() {
