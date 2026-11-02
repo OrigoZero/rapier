@@ -934,6 +934,7 @@ pub(super) unsafe fn run_worker(ctx: &SharedCtx, worker_id: usize) {
                 if ctx.groups.len() == 1 {
                     let contacts = unsafe { &mut *ctx.contact_constraints };
                     let vs = unsafe { &mut *ctx.velocity_solver };
+                    let multibodies = unsafe { &*ctx.multibodies };
                     for (builder, c) in contacts
                         .generic_velocity_constraints_builder
                         .iter()
@@ -941,7 +942,8 @@ pub(super) unsafe fn run_worker(ctx: &SharedCtx, worker_id: usize) {
                     {
                         builder.apply_restitution(
                             c,
-                            &contacts.generic_jacobians,
+                            multibodies,
+                            &mut contacts.generic_jacobians,
                             &mut vs.solver_bodies,
                             &mut vs.generic_solver_vels,
                         );
