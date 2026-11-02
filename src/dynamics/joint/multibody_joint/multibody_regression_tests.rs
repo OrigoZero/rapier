@@ -1789,23 +1789,26 @@ fn chain_by_its_anchor(
 
 /// A chain of light links with a heavy ball on the end, whose second link slides on its fixed
 /// anchor's body as it swings, swings as the same chain clear of that body does: no more than a
-/// tenth faster, and never a quarter metre above where it was released. Friction is solved in
-/// the stabilization pass that ends each substep, and the Coriolis forces of the next substep
-/// were read from the velocity the substep moved with, before that pass: they did work on the
-/// velocity the chain carried on, each substep, and at 60 steps a second in 4 substeps the ball
-/// was flung at 1000 m/s and rose 8 m above its release.
+/// tenth faster, and never a quarter metre above where it was released, at 30 and 60 steps a
+/// second in 2 and 4 substeps and at 60 in 8. The link sliding on the box whips the light links
+/// below it against one another. A move that turned them read, at the configuration it reached,
+/// several times the kinetic energy the chain moved with until the Coriolis forces of the next
+/// substep took it back; the stabilization pass solved the contact at that velocity in between,
+/// and the chain gained energy at every swing: released at 85 degrees at 60 steps in 4 substeps
+/// it rose 0.32 m above its release, and released at 70 degrees at 30 steps in 4 its ball
+/// reached 37 m/s where the free chain's reached 12.5.
 #[test]
 #[cfg(feature = "dim3")]
 fn a_chain_sliding_on_its_anchors_body_swings_as_the_free_chain_does() {
     let mut failed = Vec::new();
     for angle in [40.0, 55.0, 70.0, 85.0] {
-        for substeps in [4, 8] {
-            let free = chain_by_its_anchor(angle, 60.0, substeps, false, 0.0);
-            let swing = chain_by_its_anchor(angle, 60.0, substeps, true, 0.0);
+        for (rate, substeps) in [(30.0, 2), (30.0, 4), (60.0, 2), (60.0, 4), (60.0, 8)] {
+            let free = chain_by_its_anchor(angle, rate, substeps, false, 0.0);
+            let swing = chain_by_its_anchor(angle, rate, substeps, true, 0.0);
             let finite = swing.not_finite_at.is_none() && free.not_finite_at.is_none();
             if !finite || swing.fastest > free.fastest * 1.1 || swing.rose > 0.25 {
                 failed.push(alloc::format!(
-                    "{angle}°, {substeps} substeps: not finite at {:?}, fastest {} m/s (free {} m/s), rose {} m",
+                    "{angle}°, {rate} Hz x {substeps}: not finite at {:?}, fastest {} m/s (free {} m/s), rose {} m",
                     swing.not_finite_at,
                     swing.fastest,
                     free.fastest,
@@ -2403,3 +2406,37 @@ fn a_multibody_link_sliding_into_a_thin_wall_stops_in_front_of_it() {
     }
 }
 
+/// The chain of [`chain_by_its_anchor`] clear of its anchor's body, released at 55, 70 and 85
+/// degrees, swings its ball no faster than its fall gives it, to within a twentieth, and never
+/// lifts it a tenth of a metre above where it was let go, at 30 steps a second in 2 and 4
+/// substeps and at 60 in 2. A chain of light links under a heavy ball whips its links against
+/// one another at tens of radians a second as it swings, which a 30 Hz substep moves through
+/// a few tenths of a radian: the ball reached 16.4 m/s from 70 degrees at 30 steps in 2
+/// substeps, where its fall gives it 9.6, and at 60 in 2 from 85 degrees it rose 1.4 m above its
+/// release.
+#[test]
+#[cfg(feature = "dim3")]
+fn a_free_chain_under_a_heavy_ball_swings_no_faster_nor_higher_than_its_fall() {
+    let mut failed = Vec::new();
+    for angle in [55.0, 70.0, 85.0] {
+        for (rate, substeps) in [(30.0, 2), (30.0, 4), (60.0, 2)] {
+            let swing = chain_by_its_anchor(angle, rate, substeps, false, 0.0);
+            if swing.not_finite_at.is_some()
+                || swing.fastest > swing.fall_speed * 1.05
+                || swing.rose > 0.1
+            {
+                failed.push(alloc::format!(
+                    "{angle}°, {rate} Hz x {substeps}: not finite at {:?}, fastest {} m/s (its fall {} m/s), rose {} m",
+                    swing.not_finite_at,
+                    swing.fastest,
+                    swing.fall_speed,
+                    swing.rose
+                ));
+            }
+        }
+    }
+    assert!(
+        failed.is_empty(),
+        "the free chain swung faster or higher than its fall: {failed:?}"
+    );
+}

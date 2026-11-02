@@ -24,6 +24,52 @@ use super::{
     CHUNK_BATCH, ChunkSegment, GroupLayout, LAYOUT_REF_WORKERS, SharedCtx, StagedIslandSolver,
 };
 
+/// The most a joint of a multibody turns its link in one substep, in radians, as the substep
+/// count of an island holding multibodies is chosen ([`multibody_substeps`]).
+///
+/// A substep moves each joint at a fixed velocity in its parent's frame and lets the Coriolis
+/// and centrifugal forces turn that velocity for the configuration reached, which holds to first
+/// order in the turn of the substep. A chain of light links under a heavy load whips its links
+/// against one another at tens of radians a second as it swings: at a few tenths of a radian a
+/// substep the second-order part of each move stood the chain at several times the kinetic
+/// energy it moved with, a free chain released at 70 degrees at 30 steps a second swung its 500
+/// kg end at 18 m/s where its fall gives 9.6, and the joint limits of a ragdoll landing on stairs,
+/// each row linearised where its substep began, let a joint go 14 degrees past its stop.
+const MAX_MULTIBODY_JOINT_TURN: Real = 0.1;
+
+/// The most substeps an island holding multibodies is stepped in, as a multiple of the
+/// substeps it is set to ([`multibody_substeps`]).
+const MAX_MULTIBODY_SUBSTEP_FACTOR: usize = 4;
+
+/// The substeps an island holding multibodies is stepped in: the `substeps` it is set to, or as
+/// many more as keep every joint of its multibodies turning at most [`MAX_MULTIBODY_JOINT_TURN`]
+/// in a substep at the velocities they start the step with, up to
+/// [`MAX_MULTIBODY_SUBSTEP_FACTOR`] times its base substeps.
+fn multibody_substeps(
+    substeps: usize,
+    base_params: &IntegrationParameters,
+    island_bodies: &[crate::dynamics::RigidBodyHandle],
+    multibodies: &MultibodyJointSet,
+) -> usize {
+    let mut fastest: Real = 0.0;
+    for handle in island_bodies {
+        let Some(link) = multibodies.rigid_body_link(*handle) else {
+            continue;
+        };
+        let multibody = &multibodies[link.multibody];
+        if link.id == 0 || link.id == 1 && !multibody.root_is_dynamic {
+            fastest = fastest.max(multibody.fastest_joint_turn());
+        }
+    }
+    let needed = (fastest * base_params.dt / MAX_MULTIBODY_JOINT_TURN).ceil();
+    let most = (base_params.num_solver_iterations * MAX_MULTIBODY_SUBSTEP_FACTOR).max(substeps);
+    if needed.is_finite() && needed > substeps as Real {
+        (needed as usize).min(most)
+    } else {
+        substeps
+    }
+}
+
 impl StagedIslandSolver {
     #[profiling::function]
     #[allow(clippy::too_many_arguments)]
@@ -95,7 +141,12 @@ impl StagedIslandSolver {
                 });
             }
         } else {
-            let num_substeps = base_params.num_solver_iterations + max_extra;
+            let num_substeps = multibody_substeps(
+                base_params.num_solver_iterations + max_extra,
+                base_params,
+                island_bodies,
+                multibodies,
+            );
             let num_pgs_iterations = base_params.num_internal_pgs_iterations + max_extra_pgs;
             self.groups.push(GroupLayout {
                 bodies: 0..island_bodies.len(),
@@ -112,13 +163,11 @@ impl StagedIslandSolver {
                 dt: base_params.dt / num_substeps as Real,
             });
         }
-        let num_solver_iterations = base_params.num_solver_iterations + max_extra;
-
         // `params` keeps the FIRST group's substep dt (multibody precompute uses it; multibody
         // scenes are always single-group). The worker loop re-derives each group's dt from
         // `GroupLayout`.
         let mut params = *base_params;
-        params.dt /= num_solver_iterations as Real;
+        params.dt /= self.groups[0].num_substeps as Real;
 
         /*
          * Serial pre-phase: soft-body rows and particle slots, solver buffers & multibodies,

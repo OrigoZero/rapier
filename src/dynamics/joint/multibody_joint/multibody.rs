@@ -752,6 +752,25 @@ impl Multibody {
         }
     }
 
+    /// The fastest any joint of the multibody turns its link about the link it hangs from, in
+    /// radians per second, read from the joints' velocities: the angular velocity of each link
+    /// relative to its parent. The root's own turning moves the multibody as a whole and is not
+    /// read.
+    pub(crate) fn fastest_joint_turn(&self) -> Real {
+        let mut fastest: Real = 0.0;
+        for link in self.links.iter().skip(1) {
+            let velocity = link
+                .joint
+                .jacobian_mul_coordinates(&self.velocities.as_slice()[link.assembly_id..]);
+            #[cfg(feature = "dim2")]
+            let turn = velocity.angvel.abs();
+            #[cfg(feature = "dim3")]
+            let turn = velocity.angvel.length();
+            fastest = fastest.max(turn);
+        }
+        fastest
+    }
+
     /// The kinetic energy of the links at the generalized `velocities`, at the configuration the
     /// body jacobians and the links' mass properties stand at.
     fn kinetic_energy_at(&self, velocities: &DVector, bodies: &RigidBodySet) -> Real {
