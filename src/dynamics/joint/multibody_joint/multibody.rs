@@ -22,14 +22,13 @@ use simba::simd::SimdComplexField as _;
 #[cfg(doc)]
 use crate::prelude::{GenericJoint, RigidBody};
 
-/// The step of its fastest coordinate over a substep (radians for an angle) from which a
-/// multibody's energy across the substep is read and held. Below it, what a substep's move and
-/// Coriolis update add to the kinetic energy of a chain turning freely stays within a few tenths
-/// of a percent, less the smaller the turn, and a limit stopping a joint stops it where it would
-/// with nothing read.
-const ENERGY_HOLD_MIN_TURN: Real = 0.08;
 /// The fraction of its kinetic energy a multibody may gain over a substep past what the forces
-/// on it did, for the rounding and the drift of a healthy substep.
+/// on it did, for the rounding and the drift of a healthy substep. Every substep is held to it,
+/// however far it turns the multibody's coordinates: a chain whose fastest joint turns a few
+/// hundredths of a radian a substep can still gain a percent of its energy each substep, when a
+/// link pressed against a body spins about its own length and the joints below it turn back
+/// against it, through the Coriolis update of those joints, and a chain held only from 0.08 rad
+/// a substep was flung off its anchor's body.
 const ENERGY_HOLD_MARGIN: Real = 1.0e-3;
 
 #[repr(C)]
@@ -694,10 +693,10 @@ impl Multibody {
 
     /// The kinetic energy the links move through this substep with, at the configuration the
     /// substep starts from, for [`Self::kinetic_energy_scale`] to hold the substep to: `None`
-    /// while the multibody turns too slowly for its discrete energy to drift, or while a
-    /// prescribed motion, which does work no generalized force states, drives it.
-    pub(crate) fn kinetic_energy_to_hold(&self, dt: Real, bodies: &RigidBodySet) -> Option<Real> {
-        if self.ndofs == 0 || dt * self.velocities.amax() < ENERGY_HOLD_MIN_TURN {
+    /// for a multibody with no degree of freedom, or while a prescribed motion, which does work
+    /// no generalized force states, drives it.
+    pub(crate) fn kinetic_energy_to_hold(&self, bodies: &RigidBodySet) -> Option<Real> {
+        if self.ndofs == 0 {
             return None;
         }
         let prescribed = (0..self.links.len()).any(|i| {
@@ -715,8 +714,9 @@ impl Multibody {
     ///
     /// A step moves the links at a fixed generalized velocity and then lets the Coriolis
     /// accelerations turn that velocity for the configuration it reached. Both are first order
-    /// in the rotation of a substep, so at a few tenths of a radian a substep they no longer cancel
-    /// and every substep leaves the chain with more energy than the last. This reads the balance
+    /// in the rotation of a substep, so they cancel only so far: at a few tenths of a radian a
+    /// substep, or at a few hundredths for the joints below a link spinning about its own length,
+    /// every substep leaves the chain with more energy than the last. This reads the balance
     /// across the whole of a substep, the move included: `free_velocity_energy_guard` reads the
     /// velocity update alone, at one configuration.
     pub(crate) fn kinetic_energy_scale(&self, held: Real, dt: Real, bodies: &RigidBodySet) -> Real {

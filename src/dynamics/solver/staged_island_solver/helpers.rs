@@ -170,7 +170,7 @@ impl VelocitySolver {
                 .generic_solver_vels
                 .rows(multibody.solver_id as usize, multibody.ndofs());
             multibody.velocities.copy_from(&solver_vels);
-            let energy = multibody.kinetic_energy_to_hold(params.dt, bodies);
+            let energy = multibody.kinetic_energy_to_hold(bodies);
             let refresh = !is_last_substep || energy.is_some();
             multibody.integrate(params.dt);
             multibody.forward_kinematics(bodies, false);
