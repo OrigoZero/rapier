@@ -811,7 +811,14 @@ pub(super) unsafe fn run_worker(ctx: &SharedCtx, worker_id: usize) {
                     } else {
                         (&[][..], &[][..])
                     };
-                    vs.integrate_multibody_positions(params, bodies, multibodies, contacts, joints);
+                    vs.integrate_multibody_positions(
+                        params,
+                        substep_id == 0,
+                        bodies,
+                        multibodies,
+                        contacts,
+                        joints,
+                    );
                     sync.complete(stage, 1, num_group_bodies + 1);
                 }
                 stage = sync.sync(stage, num_group_bodies + 1);

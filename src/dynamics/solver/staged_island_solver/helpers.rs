@@ -14,6 +14,7 @@ use crate::dynamics::solver::manifold_store::ManifoldStore;
 use crate::dynamics::solver::solver_contact_graph::SolverContactGraph;
 #[cfg(feature = "dim3")]
 use crate::dynamics::solver::velocity_solver::GyroParams;
+use crate::dynamics::solver::velocity_solver::MultibodyLedger;
 use crate::dynamics::{
     IntegrationParameters, Multibody, MultibodyForces, MultibodyJointSet, RigidBodyHandle,
     RigidBodySet,
@@ -139,10 +140,13 @@ impl VelocitySolver {
         self.generic_solver_vels_increment = DVector::zeros(multibody_solver_id as usize);
         self.generic_solver_vels = DVector::zeros(multibody_solver_id as usize);
 
+        self.multibody_opening_standings.clear();
         for link in &self.multibody_roots {
             let multibody = multibodies
                 .get_multibody_mut_internal(link.multibody)
                 .unwrap();
+            let opening = multibody.opening_standing();
+            self.multibody_opening_standings.push(opening);
             multibody.update_velocities(bodies);
             multibody.update_mass_matrix(params.dt, bodies);
             multibody.update_acceleration(params.dt, bodies, MultibodyForces::Applied);
@@ -162,11 +166,13 @@ impl VelocitySolver {
     /// The multibody part of `integrate_positions`, used by the staged solver (regular solver
     /// bodies are integrated in parallel by the workers): each multibody moves through the
     /// substep at the velocity its biased solve left, and its inertial forces then turn that
-    /// velocity for the configuration the move reached. The kinetic energy the substep is held
-    /// to, when its energy is held, is kept for [`Self::update_multibody_dynamics`]: the energy
-    /// it moves with, or, for a multibody no row of the substep ties to something that moves or
-    /// drives it ([`Self::mark_driven_multibodies`]), the energy it started the substep with
-    /// before any row was solved if that is less.
+    /// velocity for the configuration the move reached. When its energy is held, the energy it
+    /// stands at before the move ([`Multibody::kicked_kinetic_energy`]), the poses its links
+    /// move from and the kinetic energy the turn leaves are kept in `multibody_ledgers` for
+    /// [`Self::update_multibody_dynamics`]: the energy it stands at with the velocity it moves
+    /// with, or, for a multibody no row of the substep ties to something that moves or drives it
+    /// ([`Self::mark_driven_multibodies`]), with the velocity it started the substep with before
+    /// any row was solved if that is less.
     ///
     /// The rows that hold a multibody against fixed bodies and bodies at rest, and its own
     /// joints' limits, give it no energy, but their biased pass pushes it out of what it sank
@@ -192,14 +198,15 @@ impl VelocitySolver {
     pub(super) fn integrate_multibody_positions(
         &mut self,
         params: &IntegrationParameters,
+        first_substep: bool,
         bodies: &mut RigidBodySet,
         multibodies: &mut MultibodyJointSet,
         contacts: &[GenericContactConstraint],
         joints: &[GenericJointConstraint],
     ) {
         self.mark_driven_multibodies(multibodies, contacts, joints);
-        self.multibody_energy_holds.clear();
-        self.multibody_moved_energies.clear();
+        self.multibody_ledgers.clear();
+        self.multibody_ledger_poses.clear();
         for (root, link) in self.multibody_roots.iter().enumerate() {
             let multibody = multibodies
                 .get_multibody_mut_internal(link.multibody)
@@ -208,18 +215,39 @@ impl VelocitySolver {
                 .generic_solver_vels
                 .rows(multibody.solver_id as usize, multibody.ndofs());
             multibody.velocities.copy_from(&solver_vels);
-            let mut energy =
-                multibody.kinetic_energy_to_hold(multibody.velocities.as_view(), bodies);
-            self.multibody_moved_energies.push(energy.unwrap_or(0.0));
-            if !self.multibody_driven[root] {
+            let driven = self.multibody_driven[root];
+            let solved = self
+                .generic_free_vels
+                .rows(multibody.solver_id as usize, multibody.ndofs())
+                != multibody.velocities;
+            let moved = multibody.kinetic_energy_to_hold(multibody.velocities.as_view(), bodies);
+            let mut held = moved;
+            let opening =
+                self.multibody_opening_standings[root].filter(|_| first_substep && !solved);
+            let mut standing = opening.or_else(|| {
+                multibody.kicked_kinetic_energy(
+                    multibody.velocities.as_view(),
+                    -0.5 * params.dt,
+                    bodies,
+                )
+            });
+            if !driven {
                 let free = self
                     .generic_free_vels
                     .rows(multibody.solver_id as usize, multibody.ndofs());
-                if let (Some(e), Some(f)) = (energy, multibody.kinetic_energy_to_hold(free, bodies))
-                {
-                    energy = Some(e.min(f));
+                if let (Some(m), Some(f)) = (held, multibody.kinetic_energy_to_hold(free, bodies)) {
+                    held = Some(m.min(f));
+                }
+                if let (None, Some(s), Some(f)) = (
+                    opening,
+                    standing,
+                    multibody.kicked_kinetic_energy(free, -0.5 * params.dt, bodies),
+                ) {
+                    standing = Some(s.min(f));
                 }
             }
+            let poses_start = self.multibody_ledger_poses.len();
+            multibody.record_poses(bodies, &mut self.multibody_ledger_poses);
             multibody.integrate(params.dt);
             multibody.forward_kinematics(bodies, false);
             multibody.update_rigid_bodies_internal(bodies, true, true, false);
@@ -236,7 +264,18 @@ impl VelocitySolver {
                 .rows_mut(multibody.solver_id as usize, multibody.ndofs())
                 .copy_from(&multibody.velocities);
             multibody.update_velocities(bodies);
-            self.multibody_energy_holds.push(energy);
+            let ledger = standing.map(|standing| MultibodyLedger {
+                standing,
+                held: held.unwrap_or(0.0),
+                moved: moved.unwrap_or(0.0),
+                poses: poses_start..self.multibody_ledger_poses.len(),
+                sprung: multibody.has_joint_springs(),
+                turned: multibody
+                    .kinetic_energy_to_hold(multibody.velocities.as_view(), bodies)
+                    .unwrap_or(0.0),
+                solved,
+            });
+            self.multibody_ledgers.push(ledger);
         }
     }
 
@@ -335,11 +374,22 @@ impl VelocitySolver {
 
     /// The dynamics each multibody starts the next substep with, read once the substep's
     /// stabilization pass has settled the velocity it ends at: the links' velocities, the
-    /// accelerations its applied forces give it, the energy hold of
-    /// [`Self::integrate_multibody_positions`] and the velocity increment of the next substep.
-    /// After the last substep the velocity the step ends with is held as well
-    /// (`Multibody::step_end_energy_scale`), to the larger of the energy the substep was held
-    /// to and the energy it moved with.
+    /// accelerations its applied forces give it and the velocity increment of the next substep.
+    ///
+    /// A multibody whose energy is held, with no joint spring and on which no row bore over the
+    /// substep, stands,
+    /// once half of the next kick is applied, at the energy it stood at before its move
+    /// (`MultibodyLedger::standing`) plus the work the forces on it did over the move
+    /// ([`Multibody::work_since`]) less what its joints' damping takes: the velocity it ends at
+    /// is scaled to that ([`Multibody::energy_ledger_scale`]), down or up; after the last
+    /// substep the energy it stands at is kept for the next step, which opens there, and the
+    /// velocity the step ends with is held to it ([`Multibody::end_step_standing`]). A multibody
+    /// rows bore on, or with a joint spring ([`Multibody::has_joint_springs`]), is held from
+    /// above, its free velocity to the energy it moved with plus the
+    /// work of its forces (`Multibody::kinetic_energy_scale`), and after the last substep the
+    /// velocity the step ends with as well (`Multibody::step_end_energy_scale`), to the larger of
+    /// that energy and the energy it moved with: the rows' biased pass and the bounce that
+    /// follows the step push it, and give it no energy.
     pub(super) fn update_multibody_dynamics(
         &mut self,
         params: &IntegrationParameters,
@@ -347,13 +397,8 @@ impl VelocitySolver {
         bodies: &mut RigidBodySet,
         multibodies: &mut MultibodyJointSet,
     ) {
-        for ((link, energy), moved) in self
-            .multibody_roots
-            .iter()
-            .zip(&self.multibody_energy_holds)
-            .zip(&self.multibody_moved_energies)
-        {
-            if is_last_substep && energy.is_none() {
+        for (link, ledger) in self.multibody_roots.iter().zip(&self.multibody_ledgers) {
+            if is_last_substep && ledger.is_none() {
                 continue;
             }
             let multibody = multibodies
@@ -365,19 +410,41 @@ impl VelocitySolver {
             multibody.velocities.copy_from(&solver_vels);
             multibody.update_velocities(bodies);
             multibody.update_acceleration(params.dt, bodies, MultibodyForces::Applied);
-            if let Some(energy) = *energy {
-                let mut scale = multibody.kinetic_energy_scale(energy, params.dt, bodies);
-                if is_last_substep {
-                    let cap = energy.max(*moved);
-                    scale = scale.min(multibody.step_end_energy_scale(cap, params.dt, bodies));
-                }
-                if scale < 1.0 {
+            if let Some(ledger) = ledger {
+                let ended = multibody
+                    .kinetic_energy_to_hold(multibody.velocities.as_view(), bodies)
+                    .unwrap_or(0.0);
+                let quiet = !ledger.solved && !ledger.sprung && ended == ledger.turned;
+                if !quiet {
+                    if is_last_substep {
+                        multibody.clear_step_end();
+                    }
+                    // Rows bore on it: held from above, its velocity and the next kick together.
+                    let mut scale = multibody.kinetic_energy_scale(ledger.held, params.dt, bodies);
+                    if is_last_substep {
+                        let cap = ledger.held.max(ledger.moved);
+                        scale = scale.min(multibody.step_end_energy_scale(cap, params.dt, bodies));
+                    }
+                    if scale < 1.0 {
+                        multibody.velocities *= scale;
+                        multibody.accelerations *= scale;
+                        let mut solver_vels = self
+                            .generic_solver_vels
+                            .rows_mut(multibody.solver_id as usize, multibody.ndofs());
+                        solver_vels *= scale;
+                    }
+                } else {
+                    let work = multibody
+                        .work_since(&self.multibody_ledger_poses[ledger.poses.clone()], bodies);
+                    let target = ledger.standing + work - multibody.damping_loss(params.dt, bodies);
+                    let scale = multibody.energy_ledger_scale(target, params.dt, bodies);
                     multibody.velocities *= scale;
-                    multibody.accelerations *= scale;
-                    let mut solver_vels = self
-                        .generic_solver_vels
-                        .rows_mut(multibody.solver_id as usize, multibody.ndofs());
-                    solver_vels *= scale;
+                    if is_last_substep {
+                        multibody.end_step_standing(params.dt, bodies);
+                    }
+                    self.generic_solver_vels
+                        .rows_mut(multibody.solver_id as usize, multibody.ndofs())
+                        .copy_from(&multibody.velocities);
                 }
             }
             if !is_last_substep {

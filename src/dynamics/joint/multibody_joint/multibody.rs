@@ -1,5 +1,5 @@
 use super::multibody_link::{MultibodyLink, MultibodyLinkVec};
-use super::multibody_workspace::MultibodyWorkspace;
+use super::multibody_workspace::{MultibodyStepEnd, MultibodyWorkspace};
 use crate::alloc_prelude::*;
 use crate::dynamics::integration_parameters::SpringCoefficients;
 use crate::dynamics::solver::{GenericJointConstraint, WritebackId};
@@ -23,7 +23,8 @@ use simba::simd::SimdComplexField as _;
 use crate::prelude::{GenericJoint, RigidBody};
 
 /// The fraction of its kinetic energy a multibody may gain over a substep past what the forces
-/// on it did, for the rounding and the drift of a healthy substep. Every substep is held to it,
+/// on it did, for the rounding and the drift of a healthy substep. Every substep its rows bear on
+/// is held to it (see `VelocitySolver::update_multibody_dynamics`),
 /// however far it turns the multibody's coordinates: a chain whose fastest joint turns a few
 /// hundredths of a radian a substep can still gain a percent of its energy each substep, when a
 /// link pressed against a body spins about its own length and the joints below it turn back
@@ -772,9 +773,15 @@ impl Multibody {
     }
 
     /// The kinetic energy of the links at the generalized `velocities`, at the configuration the
-    /// body jacobians and the links' mass properties stand at.
+    /// body jacobians and the links' mass properties stand at, with the energy of the joints'
+    /// armature (the rotor inertia each degree of freedom carries on the mass matrix's diagonal).
     fn kinetic_energy_at(&self, velocities: DVectorView<Real>, bodies: &RigidBodySet) -> Real {
         let mut energy = 0.0;
+        if self.armature.len() == velocities.len() {
+            for (armature, velocity) in self.armature.iter().zip(velocities.iter()) {
+                energy += *armature * *velocity * *velocity;
+            }
+        }
         for i in 0..self.links.len() {
             let rb = &bodies[self.links[i].rigid_body];
             if !rb.is_dynamic() {
@@ -816,6 +823,211 @@ impl Multibody {
             held && (rb.vels.linvel != Vector::ZERO || rb.vels.angvel != AngVector::default())
         });
         (!prescribed).then(|| self.kinetic_energy_at(velocities, bodies))
+    }
+
+    /// The kinetic energy this multibody stands at as a step begins, as the step before left it
+    /// ([`Self::end_step_standing`]): `None` when a row bore on its last substep, the continuous
+    /// pass took it back, or its velocity or configuration changed between the two steps.
+    pub(crate) fn opening_standing(&self) -> Option<Real> {
+        let step_end = self.workspace.step_end.as_ref()?;
+        (self.ndofs > 0
+            && step_end.velocities == self.velocities
+            && step_end.poses.len() == self.links.len()
+            && step_end
+                .poses
+                .iter()
+                .zip(self.links.iter())
+                .all(|(pose, link)| *pose == link.local_to_world))
+        .then_some(step_end.standing)
+    }
+
+    /// Ends a step whose last substep no row bore on: records the kinetic energy the multibody
+    /// stands at, half a substep of `dt` on from the velocity it ends with
+    /// ([`Self::kicked_kinetic_energy`]), for the next step to read
+    /// ([`Self::opening_standing`]), and scales the velocity it ends with to no more energy than
+    /// it stands at allows.
+    ///
+    /// A velocity half a kick `h = dt · M⁻¹ f / 2` behind the one it stands at carries
+    /// `K(v) = K(v + h) − dt · v · f / 2 − dt² · f · M⁻¹ f / 8`. The kick a substep gives through
+    /// the semi-implicit Coriolis terms of the mass matrix turns much of a whipping chain's
+    /// velocity back: a chain of twelve 4 kg links with a 20000 kg end, its energy held where it
+    /// stood, ended a step 17% of its swing over that energy and was back the step after. The
+    /// velocity a step ends with is read between steps and swept by the continuous pass; the
+    /// next step stands the multibody at the energy recorded here, so what the factor takes
+    /// from a step's end the next step's first substep gives back.
+    pub(crate) fn end_step_standing(&mut self, dt: Real, bodies: &RigidBodySet) {
+        self.workspace.step_end = None;
+        let Some(standing) =
+            self.kicked_kinetic_energy(self.velocities.as_view(), 0.5 * dt, bodies)
+        else {
+            return;
+        };
+        let ended = self.kinetic_energy_at(self.velocities.as_view(), bodies);
+        let forces = &self.workspace.position_forces;
+        let mut response = forces.clone();
+        self.augmented_mass_indices
+            .with_rearranged_rows_mut(&mut response, |response| {
+                self.inv_augmented_mass.solve_mut(response);
+            });
+        // K(c · v) + c · dt · v · f / 2 + dt² · f · M⁻¹ f / 8 ≤ standing.
+        let moving = 0.5 * dt * self.velocities.dot(forces);
+        let kicked = 0.125 * dt * dt * response.dot(forces);
+        let scale = if ended <= 0.0 {
+            1.0
+        } else {
+            let discriminant = moving * moving - 4.0 * ended * (kicked - standing);
+            let most = if discriminant <= 0.0 {
+                -moving / (2.0 * ended)
+            } else {
+                (-moving + discriminant.simd_sqrt()) / (2.0 * ended)
+            };
+            most.clamp(0.0, 1.0)
+        };
+        self.velocities *= scale;
+        self.workspace.step_end = Some(MultibodyStepEnd {
+            standing,
+            velocities: self.velocities.clone(),
+            poses: self.links.iter().map(|link| link.local_to_world).collect(),
+        });
+    }
+
+    /// Forgets how the last step left this multibody ([`Self::opening_standing`]): a row bore on
+    /// its last substep.
+    pub(crate) fn clear_step_end(&mut self) {
+        self.workspace.step_end = None;
+    }
+
+    /// The kinetic energy of the generalized velocity `velocities + share · accelerations`, at
+    /// the configuration the body jacobians and the links' mass properties stand at; `None`
+    /// where [`Self::kinetic_energy_to_hold`] holds none.
+    ///
+    /// A substep moves a multibody at the velocity its kick left: the velocity it stood at plus
+    /// the whole of its accelerations over the substep. The velocity it stands at, between the
+    /// move that brought it here and the move that takes it on, is that velocity less half the
+    /// kick (`share = −dt / 2`), or the velocity the last move left plus half of that substep's
+    /// kick. The kinetic energy read there, with the potential of the forces, is what a
+    /// multibody's energy is held to from substep to substep, whatever their length: read at the
+    /// velocity it moves with, a body falling at a constant pull stood a share of a substep's fall
+    /// above its fall, and that share changes with the length of the substep.
+    pub(crate) fn kicked_kinetic_energy(
+        &self,
+        velocities: DVectorView<Real>,
+        share: Real,
+        bodies: &RigidBodySet,
+    ) -> Option<Real> {
+        if self.accelerations.len() != velocities.len() {
+            return self.kinetic_energy_to_hold(velocities, bodies);
+        }
+        let mut kicked = velocities.into_owned();
+        kicked.axpy(share, &self.accelerations, 1.0);
+        self.kinetic_energy_to_hold(kicked.as_view(), bodies)
+    }
+
+    /// Whether a spring pulls any of this multibody's joints. A joint spring is integrated
+    /// implicitly so a stiff one on a light link stays bounded, which takes energy from it on
+    /// purpose: its energy is held from above (see `VelocitySolver::update_multibody_dynamics`).
+    pub(crate) fn has_joint_springs(&self) -> bool {
+        self.links.iter().any(|link| {
+            let locked = link.joint.data.locked_axes.bits();
+            (0..SPATIAL_DIM)
+                .any(|axis| (locked >> axis) & 1 == 0 && link.joint.spring_stiffness[axis] != 0.0)
+        })
+    }
+
+    /// Records where each link stands, its centre of mass and its rotation, in `poses` (one
+    /// entry per link, in link order, appended): what [`Self::work_since`] reads the work of
+    /// the forces from.
+    pub(crate) fn record_poses(&self, bodies: &RigidBodySet, poses: &mut Vec<(Vector, Rotation)>) {
+        poses.extend(self.links.iter().map(|link| {
+            let rb = &bodies[link.rigid_body];
+            (rb.mprops.world_com, rb.position().rotation)
+        }));
+    }
+
+    /// The work the forces on the links did over their move from `poses` (from
+    /// [`Self::record_poses`]) to where they stand: each body's force over the path of its
+    /// centre of mass and its torque over its turn. The force on a body is held over a step, so
+    /// its work over a move is the fall of its potential, whatever path the move took.
+    pub(crate) fn work_since(&self, poses: &[(Vector, Rotation)], bodies: &RigidBodySet) -> Real {
+        let mut work = 0.0;
+        for (link, (com, rotation)) in self.links.iter().zip(poses) {
+            let rb = &bodies[link.rigid_body];
+            if !rb.is_dynamic() {
+                continue;
+            }
+            work += rb.forces.force.dot(rb.mprops.world_com - *com);
+            #[cfg(feature = "dim2")]
+            {
+                work += rb.forces.torque * (rb.position().rotation * rotation.inverse()).angle();
+            }
+            #[cfg(feature = "dim3")]
+            {
+                let turn = (rb.position().rotation * rotation.inverse()).to_scaled_axis();
+                work += rb.forces.torque.dot(turn);
+            }
+        }
+        work
+    }
+
+    /// The kinetic energy the joints' damping takes from the velocity the multibody stands at
+    /// over half a substep of `dt`: the energy of `velocities + dt · accelerations / 2` with the
+    /// damping's share of the accelerations, `M⁻¹ · (−D · velocities)`, left out, less the energy
+    /// with it. 0 for undamped joints.
+    pub(crate) fn damping_loss(&self, dt: Real, bodies: &RigidBodySet) -> Real {
+        if self.damping.iter().all(|d| *d == 0.0) {
+            return 0.0;
+        }
+        let mut damping = self.damping.component_mul(&self.velocities);
+        self.augmented_mass_indices
+            .with_rearranged_rows_mut(&mut damping, |damping| {
+                self.acc_inv_augmented_mass.solve_mut(damping);
+            });
+        let mut standing = self.velocities.clone();
+        standing.axpy(0.5 * dt, &self.accelerations, 1.0);
+        let damped = self.kinetic_energy_at(standing.as_view(), bodies);
+        standing.axpy(0.5 * dt, &damping, 1.0);
+        self.kinetic_energy_at(standing.as_view(), bodies) - damped
+    }
+
+    /// The factor `s` on the velocity a substep ends with (`velocities`, before the next kick)
+    /// that stands the multibody at the kinetic energy `target` once half of the next kick
+    /// (`accelerations`) is applied: `s ≥ 0` solves `K(s · v + dt · a / 2) = target`. Where no
+    /// factor reaches `target`, the one that comes nearest, and never more than 1.
+    ///
+    /// A move carries each joint's velocity unchanged in its parent's frame and the Coriolis
+    /// and centrifugal forces read where the move ends turn it back, through the mass matrix
+    /// they are solved with semi-implicitly: that takes energy from a substep in proportion to
+    /// how far its joints turned, and the move's straight step through the coordinates stands
+    /// the links where their forces did more or less work than the kick gave them. Both are
+    /// the integration's own and are given back here, up as well as down. Held only from above,
+    /// the energy of each substep kept every loss and none of the gain the same rounding gives
+    /// as often: a chain of twelve undamped 4 kg links with a 5000 kg end, let go 70 degrees up
+    /// with no contact, lost half its swing over ten seconds at 120 steps a second, and at 30
+    /// steps in 2 substeps lost three quarters of it after standing a sixth of it above its
+    /// release.
+    pub(crate) fn energy_ledger_scale(
+        &self,
+        target: Real,
+        dt: Real,
+        bodies: &RigidBodySet,
+    ) -> Real {
+        let moving = self.kinetic_energy_at(self.velocities.as_view(), bodies);
+        if moving <= 0.0 {
+            return 1.0;
+        }
+        let mut half_kick = self.accelerations.clone();
+        half_kick *= 0.5 * dt;
+        let kicked = self.kinetic_energy_at(half_kick.as_view(), bodies);
+        let mut both = half_kick;
+        both += &self.velocities;
+        // K(s · v + h) = s² · K(v) + s · cross + K(h).
+        let cross = self.kinetic_energy_at(both.as_view(), bodies) - moving - kicked;
+        let discriminant = cross * cross - 4.0 * moving * (kicked - target);
+        if discriminant <= 0.0 {
+            (-cross / (2.0 * moving)).clamp(0.0, 1.0)
+        } else {
+            ((-cross + discriminant.simd_sqrt()) / (2.0 * moving)).max(0.0)
+        }
     }
 
     /// The factor that brings the free velocity of this substep (`velocities + dt · accelerations`)
@@ -1757,6 +1969,8 @@ impl Multibody {
     ) {
         let ended =
             (self.ndofs > 0).then(|| self.kinetic_energy_at(self.velocities.as_view(), bodies));
+        // The configuration the last step ended at is gone.
+        self.workspace.step_end = None;
         for (link, start) in self.links.iter_mut().zip(start).skip(1) {
             link.joint.interpolate_from(*start, fraction);
         }
