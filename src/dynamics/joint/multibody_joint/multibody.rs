@@ -32,6 +32,15 @@ use crate::prelude::{GenericJoint, RigidBody};
 /// a substep was flung off its anchor's body.
 const ENERGY_HOLD_MARGIN: Real = 1.0e-3;
 
+/// The share of a multibody's kinetic energy that stands within the rounding of the energies a
+/// substep reads: a velocity, less its drift, that carries no more than this share of the energy
+/// is the rounding of the drift (see [`Multibody::energy_ledger_scale`]). A multibody falling
+/// from rest moves with its drift alone, and the energy ledger turned the rounding of its energy
+/// into a velocity hundreds of millions of times the rounding left: a box with an arm on a hinge,
+/// dropped at 30 steps a second in 2 substeps, started swinging its arm at its first substep and
+/// fell 9% short of a lone box.
+const ROUNDING_ENERGY_SHARE: Real = 1.0e-6;
+
 /// Which of the generalized forces on a multibody an acceleration update reads
 /// ([`Multibody::update_acceleration`]).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -739,6 +748,13 @@ impl Multibody {
         } else {
             DVector::zeros(0)
         };
+        let root_forces: na::DVector<f64> = if applied {
+            self.accelerations
+                .rows(0, self.free_root_translations())
+                .map(|x| x as f64)
+        } else {
+            na::DVector::zeros(0)
+        };
 
         self.augmented_mass_indices
             .with_rearranged_rows_mut(&mut self.accelerations, |accs| {
@@ -749,7 +765,42 @@ impl Multibody {
             self.free_velocity_energy_guard(dt, &gen_forces, &pos_forces);
         }
         if applied {
+            self.hold_drift_to_forces(&root_forces);
             self.workspace.position_forces = pos_forces;
+        }
+    }
+
+    /// Makes the accelerations change the linear momentum of a multibody along its root's free
+    /// translations ([`Self::translation_momentum`]) by `forces`, the generalized forces on those
+    /// translations, and by nothing else, through a translation of the whole multibody: the rows
+    /// of the mass matrix with its joints' damping, armature and springs, without the
+    /// semi-implicit Coriolis and gyroscopic terms, times the accelerations equal `forces` on the
+    /// root's free translations.
+    ///
+    /// The applied forces are solved through the mass matrix with the semi-implicit Coriolis
+    /// terms, which read how the forces' kick turns the inertial forces of the joints' motion.
+    /// Those turn the links' velocities against one another, and through the root's rows they
+    /// also moved the linear momentum of a free multibody each substep a force bent its joints,
+    /// where the force along a translation of the whole multibody is the whole of what changes
+    /// its linear momentum along it.
+    fn hold_drift_to_forces(&mut self, forces: &na::DVector<f64>) {
+        let n = forces.len();
+        if n == 0 {
+            return;
+        }
+        let effective_dim = self.augmented_mass_indices.dim_after_removal(self.ndofs);
+        let mut accelerations = self.accelerations.clone();
+        self.augmented_mass_indices
+            .rearrange_rows(&mut accelerations, true);
+        let accelerations = accelerations.rows(0, effective_dim).map(|x| x as f64);
+        let rows = self.augmented_mass.view((0, 0), (n, effective_dim)) * accelerations;
+        let block = self.augmented_mass.view((0, 0), (n, n)).into_owned();
+        if let Some(correction) = block.lu().solve(&(forces - rows)) {
+            if correction.iter().all(|x| x.is_finite()) {
+                for k in 0..n {
+                    self.accelerations[k] += correction[k] as Real;
+                }
+            }
         }
     }
 
@@ -804,6 +855,199 @@ impl Multibody {
         0.5 * energy
     }
 
+    /// The number of the root joint's free translations, the first degrees of freedom of the
+    /// generalized velocity: those of a dynamic root whose joint is not kinematic, none for a
+    /// fixed or kinematic root. A free translation of the root moves every link with it.
+    fn free_root_translations(&self) -> usize {
+        match self.links.first() {
+            Some(root) if self.root_is_dynamic && !root.joint.kinematic => {
+                root.joint.num_free_lin_dofs()
+            }
+            _ => 0,
+        }
+    }
+
+    /// The generalized momentum of each of the root's free translations
+    /// ([`Self::free_root_translations`]) at the generalized `velocities`, at the configuration
+    /// the body jacobians stand at: the multibody's linear momentum along the translation, with
+    /// the translation's armature.
+    fn translation_momentum(
+        &self,
+        velocities: DVectorView<Real>,
+        bodies: &RigidBodySet,
+    ) -> na::DVector<f64> {
+        let n = self.free_root_translations();
+        let mut momentum = na::DVector::<f64>::zeros(n);
+        for k in 0..n.min(self.armature.len()) {
+            momentum[k] += (self.armature[k] * velocities[k]) as f64;
+        }
+        for i in 0..self.links.len() {
+            let rb = &bodies[self.links[i].rigid_body];
+            if !rb.is_dynamic() {
+                continue;
+            }
+            let jacobian = &self.body_jacobians[i];
+            let linear = jacobian.fixed_rows::<DIM>(0) * velocities;
+            let mass = rb.mprops.effective_mass();
+            for k in 0..n {
+                for d in 0..DIM {
+                    momentum[k] += (jacobian[(d, k)] * mass[d] * linear[d]) as f64;
+                }
+            }
+        }
+        momentum
+    }
+
+    /// The mass the root's free translations move ([`Self::free_root_translations`]), the block
+    /// of the mass matrix the kinetic energy reads ([`Self::kinetic_energy_at`]) over them: the
+    /// multibody's whole mass along each, with the translations' armature.
+    fn translation_inertia(&self, bodies: &RigidBodySet) -> DMatrix<f64> {
+        let n = self.free_root_translations();
+        let mut inertia = DMatrix::<f64>::zeros(n, n);
+        for k in 0..n.min(self.armature.len()) {
+            inertia[(k, k)] += self.armature[k] as f64;
+        }
+        for i in 0..self.links.len() {
+            let rb = &bodies[self.links[i].rigid_body];
+            if !rb.is_dynamic() {
+                continue;
+            }
+            let jacobian = &self.body_jacobians[i];
+            let mass = rb.mprops.effective_mass();
+            for k in 0..n {
+                for l in 0..n {
+                    for d in 0..DIM {
+                        inertia[(k, l)] += (jacobian[(d, k)] * mass[d] * jacobian[(d, l)]) as f64;
+                    }
+                }
+            }
+        }
+        inertia
+    }
+
+    /// The generalized velocity that translates the whole multibody, along its root's free
+    /// translations, with the translation momentum `momentum` ([`Self::translation_momentum`]):
+    /// `Eₜ · Mₜₜ⁻¹ · momentum`, `Mₜₜ` the mass the translations move
+    /// ([`Self::translation_inertia`]). `None` for a multibody with no free translation.
+    fn translation_velocity(
+        &self,
+        momentum: &na::DVector<f64>,
+        bodies: &RigidBodySet,
+    ) -> Option<DVector> {
+        let n = momentum.len();
+        if n == 0 {
+            return None;
+        }
+        let along = self.translation_inertia(bodies).lu().solve(momentum)?;
+        if !along.iter().all(|x| x.is_finite()) {
+            return None;
+        }
+        let mut velocity = DVector::zeros(self.ndofs);
+        for k in 0..n {
+            velocity[k] = along[k] as Real;
+        }
+        Some(velocity)
+    }
+
+    /// The drift of the generalized velocity `velocities`: the translation of the whole
+    /// multibody that carries all of its linear momentum along its root's free translations
+    /// ([`Self::translation_velocity`]), the velocity of its centre of mass along them. Zero for
+    /// a multibody with no free translation.
+    ///
+    /// The rest of the velocity carries no linear momentum along those translations and is
+    /// orthogonal to the drift through the mass matrix: the kinetic energy of a velocity is the
+    /// energy of its drift, `|p|² / 2m` along the translations, plus the energy of the rest,
+    /// and the drift's energy is the same at every configuration.
+    fn drift(&self, velocities: DVectorView<Real>, bodies: &RigidBodySet) -> DVector {
+        let momentum = self.translation_momentum(velocities, bodies);
+        self.translation_velocity(&momentum, bodies)
+            .unwrap_or_else(|| DVector::zeros(velocities.len()))
+    }
+
+    /// Scales the generalized velocity, less its drift ([`Self::drift`]), by `scale`, keeping
+    /// the drift, and so the multibody's linear momentum along its root's free translations, as
+    /// it is; the accelerations too when `with_accelerations`. The energy hold scales a
+    /// multibody's velocity this way: the hold answers for the work the integration's own
+    /// rounding does on the multibody's motion about its centre of mass, which moves no
+    /// momentum, and a free multibody flying through empty space keeps the linear momentum it
+    /// carries whatever its joints do. For a multibody with no free translation, the whole
+    /// velocity scales.
+    pub(crate) fn scale_keeping_drift(
+        &mut self,
+        scale: Real,
+        with_accelerations: bool,
+        bodies: &RigidBodySet,
+    ) {
+        if scale == 1.0 {
+            return;
+        }
+        let drift = self.drift(self.velocities.as_view(), bodies);
+        self.velocities -= &drift;
+        self.velocities *= scale;
+        self.velocities += &drift;
+        if with_accelerations {
+            let drift = self.drift(self.accelerations.as_view(), bodies);
+            self.accelerations -= &drift;
+            self.accelerations *= scale;
+            self.accelerations += &drift;
+        }
+    }
+
+    /// The kinetic energy of the drift of `velocities` ([`Self::drift`]) and of the rest, with
+    /// the drift itself: the two energies add to the energy of `velocities`.
+    fn split_kinetic_energy(
+        &self,
+        velocities: DVectorView<Real>,
+        bodies: &RigidBodySet,
+    ) -> (Real, Real, DVector) {
+        if self.free_root_translations() == 0 {
+            return (
+                0.0,
+                self.kinetic_energy_at(velocities, bodies),
+                DVector::zeros(velocities.len()),
+            );
+        }
+        let drift = self.drift(velocities, bodies);
+        let rest = velocities - &drift;
+        (
+            self.kinetic_energy_at(drift.as_view(), bodies),
+            self.kinetic_energy_at(rest.as_view(), bodies),
+            drift,
+        )
+    }
+
+    /// The linear momentum the multibody carries along its root's free translations
+    /// ([`Self::translation_momentum`]) before a move, which [`Self::keep_momentum`] gives back to
+    /// it once the move and its inertial forces are done. `None` for a multibody with no free
+    /// translation.
+    pub(crate) fn momentum_before_move(&self, bodies: &RigidBodySet) -> Option<na::DVector<f64>> {
+        (self.free_root_translations() > 0)
+            .then(|| self.translation_momentum(self.velocities.as_view(), bodies))
+    }
+
+    /// Gives the multibody back, after a move and the inertial forces of the configuration it
+    /// reached, the linear momentum it carried `before` the move
+    /// ([`Self::momentum_before_move`]), through the translation of the whole multibody that
+    /// carries the difference ([`Self::translation_velocity`]). The linear momentum of a
+    /// multibody changes only through the forces on it, and a move and its inertial forces are
+    /// no force on it.
+    ///
+    /// A move carries each joint's velocity unchanged in its parent's frame and the root's
+    /// velocity unchanged at its centre of mass, and the semi-implicit Coriolis and centrifugal
+    /// forces read where it ends give back only part of what that does to the links' velocities
+    /// in space: a free chain of nine rods flying at 5 m/s, its joints and its root turning at
+    /// up to 20 rad/s, lost 5% of its linear momentum over a 120th of a second, and as much as
+    /// a third of it within two seconds.
+    pub(crate) fn keep_momentum(&mut self, before: &na::DVector<f64>, bodies: &RigidBodySet) {
+        if before.len() != self.free_root_translations() {
+            return;
+        }
+        let momentum = self.translation_momentum(self.velocities.as_view(), bodies);
+        if let Some(correction) = self.translation_velocity(&(before - momentum), bodies) {
+            self.velocities += correction;
+        }
+    }
+
     /// The kinetic energy of the links at the generalized `velocities`, at the configuration the
     /// substep starts from, for [`Self::kinetic_energy_scale`] to hold the substep to: `None`
     /// for a multibody with no degree of freedom, or while a prescribed motion, which does work
@@ -850,7 +1094,8 @@ impl Multibody {
     /// Ends a step whose last substep no row bore on: records the kinetic energy the multibody
     /// stands at, half a substep of `dt` on from the velocity it ends with
     /// ([`Self::kicked_kinetic_energy`]), for the next step to open at ([`Self::open_step`]),
-    /// and scales the velocity it ends with to no more energy than it stands at, with what the
+    /// and scales the velocity it ends with, less its drift
+    /// ([`Self::scale_keeping_drift`]) to no more energy than it stands at, with what the
     /// joints' damping takes from that half kick ([`Self::damping_loss`]), allows.
     ///
     /// A velocity half a kick `h = dt · M⁻¹ f / 2` behind the one it stands at carries
@@ -873,16 +1118,19 @@ impl Multibody {
             return;
         };
         let allowed = standing + self.damping_loss(dt, bodies);
-        let ended = self.kinetic_energy_at(self.velocities.as_view(), bodies);
+        let (drift_energy, ended, drift) =
+            self.split_kinetic_energy(self.velocities.as_view(), bodies);
         let forces = &self.workspace.position_forces;
         let mut response = forces.clone();
         self.augmented_mass_indices
             .with_rearranged_rows_mut(&mut response, |response| {
                 self.inv_augmented_mass.solve_mut(response);
             });
-        // K(c · v) + c · dt · v · f / 2 + dt² · f · M⁻¹ f / 8 ≤ allowed.
-        let moving = 0.5 * dt * self.velocities.dot(forces);
-        let kicked = 0.125 * dt * dt * response.dot(forces);
+        // With d the drift of v and u = v − d the part the factor scales,
+        // K(d + c · u) + (d + c · u) · dt · f / 2 + dt² · f · M⁻¹ f / 8 ≤ allowed.
+        let drift_moving = 0.5 * dt * drift.dot(forces);
+        let moving = 0.5 * dt * self.velocities.dot(forces) - drift_moving;
+        let kicked = 0.125 * dt * dt * response.dot(forces) + drift_energy + drift_moving;
         let scale = if ended <= 0.0 {
             1.0
         } else {
@@ -895,7 +1143,7 @@ impl Multibody {
             most.clamp(0.0, 1.0)
         };
         let continued = self.velocities.clone();
-        self.velocities *= scale;
+        self.scale_keeping_drift(scale, false, bodies);
         self.workspace.step_end = Some(MultibodyStepEnd {
             standing,
             continued,
@@ -1039,10 +1287,15 @@ impl Multibody {
         (self.kinetic_energy_at(reached.as_view(), bodies) - damped).max(0.0)
     }
 
-    /// The factor `s` on the velocity a substep ends with (`velocities`, before the next kick)
-    /// that stands the multibody at the kinetic energy `target` once half of the next kick
-    /// (`accelerations`) is applied: `s ≥ 0` solves `K(s · v + dt · a / 2) = target`. Where no
-    /// factor reaches `target`, the one that comes nearest, and never more than 1.
+    /// The factor `s` on the velocity a substep ends with, less its drift (`velocities`,
+    /// before the next kick; [`Self::scale_keeping_drift`]) that stands the multibody at the
+    /// kinetic energy `target` once half of the next kick (`accelerations`) is applied: with `d`
+    /// the drift of `v` ([`Self::drift`]), `s ≥ 0` solves `K(d + s · (v − d) + dt · a / 2) =
+    /// target`. Where no factor reaches `target`, the one that comes nearest, and never more
+    /// than 1. 1 where the velocity less its drift carries no more than
+    /// [`ROUNDING_ENERGY_SHARE`] of the energy: that is the rounding of the drift, which carries
+    /// the multibody's linear momentum and whose energy no factor changes, and a factor on it
+    /// would turn the rounding of the energy `target` into motion.
     ///
     /// A move carries each joint's velocity unchanged in its parent's frame and the Coriolis
     /// and centrifugal forces read where the move ends turn it back, through the mass matrix
@@ -1061,16 +1314,22 @@ impl Multibody {
         dt: Real,
         bodies: &RigidBodySet,
     ) -> Real {
-        let moving = self.kinetic_energy_at(self.velocities.as_view(), bodies);
+        let (_, moving, drift) = self.split_kinetic_energy(self.velocities.as_view(), bodies);
         if moving <= 0.0 {
             return 1.0;
         }
         let mut half_kick = self.accelerations.clone();
         half_kick *= 0.5 * dt;
-        let kicked = self.kinetic_energy_at(half_kick.as_view(), bodies);
+        let mut kept = half_kick.clone();
+        kept += &drift;
+        let kicked = self.kinetic_energy_at(kept.as_view(), bodies);
+        if moving <= ROUNDING_ENERGY_SHARE * (moving + kicked) {
+            return 1.0;
+        }
         let mut both = half_kick;
         both += &self.velocities;
-        // K(s · v + h) = s² · K(v) + s · cross + K(h).
+        // With d the drift of v and u = v − d the part the factor scales,
+        // K(d + s · u + h) = s² · K(u) + s · cross + K(d + h).
         let cross = self.kinetic_energy_at(both.as_view(), bodies) - moving - kicked;
         let discriminant = cross * cross - 4.0 * moving * (kicked - target);
         if discriminant <= 0.0 {
@@ -1099,8 +1358,8 @@ impl Multibody {
     pub(crate) fn kinetic_energy_scale(&self, held: Real, dt: Real, bodies: &RigidBodySet) -> Real {
         let mut free = self.velocities.clone();
         free.axpy(dt, &self.accelerations, 1.0);
-        let energy = self.kinetic_energy_at(free.as_view(), bodies);
-        self.energy_hold_scale(energy, held, dt)
+        let (drift_energy, rest_energy, _) = self.split_kinetic_energy(free.as_view(), bodies);
+        self.energy_hold_scale(drift_energy, rest_energy, held, dt, bodies)
     }
 
     /// The factor that brings the velocity a step ends with (`velocities`, after its last
@@ -1118,41 +1377,60 @@ impl Multibody {
     /// substeps, ended a step with 25.5 kJ, held to 16.2 kJ, and its end left the step 4% faster
     /// than its fall gives it.
     pub(crate) fn step_end_energy_scale(&self, cap: Real, dt: Real, bodies: &RigidBodySet) -> Real {
-        let energy = self.kinetic_energy_at(self.velocities.as_view(), bodies);
-        self.energy_hold_scale(energy, cap, dt)
+        let (drift_energy, rest_energy, _) =
+            self.split_kinetic_energy(self.velocities.as_view(), bodies);
+        self.energy_hold_scale(drift_energy, rest_energy, cap, dt, bodies)
     }
 
-    /// The factor `s` that brings `energy`, the kinetic energy of a velocity `velocities` scales
-    /// with, down to `held` plus the work of the position forces over `dt` and
-    /// [`ENERGY_HOLD_MARGIN`]; 1 while it stands within that.
+    /// The factor `s` on a velocity that scales with `velocities`, less its drift
+    /// ([`Self::scale_keeping_drift`]), that brings its kinetic energy, `drift_energy` in its
+    /// drift and `rest_energy` in the rest, down to `held` plus the work of the position forces
+    /// over `dt` and [`ENERGY_HOLD_MARGIN`]; 1 while it stands within that.
     ///
-    /// The work's first term, `dt · v · f`, is read at the velocity the factor leaves: the scaled
-    /// velocity `s · v` does `s` times the work, so `s` solves `energy · s² = (held + s · dt · v
-    /// · f + dt² · f · M⁻¹f / 2)` (with the margin). Read at `velocities` before the hold, the
-    /// work of a velocity a substep had blown up allowed that velocity much of its excess: a
-    /// chain ending a substep at 17.8 MJ, held to 1.4 kJ, was allowed 22.6 kJ and its 500 kg end
-    /// left the step at 9.4 m/s where it hung at 2.4.
-    fn energy_hold_scale(&self, energy: Real, held: Real, dt: Real) -> Real {
+    /// The work's first term, `dt · v · f`, is read at the velocity the factor leaves: with `d`
+    /// the drift of `v`, the scaled velocity `d + s · (v − d)` does `dt · d · f` and `s` times
+    /// `dt · (v − d) · f`, so `s` solves `drift_energy + rest_energy · s² = (held + dt · d · f +
+    /// s · dt · (v − d) · f + dt² · f · M⁻¹f / 2)` (with the margin). Read at `velocities` before
+    /// the hold, the work of a velocity a substep had blown up allowed that velocity much of its
+    /// excess: a chain ending a substep at 17.8 MJ, held to 1.4 kJ, was allowed 22.6 kJ and its
+    /// 500 kg end left the step at 9.4 m/s where it hung at 2.4.
+    fn energy_hold_scale(
+        &self,
+        drift_energy: Real,
+        rest_energy: Real,
+        held: Real,
+        dt: Real,
+        bodies: &RigidBodySet,
+    ) -> Real {
         let forces = &self.workspace.position_forces;
         let mut response = forces.clone();
         self.augmented_mass_indices
             .with_rearranged_rows_mut(&mut response, |response| {
                 self.inv_augmented_mass.solve_mut(response);
             });
+        let drift = self.drift(self.velocities.as_view(), bodies);
         let margin = 1.0 + ENERGY_HOLD_MARGIN;
-        let moving = dt * self.velocities.dot(forces);
+        let drift_work = dt * drift.dot(forces);
+        let rest_work = dt * self.velocities.dot(forces) - drift_work;
         let response_work = 0.5 * dt * dt * response.dot(forces);
-        let allowed = (held + (moving + response_work).max(0.0)) * margin;
-        if energy <= allowed {
+        let energy = drift_energy + rest_energy;
+        let allowed = (held + (drift_work + rest_work + response_work).max(0.0)) * margin;
+        if energy <= allowed || rest_energy <= 0.0 {
             return 1.0;
         }
-        if moving <= 0.0 {
-            return (allowed / energy).simd_sqrt();
+        if rest_work <= 0.0 {
+            return ((allowed - drift_energy).max(0.0) / rest_energy)
+                .simd_sqrt()
+                .min(1.0);
         }
-        // energy · s² − margin · moving · s − margin · (held + response_work) = 0, for s > 0.
-        let b = margin * moving;
-        let c = margin * (held + response_work.max(0.0));
-        ((b + (b * b + 4.0 * energy * c).simd_sqrt()) / (2.0 * energy)).min(1.0)
+        // rest_energy · s² − b · s − c = 0, for s ≥ 0.
+        let b = margin * rest_work;
+        let c = margin * (held + response_work.max(0.0) + drift_work) - drift_energy;
+        let discriminant = b * b + 4.0 * rest_energy * c;
+        if discriminant <= 0.0 {
+            return (b / (2.0 * rest_energy)).clamp(0.0, 1.0);
+        }
+        ((b + discriminant.simd_sqrt()) / (2.0 * rest_energy)).clamp(0.0, 1.0)
     }
 
     // If the semi-implicit coriolis solve introduces more energy than the external
@@ -2009,8 +2287,8 @@ impl Multibody {
     /// far less. A chain hanging from a fixed body at 30 steps a second, its second link knocking
     /// on that body's box, ended its solve with 6 kJ of kinetic energy and started the next step,
     /// rewound by the continuous pass, with 152 kJ: its 500 kg end flung at 13.6 m/s where its
-    /// fall gives it 9.2. A rewind that would raise the energy scales the velocity down to the
-    /// energy the motion ended with.
+    /// fall gives it 9.2. A rewind that would raise the energy scales the velocity's relative
+    /// motion ([`Self::scale_keeping_drift`]) down to the energy the motion ended with.
     pub(crate) fn rewind_joints(
         &mut self,
         bodies: &mut RigidBodySet,
@@ -2036,9 +2314,11 @@ impl Multibody {
         self.forward_kinematics(bodies, false);
         self.update_rigid_bodies_internal(bodies, true, true, false);
         if let Some(ended) = ended {
-            let rewound = self.kinetic_energy_at(self.velocities.as_view(), bodies);
-            if rewound > ended {
-                self.velocities *= (ended / rewound).simd_sqrt();
+            let (drift_energy, rest_energy, _) =
+                self.split_kinetic_energy(self.velocities.as_view(), bodies);
+            if drift_energy + rest_energy > ended && rest_energy > 0.0 {
+                let scale = ((ended - drift_energy).max(0.0) / rest_energy).simd_sqrt();
+                self.scale_keeping_drift(scale, false, bodies);
             }
             self.update_velocities(bodies);
         }

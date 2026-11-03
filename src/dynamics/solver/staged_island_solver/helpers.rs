@@ -253,6 +253,7 @@ impl VelocitySolver {
             };
             let poses_start = self.multibody_ledger_poses.len();
             multibody.record_poses(bodies, &mut self.multibody_ledger_poses);
+            let momentum = multibody.momentum_before_move(bodies);
             multibody.integrate(params.dt);
             multibody.forward_kinematics(bodies, false);
             multibody.update_rigid_bodies_internal(bodies, true, true, false);
@@ -265,6 +266,9 @@ impl VelocitySolver {
                 ..
             } = &mut *multibody;
             velocities.axpy(params.dt, accelerations, 1.0);
+            if let Some(momentum) = &momentum {
+                multibody.keep_momentum(momentum, bodies);
+            }
             self.generic_solver_vels
                 .rows_mut(multibody.solver_id as usize, multibody.ndofs())
                 .copy_from(&multibody.velocities);
@@ -432,12 +436,10 @@ impl VelocitySolver {
                         scale = scale.min(multibody.step_end_energy_scale(cap, params.dt, bodies));
                     }
                     if scale < 1.0 {
-                        multibody.velocities *= scale;
-                        multibody.accelerations *= scale;
-                        let mut solver_vels = self
-                            .generic_solver_vels
-                            .rows_mut(multibody.solver_id as usize, multibody.ndofs());
-                        solver_vels *= scale;
+                        multibody.scale_keeping_drift(scale, true, bodies);
+                        self.generic_solver_vels
+                            .rows_mut(multibody.solver_id as usize, multibody.ndofs())
+                            .copy_from(&multibody.velocities);
                     }
                 } else {
                     let work = multibody
@@ -446,7 +448,7 @@ impl VelocitySolver {
                         - ledger.damped
                         - multibody.damping_loss(params.dt, bodies);
                     let scale = multibody.energy_ledger_scale(target, params.dt, bodies);
-                    multibody.velocities *= scale;
+                    multibody.scale_keeping_drift(scale, false, bodies);
                     if is_last_substep {
                         multibody.end_step_standing(params.dt, bodies);
                     }

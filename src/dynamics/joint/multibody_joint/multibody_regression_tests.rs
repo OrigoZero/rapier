@@ -3377,3 +3377,126 @@ fn a_damped_joint_slows_its_link_as_its_damping_does() {
         "a link on a damped joint did not slow as its damping does: {failed:?}"
     );
 }
+
+
+/// How far a free chain's linear momentum moved over its flight
+/// ([`free_chain_flight`]).
+#[cfg(feature = "dim3")]
+struct ChainFlight {
+    /// The largest change of the chain's linear momentum, `Σ mᵢ · vᵢ` over its links, from the
+    /// momentum it was given, over the steps of the flight, as a share of that momentum.
+    drift: Real,
+    /// The first step at which the chain's momentum stopped being finite.
+    not_finite_at: Option<usize>,
+}
+
+/// Nine 0.4 m rods, 1 kg each and the last 10 kg, joined end to end by spherical multibody
+/// joints with the first the free root, flying through empty space for two seconds at `rate`
+/// steps a second in `substeps` substeps: no gravity, every collider a sensor, no joint limit or
+/// motor. After one step at rest the root is given 5 m/s along X and every degree of freedom
+/// from the root's turn on a velocity of `omega` times a sine of its index and `seed`. Each
+/// link's velocity is read, after each step, from the multibody's velocity at the pose the step
+/// ended at.
+#[cfg(feature = "dim3")]
+fn free_chain_flight(omega: Real, rate: Real, substeps: usize, seed: usize) -> ChainFlight {
+    let mut world = PhysicsWorld::new();
+    world.integration_parameters.dt = 1.0 / rate;
+    world.integration_parameters.num_solver_iterations = substeps;
+    world.gravity = Vector::ZERO;
+    let mut above = None;
+    let mut links = Vec::new();
+    let mut first = None;
+    for i in 0..9 {
+        let mass = if i == 8 { 10.0 } else { 1.0 };
+        let (link, _) = world.insert(
+            RigidBodyBuilder::dynamic()
+                .translation(Vector::new(0.45 * i as Real, 0.0, 0.0))
+                .allow_fast_rotation(true)
+                .can_sleep(false),
+            ColliderBuilder::cuboid(0.2, 0.05, 0.05)
+                .mass(mass)
+                .sensor(true),
+        );
+        if let Some(parent) = above {
+            let joint: GenericJoint = SphericalJointBuilder::new()
+                .local_anchor1(Vector::new(0.225, 0.0, 0.0))
+                .local_anchor2(Vector::new(-0.225, 0.0, 0.0))
+                .contacts_enabled(false)
+                .build()
+                .into();
+            let handle = world.insert_multibody_joint(parent, link, joint).unwrap();
+            first.get_or_insert(handle);
+        }
+        links.push(link);
+        above = Some(link);
+    }
+    let first = first.unwrap();
+    world.step();
+    {
+        let (multibody, _) = world.multibody_joints.get_mut(first).unwrap();
+        let ndofs = multibody.ndofs();
+        let mut velocity = multibody.generalized_velocity_mut();
+        velocity[0] = 5.0;
+        for k in 3..ndofs {
+            velocity[k] = omega * ((k as Real) * 1.37 + (seed as Real) * 0.71).sin();
+        }
+        multibody.update_velocities(&mut world.bodies);
+    }
+    let momentum = |bodies: &RigidBodySet| -> Vector {
+        links
+            .iter()
+            .map(|link| bodies[*link].linvel() * bodies[*link].mass())
+            .fold(Vector::ZERO, |sum, p| sum + p)
+    };
+    let given = momentum(&world.bodies);
+    let mut flight = ChainFlight {
+        drift: 0.0,
+        not_finite_at: None,
+    };
+    for step in 0..(2.0 * rate) as usize {
+        world.step();
+        let (multibody, _) = world.multibody_joints.get_mut(first).unwrap();
+        multibody.update_velocities(&mut world.bodies);
+        let p = momentum(&world.bodies);
+        if !p.is_finite() {
+            flight.not_finite_at = Some(step);
+            break;
+        }
+        flight.drift = flight.drift.max((p - given).length() / given.length());
+    }
+    flight
+}
+
+/// A free chain of nine rods with a heavy end, flying through empty space with its root and its
+/// joints turning at up to 10, 20 and 40 rad/s, keeps the linear momentum it was given to within
+/// a thousandth over two seconds, at 30 steps a second in 2 substeps, 60 in 2 and in 4, 120 in 1
+/// and 240 in 1. Nothing acts on it, and its momentum changes only through the forces on it. A
+/// move carried each joint's velocity unchanged in its parent's frame, the semi-implicit
+/// Coriolis forces read where the move ended gave back only part of what that did to the links'
+/// velocities in space, and the energy hold then scaled the whole velocity, the drift of the
+/// chain's centre of mass with it: the chain lost 5% of its momentum over a substep, its
+/// momentum moved by 4% to 11% of what it was given at 10 rad/s and by 90% to 190% at 40.
+#[test]
+#[cfg(feature = "dim3")]
+fn a_free_chain_flying_through_empty_space_keeps_its_linear_momentum() {
+    let mut failed = Vec::new();
+    for omega in [10.0 as Real, 20.0, 40.0] {
+        for (rate, substeps) in [(30.0, 2), (60.0, 2), (60.0, 4), (120.0, 1), (240.0, 1)] {
+            for seed in 0..2 {
+                let flight = free_chain_flight(omega, rate, substeps, seed);
+                if flight.not_finite_at.is_some() || !(flight.drift <= 1.0e-3) {
+                    failed.push(alloc::format!(
+                        "{omega} rad/s, {rate} Hz x {substeps}, seed {seed}: momentum moved by \
+                         {} of what it was given, not finite at {:?}",
+                        flight.drift,
+                        flight.not_finite_at
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        failed.is_empty(),
+        "a free chain flying through empty space did not keep its linear momentum: {failed:?}"
+    );
+}
