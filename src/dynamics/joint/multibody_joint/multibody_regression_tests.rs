@@ -2920,3 +2920,163 @@ fn a_blown_up_velocity_is_held_with_the_work_of_the_velocity_it_is_held_to() {
         "the hinge held to the energy of 1 rad/s kept turning at {turning} rad/s"
     );
 }
+
+/// The hooks of [`carried_by_a_conveyor`]: every contact's surface slides at 2 m/s along x.
+#[cfg(feature = "dim3")]
+struct Conveyor;
+
+#[cfg(feature = "dim3")]
+impl PhysicsHooks for Conveyor {
+    fn modify_solver_contacts(&self, context: &mut ContactModificationContext) {
+        if let Some(rigid) = context.rigid_mut() {
+            for contact in rigid.solver_contacts.iter_mut() {
+                contact.tangent_velocity = Vector::new(2.0, 0.0, 0.0);
+            }
+        }
+    }
+}
+
+/// A lone 5 kg box, and an articulation of two 5 kg boxes on a revolute joint, resting on a fixed
+/// ground whose surface slides at 2 m/s along x (a conveyor's, [`Conveyor`]), at `rate` steps a
+/// second in `substeps` substeps. Answers how fast the lone box and the articulation's root move
+/// along the ground after one second.
+#[cfg(feature = "dim3")]
+fn carried_by_a_conveyor(rate: Real, substeps: usize) -> (Real, Real) {
+    let mut world = PhysicsWorld::new();
+    world.integration_parameters.dt = 1.0 / rate;
+    world.integration_parameters.num_solver_iterations = substeps;
+    let hooked = |collider: ColliderBuilder| {
+        collider
+            .friction(1.0)
+            .active_hooks(ActiveHooks::MODIFY_SOLVER_CONTACTS)
+    };
+    world.insert(
+        RigidBodyBuilder::fixed(),
+        hooked(ColliderBuilder::cuboid(100.0, 0.5, 100.0)),
+    );
+    let mut boxed = |x: Real, z: Real| {
+        world
+            .insert(
+                RigidBodyBuilder::dynamic()
+                    .translation(Vector::new(x, 0.7, z))
+                    .can_sleep(false),
+                hooked(ColliderBuilder::cuboid(0.2, 0.2, 0.2).mass(5.0)),
+            )
+            .0
+    };
+    let lone = boxed(0.0, -5.0);
+    let root = boxed(0.0, 5.0);
+    let arm = boxed(0.5, 5.0);
+    let joint = RevoluteJointBuilder::new(Vector::Z)
+        .local_anchor1(Vector::new(0.25, 0.0, 0.0))
+        .local_anchor2(Vector::new(-0.25, 0.0, 0.0))
+        .contacts_enabled(false)
+        .build();
+    world.insert_multibody_joint(root, arm, joint).unwrap();
+    for _ in 0..rate as usize {
+        world.step_with_events(&Conveyor, &());
+    }
+    let along = |body: RigidBodyHandle| {
+        let v = world.bodies[body].linvel();
+        (v.x * v.x + v.z * v.z).sqrt()
+    };
+    (along(lone), along(root))
+}
+
+/// An articulation resting on a conveyor is carried at the belt's speed, as a lone box is, after
+/// a second at 30 steps a second in 2 substeps and at 60 in 2 and in 4. The contact of a fixed
+/// body whose surface slides along itself does work on what rests on it through its friction
+/// rows' target velocity: a multibody whose rows tied it to nothing that moves was held to the
+/// energy it started each substep with, and after a second on a 2 m/s belt the articulation
+/// moved at 0.69 m/s at 60 steps a second in 4 substeps, 0.98 m/s in 2 and 1.42 m/s at 30.
+#[test]
+#[cfg(feature = "dim3")]
+fn an_articulation_on_a_conveyor_is_carried_as_a_lone_box_is() {
+    let mut failed = Vec::new();
+    for (rate, substeps) in [(30.0, 2), (60.0, 2), (60.0, 4)] {
+        let (lone, articulation) = carried_by_a_conveyor(rate, substeps);
+        if (lone - 2.0).abs() > 0.05 || (articulation - lone).abs() > 0.05 {
+            failed.push(alloc::format!(
+                "{rate} Hz x {substeps}: the lone box moved at {lone} m/s, the articulation at {articulation} m/s"
+            ));
+        }
+    }
+    assert!(
+        failed.is_empty(),
+        "an articulation on a 2 m/s conveyor was not carried as a lone box is: {failed:?}"
+    );
+}
+
+/// A lone 5 kg box, and the 5 kg root box of an articulation carrying a 5 kg arm on a revolute
+/// joint, each held to a fixed body by an impulse revolute joint about y whose motor turns it at
+/// 2 rad/s, with no gravity, at `rate` steps a second in `substeps` substeps. Answers how fast the
+/// lone box and the articulation's root turn about y after one second.
+#[cfg(feature = "dim3")]
+fn turned_by_a_motor_from_a_fixed_body(rate: Real, substeps: usize) -> (Real, Real) {
+    let mut world = PhysicsWorld::new();
+    world.gravity = Vector::ZERO;
+    world.integration_parameters.dt = 1.0 / rate;
+    world.integration_parameters.num_solver_iterations = substeps;
+    let motor = || {
+        RevoluteJointBuilder::new(Vector::Y)
+            .motor_velocity(2.0, 1.0e4)
+            .contacts_enabled(false)
+            .build()
+    };
+    let mut held_at = |z: Real| {
+        let (anchor, _) = world.insert(
+            RigidBodyBuilder::fixed().translation(Vector::new(0.0, 0.0, z)),
+            ColliderBuilder::ball(0.05).sensor(true),
+        );
+        let (body, _) = world.insert(
+            RigidBodyBuilder::dynamic()
+                .translation(Vector::new(0.0, 0.0, z))
+                .can_sleep(false),
+            ColliderBuilder::cuboid(0.2, 0.2, 0.2).mass(5.0),
+        );
+        (anchor, body)
+    };
+    let (lone_anchor, lone) = held_at(-5.0);
+    let (root_anchor, root) = held_at(5.0);
+    let (arm, _) = world.insert(
+        RigidBodyBuilder::dynamic()
+            .translation(Vector::new(0.5, 0.0, 5.0))
+            .can_sleep(false),
+        ColliderBuilder::cuboid(0.2, 0.2, 0.2).mass(5.0),
+    );
+    let hinge = RevoluteJointBuilder::new(Vector::Z)
+        .local_anchor1(Vector::new(0.25, 0.0, 0.0))
+        .local_anchor2(Vector::new(-0.25, 0.0, 0.0))
+        .contacts_enabled(false)
+        .build();
+    world.insert_multibody_joint(root, arm, hinge).unwrap();
+    world.insert_impulse_joint(lone_anchor, lone, motor());
+    world.insert_impulse_joint(root_anchor, root, motor());
+    for _ in 0..rate as usize {
+        world.step();
+    }
+    (world.bodies[lone].angvel().y, world.bodies[root].angvel().y)
+}
+
+/// An articulation whose root an impulse joint's motor turns from a fixed body turns at the
+/// motor's speed, as a lone box does, after a second at 30 steps a second in 2 substeps and at 60
+/// in 2 and in 4. The motor's row does work on the multibody from a body that does not move: a
+/// multibody whose rows tied it to nothing that moves was held to the energy it started each
+/// substep with, and an articulation at rest never turned.
+#[test]
+#[cfg(feature = "dim3")]
+fn an_articulation_turned_by_a_motor_from_a_fixed_body_turns_as_a_lone_box_does() {
+    let mut failed = Vec::new();
+    for (rate, substeps) in [(30.0, 2), (60.0, 2), (60.0, 4)] {
+        let (lone, articulation) = turned_by_a_motor_from_a_fixed_body(rate, substeps);
+        if (lone - 2.0).abs() > 0.05 || (articulation - lone).abs() > 0.05 {
+            failed.push(alloc::format!(
+                "{rate} Hz x {substeps}: the lone box turned at {lone} rad/s, the articulation at {articulation} rad/s"
+            ));
+        }
+    }
+    assert!(
+        failed.is_empty(),
+        "an articulation turned by a 2 rad/s motor did not turn as a lone box does: {failed:?}"
+    );
+}
