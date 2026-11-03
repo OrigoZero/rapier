@@ -3080,3 +3080,243 @@ fn an_articulation_turned_by_a_motor_from_a_fixed_body_turns_as_a_lone_box_does(
         "an articulation turned by a 2 rad/s motor did not turn as a lone box does: {failed:?}"
     );
 }
+
+/// How a free chain under a heavy ball swung ([`heavy_ball_on_light_links`]).
+#[cfg(feature = "dim3")]
+struct HeavyBallSwing {
+    /// The least the chain's kinetic and potential energy stood from where it started, as a
+    /// share of the energy its swing has (negative below).
+    least: Real,
+    /// The most it stood above where it started, as a share of that energy.
+    most: Real,
+    /// Where it stood at the end, as a share of that energy.
+    end: Real,
+    /// How far the ball rose above where it was let go, after its first two seconds.
+    rose: Real,
+    /// The step its state stopped being a number at, if it did.
+    not_finite_at: Option<usize>,
+}
+
+/// Twelve 4 kg capsule links 0.55 m apart on undamped spherical multibody joints, hung from a
+/// fixed body whose box is a sensor, a ball of `ball_mass` kg 0.42 m wide on the end, raised
+/// 70 degrees and let go with nothing touching it, stepped for eight seconds at `rate` steps a
+/// second in `substeps` substeps.
+#[cfg(feature = "dim3")]
+fn heavy_ball_on_light_links(ball_mass: Real, rate: Real, substeps: usize) -> HeavyBallSwing {
+    let mut world = PhysicsWorld::new();
+    world.integration_parameters.dt = 1.0 / rate;
+    world.integration_parameters.num_solver_iterations = substeps;
+    let anchor_at = Vector::new(60.0, 16.0, 60.0);
+    let (pitch, count, ball_radius, eye) = (0.55 as Real, 12, 0.42 as Real, 0.12 as Real);
+    let angle = (70.0 as Real).to_radians();
+    let raised = Rotation::from_axis_angle(Vector::X, angle);
+    let down = Vector::new(0.0, -angle.cos(), -angle.sin());
+    let (anchor, _) = world.insert(
+        RigidBodyBuilder::fixed()
+            .translation(anchor_at)
+            .rotation(raised.to_scaled_axis()),
+        ColliderBuilder::cuboid(0.5, 0.5, 0.5).sensor(true),
+    );
+    let mut bodies = Vec::new();
+    for i in 0..count {
+        let (link, _) = world.insert(
+            RigidBodyBuilder::dynamic()
+                .translation(anchor_at + down * (pitch * (i as Real + 0.5)))
+                .rotation(raised.to_scaled_axis())
+                .can_sleep(false),
+            ColliderBuilder::capsule_y(pitch * 0.3, 0.07).mass(4.0),
+        );
+        bodies.push(link);
+    }
+    let (ball, _) = world.insert(
+        RigidBodyBuilder::dynamic()
+            .translation(anchor_at + down * (pitch * count as Real + eye + ball_radius))
+            .rotation(raised.to_scaled_axis())
+            .can_sleep(false),
+        ColliderBuilder::ball(ball_radius).mass(ball_mass),
+    );
+    bodies.push(ball);
+    for (i, body) in bodies.iter().enumerate() {
+        let parent = if i == 0 { anchor } else { bodies[i - 1] };
+        let anchor1 = if i == 0 {
+            Vector::ZERO
+        } else {
+            Vector::new(0.0, -pitch / 2.0, 0.0)
+        };
+        let anchor2 = if i == count {
+            Vector::new(0.0, ball_radius + eye, 0.0)
+        } else {
+            Vector::new(0.0, pitch / 2.0, 0.0)
+        };
+        let joint = SphericalJointBuilder::new()
+            .local_anchor1(anchor1)
+            .local_anchor2(anchor2)
+            .contacts_enabled(false)
+            .build();
+        world.insert_multibody_joint(parent, *body, joint).unwrap();
+    }
+    let id = *world.multibody_joints.rigid_body_link(ball).unwrap();
+    world
+        .multibody_joints
+        .get_multibody_mut(id.multibody)
+        .unwrap()
+        .damping_mut()
+        .fill(0.0);
+    let swing = (ball_mass + 4.0 * count as Real / 2.0)
+        * 9.81
+        * (pitch * count as Real + eye + ball_radius)
+        * (1.0 - angle.cos());
+    let released = world.bodies[ball].translation().y;
+    let start = links_energy(&world.bodies, &bodies, world.gravity);
+    let mut result = HeavyBallSwing {
+        least: 0.0,
+        most: 0.0,
+        end: 0.0,
+        rose: Real::MIN,
+        not_finite_at: None,
+    };
+    for step in 0..(8.0 * rate) as usize {
+        world.step();
+        let body = &world.bodies[ball];
+        if !body.translation().is_finite() || !body.linvel().is_finite() {
+            result.not_finite_at = Some(step);
+            break;
+        }
+        let energy = (links_energy(&world.bodies, &bodies, world.gravity) - start) / swing;
+        result.least = result.least.min(energy);
+        result.most = result.most.max(energy);
+        result.end = energy;
+        if step as Real >= 2.0 * rate {
+            result.rose = result.rose.max(body.translation().y - released);
+        }
+    }
+    result
+}
+
+/// A free chain of twelve 4 kg links on undamped spherical joints with a 5000 kg and a 20000
+/// kg ball on the end, let go 70 degrees up with nothing touching it, keeps its energy within
+/// 2% of the energy its swing has, above and below, over eight seconds at 30 steps a second in
+/// 2 substeps, 60 in 2 and in 4, 120 in 1 and 240 in 1, and its ball never rises a tenth of a
+/// metre above where it was let go. Each substep's energy was held only from above: the semi-implicit Coriolis
+/// update of a move takes energy from it, the rounding of the move gives some back as often,
+/// and every gain was taken away while every loss was kept. The 5000 kg chain ended its eight
+/// seconds 74% of its swing down at 30 steps in 2 substeps, after standing 16% above it, and
+/// 48% down at 120 in 1, and at 60 in 2 its ball rose a metre above where it was let go; the
+/// 20000 kg chain ended 88% down at 60 in 2.
+#[test]
+#[cfg(feature = "dim3")]
+fn a_free_chain_under_a_heavy_ball_keeps_the_energy_of_its_swing() {
+    let mut failed = Vec::new();
+    for ball_mass in [5000.0 as Real, 20000.0] {
+        for (rate, substeps) in [(30.0, 2), (60.0, 2), (60.0, 4), (120.0, 1), (240.0, 1)] {
+            let swing = heavy_ball_on_light_links(ball_mass, rate, substeps);
+            if swing.not_finite_at.is_some()
+                || swing.least < -0.02
+                || swing.most > 0.02
+                || swing.end.abs() > 0.02
+                || swing.rose > 0.1
+            {
+                failed.push(alloc::format!(
+                    "{ball_mass} kg, {rate} Hz x {substeps}: not finite at {:?}, energy from {} \
+                     to {} of its swing's, {} at the end, rose {} m",
+                    swing.not_finite_at,
+                    swing.least,
+                    swing.most,
+                    swing.end,
+                    swing.rose
+                ));
+            }
+        }
+    }
+    assert!(
+        failed.is_empty(),
+        "a free chain under a heavy ball lost or gained energy: {failed:?}"
+    );
+}
+
+/// A link of 1 kg spinning at 5 rad/s on a revolute joint about its centre, hung from a fixed
+/// body with no gravity, nothing touching it and its joint's `damping` the one force on it,
+/// stepped for `seconds` at `rate` steps a second in `substeps` substeps: answers its angular
+/// velocity at the end and the one the joint's implicit damping gives it,
+/// `5 · (I / (I + h · damping))ⁿ` over the `n` substeps of length `h`.
+#[cfg(feature = "dim3")]
+fn spin_on_a_damped_joint(
+    damping: Real,
+    rate: Real,
+    substeps: usize,
+    seconds: Real,
+) -> (Real, Real) {
+    let mut world = PhysicsWorld::new();
+    world.gravity = Vector::ZERO;
+    world.integration_parameters.dt = 1.0 / rate;
+    world.integration_parameters.num_solver_iterations = substeps;
+    let at = Vector::new(0.0, 5.0, 0.0);
+    let root = world.insert_body(RigidBodyBuilder::fixed().translation(at));
+    let (link, _) = world.insert(
+        RigidBodyBuilder::dynamic().translation(at).can_sleep(false),
+        ColliderBuilder::cuboid(1.0, 0.1, 0.1).mass(1.0),
+    );
+    let joint = RevoluteJointBuilder::new(Vector::Z)
+        .contacts_enabled(false)
+        .build();
+    world.insert_multibody_joint(root, link, joint).unwrap();
+    let id = *world.multibody_joints.rigid_body_link(link).unwrap();
+    {
+        let multibody = world
+            .multibody_joints
+            .get_multibody_mut(id.multibody)
+            .unwrap();
+        multibody.damping_mut().fill(damping);
+        multibody.velocities.fill(5.0);
+    }
+    let inertia = world.bodies[link]
+        .mass_properties()
+        .local_mprops
+        .principal_inertia()
+        .z;
+    let steps = (seconds * rate) as usize;
+    for _ in 0..steps {
+        world.step();
+    }
+    let h = 1.0 / (rate * substeps as Real);
+    let implicit = 5.0 * (inertia / (inertia + h * damping)).powi((steps * substeps) as i32);
+    (world.bodies[link].angvel().z, implicit)
+}
+
+/// A link spinning on a revolute joint whose damping is the one force on it slows as the
+/// joint's implicit damping slows it, to within a thousandth, at 30 steps a second in 2
+/// substeps, 60 in 2 and in 4, 120 in 1 and 240 in 1, with a damping of 0.3, 1, 10 and 100
+/// times its moment of inertia per second. A substep no row bears on is held to the energy
+/// the multibody stood at before its move, less what the damping takes. Counted over the half
+/// kick that leads to the energy it stands at next and not over the half that follows the
+/// energy it stood at, the hold gave back half of what the damping took, and a step's end
+/// held its velocity to that energy without the damping's share; under the light dampings
+/// the link slowed half as fast as they set, and under the heaviest it kept thousands of
+/// times the velocity the damping leaves it.
+#[test]
+#[cfg(feature = "dim3")]
+fn a_damped_joint_slows_its_link_as_its_damping_does() {
+    let mut failed = Vec::new();
+    for (rate, substeps) in [(30.0, 2), (60.0, 2), (60.0, 4), (120.0, 1), (240.0, 1)] {
+        for (per_inertia, seconds) in [
+            (0.3 as Real, 2.0 as Real),
+            (1.0, 2.0),
+            (10.0, 0.5),
+            (100.0, 0.1),
+        ] {
+            // The link's moment of inertia about Z: 1 kg over a 2 m by 0.2 m box.
+            let damping = per_inertia * (2.0 * 2.0 + 0.2 * 0.2) / 12.0;
+            let (spin, implicit) = spin_on_a_damped_joint(damping, rate, substeps, seconds);
+            if !((spin / implicit - 1.0).abs() <= 1.0e-3) {
+                failed.push(alloc::format!(
+                    "{per_inertia} I/s, {rate} Hz x {substeps}: {spin} rad/s after {seconds} s, \
+                     the joint's damping leaves {implicit}"
+                ));
+            }
+        }
+    }
+    assert!(
+        failed.is_empty(),
+        "a link on a damped joint did not slow as its damping does: {failed:?}"
+    );
+}
