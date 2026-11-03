@@ -2911,12 +2911,14 @@ fn a_blown_up_velocity_is_held_with_the_work_of_the_velocity_it_is_held_to() {
         };
     let held = turn_at(multibody, &mut world.bodies, -1.0);
     assert_eq!(
-        multibody.step_end_energy_scale(held, dt, &world.bodies),
-        1.0,
+        multibody.step_end_energy_scale(held, true, dt, &world.bodies),
+        Some(1.0),
         "a hinge turning at the energy it was held to is left as it is"
     );
     turn_at(multibody, &mut world.bodies, -1000.0);
-    let scale = multibody.step_end_energy_scale(held, dt, &world.bodies);
+    let scale = multibody
+        .step_end_energy_scale(held, true, dt, &world.bodies)
+        .expect("a hinge on a fixed root has no drift");
     let turning = 1000.0 * scale;
     assert!(
         turning < 2.0,
@@ -3498,5 +3500,89 @@ fn a_free_chain_flying_through_empty_space_keeps_its_linear_momentum() {
     assert!(
         failed.is_empty(),
         "a free chain flying through empty space did not keep its linear momentum: {failed:?}"
+    );
+}
+
+/// A free chain of `links` 0.4 m boxes, 2 kg each, joined end to end by spherical multibody
+/// joints with the first the free root, each box turned `tilt` radians about Z more than the one
+/// before it, dropped from `height` m onto fixed ground with no restitution and stepped for four
+/// seconds at `rate` steps a second in `substeps` substeps. Answers the fastest its centre of
+/// mass rose, in m/s, once its lowest box reached the ground.
+#[cfg(feature = "dim3")]
+fn free_chain_landing(rate: Real, substeps: usize, height: Real, links: usize, tilt: Real) -> Real {
+    let mut world = PhysicsWorld::new();
+    world.integration_parameters.dt = 1.0 / rate;
+    world.integration_parameters.num_solver_iterations = substeps;
+    world.insert(
+        RigidBodyBuilder::fixed(),
+        ColliderBuilder::cuboid(20.0, 0.5, 20.0).translation(Vector::new(0.0, -0.5, 0.0)),
+    );
+    let mut above = None;
+    let mut boxes = Vec::new();
+    for i in 0..links {
+        let (link, _) = world.insert(
+            RigidBodyBuilder::dynamic()
+                .translation(Vector::new(0.45 * i as Real, height, 0.0))
+                .rotation(AngVector::new(0.0, 0.0, tilt * i as Real))
+                .can_sleep(false),
+            ColliderBuilder::cuboid(0.2, 0.05, 0.05)
+                .mass(2.0)
+                .restitution(0.0)
+                .friction(0.6),
+        );
+        if let Some(parent) = above {
+            let joint: GenericJoint = SphericalJointBuilder::new()
+                .local_anchor1(Vector::new(0.225, 0.0, 0.0))
+                .local_anchor2(Vector::new(-0.225, 0.0, 0.0))
+                .contacts_enabled(false)
+                .build()
+                .into();
+            world.insert_multibody_joint(parent, link, joint).unwrap();
+        }
+        boxes.push(link);
+        above = Some(link);
+    }
+    let mut landed = false;
+    let mut fastest: Real = 0.0;
+    for _ in 0..(4.0 * rate) as usize {
+        world.step();
+        let mut rising = 0.0;
+        let mut lowest = Real::MAX;
+        for body in &boxes {
+            let body = &world.bodies[*body];
+            rising += body.linvel().y / links as Real;
+            lowest = lowest.min(body.center_of_mass().y);
+        }
+        landed |= lowest < 0.12;
+        if landed {
+            fastest = fastest.max(rising);
+        }
+    }
+    fastest
+}
+
+/// A free chain dropped from 3 m onto fixed ground with no restitution, landing at 7.5 m/s,
+/// leaves it no faster than 1 m/s at 30 steps a second in 2 and in 4 substeps and at 60 in 2,
+/// lying along it or bent. The energy hold of a substep its contacts bore on kept the drift of
+/// its centre of mass, which the contacts' biased pass had pushed up, as it was, whatever energy
+/// the drift carried: the chain left the ground at 2 m/s at 30 steps a second in 2 substeps,
+/// where on impulse joints it leaves it at 0.6.
+#[test]
+#[cfg(feature = "dim3")]
+fn a_free_chain_dropped_onto_the_ground_leaves_it_no_faster_than_a_metre_a_second() {
+    let mut failed = Vec::new();
+    for (rate, substeps) in [(30.0 as Real, 2), (30.0, 4), (60.0, 2)] {
+        for (links, tilt) in [(5, 0.05 as Real), (3, 0.2)] {
+            let fastest = free_chain_landing(rate, substeps, 3.0, links, tilt);
+            if !(fastest <= 1.0) {
+                failed.push(alloc::format!(
+                    "{rate} Hz x {substeps}, {links} links: rose at {fastest} m/s"
+                ));
+            }
+        }
+    }
+    assert!(
+        failed.is_empty(),
+        "a free chain dropped onto the ground left it too fast: {failed:?}"
     );
 }

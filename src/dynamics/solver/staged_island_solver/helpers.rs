@@ -399,7 +399,9 @@ impl VelocitySolver {
     /// work of its forces (`Multibody::kinetic_energy_scale`), and after the last substep the
     /// velocity the step ends with as well (`Multibody::step_end_energy_scale`), to the larger of
     /// that energy and the energy it moved with: the rows' biased pass and the bounce that
-    /// follows the step push it, and give it no energy.
+    /// follows the step push it, and give it no energy. The hold from above scales the velocity
+    /// less its drift ([`Multibody::scale_keeping_drift`]), and the whole velocity where the
+    /// drift alone stands past what either factor allows.
     pub(super) fn update_multibody_dynamics(
         &mut self,
         params: &IntegrationParameters,
@@ -430,13 +432,34 @@ impl VelocitySolver {
                         multibody.clear_step_end();
                     }
                     // Rows bore on it: held from above, its velocity and the next kick together.
-                    let mut scale = multibody.kinetic_energy_scale(ledger.held, params.dt, bodies);
-                    if is_last_substep {
-                        let cap = ledger.held.max(ledger.moved);
-                        scale = scale.min(multibody.step_end_energy_scale(cap, params.dt, bodies));
-                    }
+                    let hold = |multibody: &Multibody, keep_drift: bool| {
+                        let mut scale = multibody.kinetic_energy_scale(
+                            ledger.held,
+                            keep_drift,
+                            params.dt,
+                            bodies,
+                        )?;
+                        if is_last_substep {
+                            let cap = ledger.held.max(ledger.moved);
+                            scale = scale.min(
+                                multibody
+                                    .step_end_energy_scale(cap, keep_drift, params.dt, bodies)?,
+                            );
+                        }
+                        Some(scale)
+                    };
+                    // Without the drift kept, both factors are always there.
+                    let (scale, keep_drift) = match hold(multibody, true) {
+                        Some(scale) => (scale, true),
+                        None => (hold(multibody, false).unwrap_or(1.0), false),
+                    };
                     if scale < 1.0 {
-                        multibody.scale_keeping_drift(scale, true, bodies);
+                        if keep_drift {
+                            multibody.scale_keeping_drift(scale, true, bodies);
+                        } else {
+                            multibody.velocities *= scale;
+                            multibody.accelerations *= scale;
+                        }
                         self.generic_solver_vels
                             .rows_mut(multibody.solver_id as usize, multibody.ndofs())
                             .copy_from(&multibody.velocities);

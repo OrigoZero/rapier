@@ -967,11 +967,11 @@ impl Multibody {
     /// Scales the generalized velocity, less its drift ([`Self::drift`]), by `scale`, keeping
     /// the drift, and so the multibody's linear momentum along its root's free translations, as
     /// it is; the accelerations too when `with_accelerations`. The energy hold scales a
-    /// multibody's velocity this way: the hold answers for the work the integration's own
-    /// rounding does on the multibody's motion about its centre of mass, which moves no
-    /// momentum, and a free multibody flying through empty space keeps the linear momentum it
-    /// carries whatever its joints do. For a multibody with no free translation, the whole
-    /// velocity scales.
+    /// multibody's velocity this way wherever its drift stands within what the hold allows: the
+    /// hold answers for the work the integration's own rounding does on the multibody's motion
+    /// about its centre of mass, which moves no momentum, and a free multibody flying through
+    /// empty space keeps the linear momentum it carries whatever its joints do. For a multibody
+    /// with no free translation, the whole velocity scales.
     pub(crate) fn scale_keeping_drift(
         &mut self,
         scale: Real,
@@ -994,13 +994,15 @@ impl Multibody {
     }
 
     /// The kinetic energy of the drift of `velocities` ([`Self::drift`]) and of the rest, with
-    /// the drift itself: the two energies add to the energy of `velocities`.
+    /// the drift itself: the two energies add to the energy of `velocities`. Where the drift is
+    /// not kept (`keep_drift` false), the whole energy is the rest's and the drift is zero.
     fn split_kinetic_energy(
         &self,
         velocities: DVectorView<Real>,
+        keep_drift: bool,
         bodies: &RigidBodySet,
     ) -> (Real, Real, DVector) {
-        if self.free_root_translations() == 0 {
+        if !keep_drift || self.free_root_translations() == 0 {
             return (
                 0.0,
                 self.kinetic_energy_at(velocities, bodies),
@@ -1119,7 +1121,7 @@ impl Multibody {
         };
         let allowed = standing + self.damping_loss(dt, bodies);
         let (drift_energy, ended, drift) =
-            self.split_kinetic_energy(self.velocities.as_view(), bodies);
+            self.split_kinetic_energy(self.velocities.as_view(), true, bodies);
         let forces = &self.workspace.position_forces;
         let mut response = forces.clone();
         self.augmented_mass_indices
@@ -1314,7 +1316,7 @@ impl Multibody {
         dt: Real,
         bodies: &RigidBodySet,
     ) -> Real {
-        let (_, moving, drift) = self.split_kinetic_energy(self.velocities.as_view(), bodies);
+        let (_, moving, drift) = self.split_kinetic_energy(self.velocities.as_view(), true, bodies);
         if moving <= 0.0 {
             return 1.0;
         }
@@ -1355,11 +1357,22 @@ impl Multibody {
     /// every substep leaves the chain with more energy than the last. This reads the balance
     /// across the whole of a substep, the move included: `free_velocity_energy_guard` reads the
     /// velocity update alone, at one configuration.
-    pub(crate) fn kinetic_energy_scale(&self, held: Real, dt: Real, bodies: &RigidBodySet) -> Real {
+    ///
+    /// With `keep_drift`, the factor is the one on the velocity less its drift
+    /// ([`Self::scale_keeping_drift`]), `None` where the drift alone stands past what the hold
+    /// allows; without it, the one on the whole velocity, which is always there.
+    pub(crate) fn kinetic_energy_scale(
+        &self,
+        held: Real,
+        keep_drift: bool,
+        dt: Real,
+        bodies: &RigidBodySet,
+    ) -> Option<Real> {
         let mut free = self.velocities.clone();
         free.axpy(dt, &self.accelerations, 1.0);
-        let (drift_energy, rest_energy, _) = self.split_kinetic_energy(free.as_view(), bodies);
-        self.energy_hold_scale(drift_energy, rest_energy, held, dt, bodies)
+        let (drift_energy, rest_energy, _) =
+            self.split_kinetic_energy(free.as_view(), keep_drift, bodies);
+        self.energy_hold_scale(drift_energy, rest_energy, keep_drift, held, dt, bodies)
     }
 
     /// The factor that brings the velocity a step ends with (`velocities`, after its last
@@ -1376,16 +1389,35 @@ impl Multibody {
     /// 500 kg end, its second link knocking on its anchor's box at 30 steps a second in 4
     /// substeps, ended a step with 25.5 kJ, held to 16.2 kJ, and its end left the step 4% faster
     /// than its fall gives it.
-    pub(crate) fn step_end_energy_scale(&self, cap: Real, dt: Real, bodies: &RigidBodySet) -> Real {
+    ///
+    /// With `keep_drift`, the factor is the one on the velocity less its drift
+    /// ([`Self::scale_keeping_drift`]), `None` where the drift alone stands past what the hold
+    /// allows; without it, the one on the whole velocity, which is always there.
+    pub(crate) fn step_end_energy_scale(
+        &self,
+        cap: Real,
+        keep_drift: bool,
+        dt: Real,
+        bodies: &RigidBodySet,
+    ) -> Option<Real> {
         let (drift_energy, rest_energy, _) =
-            self.split_kinetic_energy(self.velocities.as_view(), bodies);
-        self.energy_hold_scale(drift_energy, rest_energy, cap, dt, bodies)
+            self.split_kinetic_energy(self.velocities.as_view(), keep_drift, bodies);
+        self.energy_hold_scale(drift_energy, rest_energy, keep_drift, cap, dt, bodies)
     }
 
     /// The factor `s` on a velocity that scales with `velocities`, less its drift
-    /// ([`Self::scale_keeping_drift`]), that brings its kinetic energy, `drift_energy` in its
-    /// drift and `rest_energy` in the rest, down to `held` plus the work of the position forces
-    /// over `dt` and [`ENERGY_HOLD_MARGIN`]; 1 while it stands within that.
+    /// ([`Self::scale_keeping_drift`]) with `keep_drift` and whole without it, that brings its
+    /// kinetic energy, `drift_energy` in its drift and `rest_energy` in the rest, down to `held`
+    /// plus the work of the position forces over `dt` and [`ENERGY_HOLD_MARGIN`]; 1 while it
+    /// stands within that. Without `keep_drift` the drift is zero and the rest is the whole.
+    ///
+    /// `None`, with `keep_drift`, where the drift alone stands past that bound: the drift's
+    /// energy changes only by the work of the forces on the multibody's root translations, which
+    /// the bound counts, and by the rows that tie it to something outside itself, whose biased
+    /// pass pushes the drift too. No factor on the rest then reaches the bound, and the hold
+    /// scales the whole velocity: a free chain dropped flat onto the ground at 30 steps a second
+    /// in 2 substeps, its drift kept, ended its landing step at 44 J where the hold allowed 2 J,
+    /// 21 J of it in a drift rising at 2 m/s.
     ///
     /// The work's first term, `dt · v · f`, is read at the velocity the factor leaves: with `d`
     /// the drift of `v`, the scaled velocity `d + s · (v − d)` does `dt · d · f` and `s` times
@@ -1398,39 +1430,53 @@ impl Multibody {
         &self,
         drift_energy: Real,
         rest_energy: Real,
+        keep_drift: bool,
         held: Real,
         dt: Real,
         bodies: &RigidBodySet,
-    ) -> Real {
+    ) -> Option<Real> {
         let forces = &self.workspace.position_forces;
         let mut response = forces.clone();
         self.augmented_mass_indices
             .with_rearranged_rows_mut(&mut response, |response| {
                 self.inv_augmented_mass.solve_mut(response);
             });
-        let drift = self.drift(self.velocities.as_view(), bodies);
+        let drift = if keep_drift {
+            self.drift(self.velocities.as_view(), bodies)
+        } else {
+            DVector::zeros(self.velocities.len())
+        };
         let margin = 1.0 + ENERGY_HOLD_MARGIN;
         let drift_work = dt * drift.dot(forces);
         let rest_work = dt * self.velocities.dot(forces) - drift_work;
         let response_work = 0.5 * dt * dt * response.dot(forces);
         let energy = drift_energy + rest_energy;
         let allowed = (held + (drift_work + rest_work + response_work).max(0.0)) * margin;
-        if energy <= allowed || rest_energy <= 0.0 {
-            return 1.0;
+        if energy <= allowed {
+            return Some(1.0);
         }
-        if rest_work <= 0.0 {
-            return ((allowed - drift_energy).max(0.0) / rest_energy)
-                .simd_sqrt()
-                .min(1.0);
-        }
-        // rest_energy · s² − b · s − c = 0, for s ≥ 0.
+        // rest_energy · s² − b · s − c = 0, for s ≥ 0; c < 0 where the drift alone, at s = 0,
+        // stands past the bound.
         let b = margin * rest_work;
         let c = margin * (held + response_work.max(0.0) + drift_work) - drift_energy;
+        if keep_drift && c < 0.0 {
+            return None;
+        }
+        if rest_energy <= 0.0 {
+            return Some(1.0);
+        }
+        if rest_work <= 0.0 {
+            return Some(
+                ((allowed - drift_energy).max(0.0) / rest_energy)
+                    .simd_sqrt()
+                    .min(1.0),
+            );
+        }
         let discriminant = b * b + 4.0 * rest_energy * c;
         if discriminant <= 0.0 {
-            return (b / (2.0 * rest_energy)).clamp(0.0, 1.0);
+            return Some((b / (2.0 * rest_energy)).clamp(0.0, 1.0));
         }
-        ((b + discriminant.simd_sqrt()) / (2.0 * rest_energy)).clamp(0.0, 1.0)
+        Some(((b + discriminant.simd_sqrt()) / (2.0 * rest_energy)).clamp(0.0, 1.0))
     }
 
     // If the semi-implicit coriolis solve introduces more energy than the external
@@ -2315,7 +2361,7 @@ impl Multibody {
         self.update_rigid_bodies_internal(bodies, true, true, false);
         if let Some(ended) = ended {
             let (drift_energy, rest_energy, _) =
-                self.split_kinetic_energy(self.velocities.as_view(), bodies);
+                self.split_kinetic_energy(self.velocities.as_view(), true, bodies);
             if drift_energy + rest_energy > ended && rest_energy > 0.0 {
                 let scale = ((ended - drift_energy).max(0.0) / rest_energy).simd_sqrt();
                 self.scale_keeping_drift(scale, false, bodies);
