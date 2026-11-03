@@ -35,6 +35,27 @@ impl Default for GyroParams {
     }
 }
 
+/// What a multibody's energy is held to over a substep (see `update_multibody_dynamics`).
+pub(crate) struct MultibodyLedger {
+    /// The kinetic energy the multibody stood at before its move
+    /// (`Multibody::kicked_kinetic_energy`).
+    pub standing: Real,
+    /// The kinetic energy a substep its rows bore on is held to: the energy of the velocity it
+    /// moved with or, as for `standing`, of the velocity it started with if that is less.
+    pub held: Real,
+    /// The kinetic energy of the velocity it moved with.
+    pub moved: Real,
+    /// Its run of `VelocitySolver::multibody_ledger_poses`: where its links stood before the move.
+    pub poses: core::ops::Range<usize>,
+    /// The energy its joints' springs held before the move.
+    pub springs: Real,
+    /// The kinetic energy it stood at once its inertial forces turned its velocity for where
+    /// the move took it, before the stabilization pass.
+    pub turned: Real,
+    /// Whether the substep's rows changed the velocity it moves with.
+    pub solved: bool,
+}
+
 /// The solver-body buffers shared by the staged island solver. The actual solve (constraint
 /// init, PGS sweeps, integration, writeback) is driven by the staged solver's worker stages;
 /// this type only owns the reusable buffers they operate on.
@@ -44,15 +65,18 @@ pub(crate) struct VelocitySolver {
     pub generic_solver_vels: DVector,
     pub generic_solver_vels_increment: DVector,
     pub multibody_roots: Vec<MultibodyLinkId>,
-    /// The kinetic energy each multibody of `multibody_roots` moved through the current substep
-    /// with, when its energy is held, indexed like `multibody_roots`: read as the substep moves
-    /// the multibody, applied once its stabilization pass has settled the velocity it ends at.
-    pub multibody_energy_holds: Vec<Option<Real>>,
-    /// The kinetic energy each multibody of `multibody_roots` moved through the current substep
-    /// with (its velocity after the biased pass), when its energy is held, indexed like
-    /// `multibody_roots`: with the energy it was held to, the most the velocity a step ends with
-    /// keeps (`Multibody::step_end_energy_scale`).
-    pub multibody_moved_energies: Vec<Real>,
+    /// What the energy of each multibody of `multibody_roots` is held to over the current
+    /// substep, when its energy is held, indexed like `multibody_roots`: read as the substep
+    /// moves the multibody, applied once its stabilization pass has settled the velocity it ends
+    /// at (`update_multibody_dynamics`).
+    pub multibody_ledgers: Vec<Option<MultibodyLedger>>,
+    /// The poses the links of the multibodies of `multibody_ledgers` moved from over the
+    /// current substep, each ledger's run of them in its `poses`.
+    pub multibody_ledger_poses: Vec<(Vector, Rotation)>,
+    /// The kinetic energy each multibody of `multibody_roots` stands at as the step begins, where
+    /// its last substep left it (`MultibodyLedger::standing`), indexed like `multibody_roots`:
+    /// `None` where rows bore on that substep or it has none.
+    pub multibody_opening_standings: Vec<Option<Real>>,
     /// The generalized velocity every multibody starts the current substep with, its velocity
     /// increment applied and before any row of the substep is solved, indexed like
     /// `generic_solver_vels`.
@@ -118,8 +142,9 @@ impl VelocitySolver {
             generic_solver_vels: DVector::zeros(0),
             generic_solver_vels_increment: DVector::zeros(0),
             multibody_roots: Vec::new(),
-            multibody_energy_holds: Vec::new(),
-            multibody_moved_energies: Vec::new(),
+            multibody_ledgers: Vec::new(),
+            multibody_ledger_poses: Vec::new(),
+            multibody_opening_standings: Vec::new(),
             generic_free_vels: DVector::zeros(0),
             multibody_driven: Vec::new(),
             coupled_rows: CoupledRows::default(),

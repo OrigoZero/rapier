@@ -11,6 +11,11 @@ pub(crate) struct MultibodyWorkspace {
     /// forces, spring position terms), as the last acceleration update that measured them read
     /// them.
     pub position_forces: DVector,
+    /// The length of the substep that ended the multibody's last step, where no row bore on it,
+    /// and 0 before its first step, after a substep rows bore on, or once the continuous pass
+    /// took it back: the step that follows reads the energy the multibody stands at from the
+    /// accelerations that substep ended with (see `VelocitySolver::integrate_multibody_positions`).
+    pub last_substep_dt: Real,
 }
 
 impl MultibodyWorkspace {
@@ -19,6 +24,7 @@ impl MultibodyWorkspace {
         MultibodyWorkspace {
             accs: Vec::new(),
             position_forces: DVector::zeros(0),
+            last_substep_dt: 0.0,
         }
     }
 
