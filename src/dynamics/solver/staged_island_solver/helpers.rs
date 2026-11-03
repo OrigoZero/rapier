@@ -6,6 +6,7 @@ use crate::alloc_prelude::*;
 use crate::dynamics::solver::GenericJointConstraint;
 use crate::dynamics::solver::SolverVel;
 use crate::dynamics::solver::VelocitySolver;
+use crate::dynamics::solver::WritebackId;
 use crate::dynamics::solver::contact_constraint::{
     ContactConstraintsSet, GenericContactConstraint, GenericContactConstraintBuilder,
 };
@@ -172,8 +173,9 @@ impl VelocitySolver {
     /// into and that push stood in the energy the substep was held to: a chain hanging from its
     /// anchor with its second link knocking on the anchor's box took tens of kilojoules from a
     /// knock, read back as a ball flung at 14 m/s, and at 951 m/s once the continuous pass
-    /// swept it. A row that ties it to something that moves, or a motor, gives a struck or
-    /// driven multibody energy it keeps.
+    /// swept it. A row that ties it to something that moves, a contact whose surface slides
+    /// along itself (a conveyor's), or a motor, gives a struck, carried or driven multibody
+    /// energy it keeps.
     ///
     /// A move carries each joint's velocity unchanged in its parent's frame, so a link that
     /// turns over the move turns the velocity of every link below it with it, and velocities
@@ -240,8 +242,11 @@ impl VelocitySolver {
 
     /// Marks in `multibody_driven` each multibody of `multibody_roots` that something moves or
     /// drives through this substep's rows: a motor of one of its joints, a contact of `contacts`
-    /// with a dynamic body, a moving kinematic body or another multibody, or a row of `joints`
-    /// tying it to a rigid body or another multibody.
+    /// with a dynamic body, a moving kinematic body or another multibody, a contact of `contacts`
+    /// whose surface slides along itself (a friction row aiming at a velocity of its own, the
+    /// `tangent_velocity` of a conveyor), a row of `joints` tying it to a rigid body or another
+    /// multibody, or a motor row of `joints` (a motor of an impulse joint, whatever body it
+    /// ties the multibody to, a fixed one included).
     fn mark_driven_multibodies(
         &mut self,
         multibodies: &MultibodyJointSet,
@@ -275,6 +280,10 @@ impl VelocitySolver {
         for c in contacts {
             let generic1 = c.solver_vel1 != u32::MAX && c.generic_constraint_mask & 0b01 != 0;
             let generic2 = c.solver_vel2 != u32::MAX && c.generic_constraint_mask & 0b10 != 0;
+            // A surface sliding along itself carries what rests on it, from a fixed body too.
+            let sliding = c.tangent_part[..c.num_contacts as usize]
+                .iter()
+                .any(|part| part.rhs_wo_bias.iter().any(|target| *target != 0.0));
             // Whether the side `solver_vel` of a contact whose other side is the multibody
             // `own` moves: another multibody, a dynamic body, or a kinematic one in motion.
             let moves = |solver_vel: u32, generic: bool, im: Vector, own: u32| {
@@ -289,12 +298,12 @@ impl VelocitySolver {
                         || vel.angular != AngVector::default()
                 }
             };
-            if generic1 && moves(c.solver_vel2, generic2, c.im2, c.solver_vel1) {
+            if generic1 && (sliding || moves(c.solver_vel2, generic2, c.im2, c.solver_vel1)) {
                 if let Some(root) = root_of(c.solver_vel1) {
                     self.multibody_driven[root] = true;
                 }
             }
-            if generic2 && moves(c.solver_vel1, generic1, c.im1, c.solver_vel2) {
+            if generic2 && (sliding || moves(c.solver_vel1, generic1, c.im1, c.solver_vel2)) {
                 if let Some(root) = root_of(c.solver_vel2) {
                     self.multibody_driven[root] = true;
                 }
@@ -305,6 +314,9 @@ impl VelocitySolver {
                 (j.solver_vel1, j.is_rigid_body1),
                 (j.solver_vel2, j.is_rigid_body2),
             ];
+            // A motor of an impulse joint drives the multibody it holds, a fixed body on its
+            // other side included.
+            let motor = matches!(j.writeback_id, WritebackId::Motor(_));
             for (own, other) in [(sides[0], sides[1]), (sides[1], sides[0])] {
                 let (own_vel, own_rigid) = own;
                 if own_vel == u32::MAX || own_rigid {
@@ -312,7 +324,7 @@ impl VelocitySolver {
                 }
                 let (other_vel, other_rigid) = other;
                 let tied = other_vel != u32::MAX && (other_rigid || other_vel != own_vel);
-                if tied {
+                if motor || tied {
                     if let Some(root) = root_of(own_vel) {
                         self.multibody_driven[root] = true;
                     }
