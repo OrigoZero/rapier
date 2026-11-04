@@ -59,6 +59,10 @@ pub(crate) struct MultibodyLedger {
     pub turned: Real,
     /// Whether the substep's rows changed the velocity it moves with.
     pub solved: bool,
+    /// Whether rows bore on it over the substep and every one of them is a contact between two
+    /// of its own links (`VelocitySolver::multibody_self_contacts`,
+    /// `VelocitySolver::multibody_bound_out`): its links knocking on one another.
+    pub self_contact_only: bool,
 }
 
 /// The solver-body buffers shared by the staged island solver. The actual solve (constraint
@@ -89,6 +93,14 @@ pub(crate) struct VelocitySolver {
     /// Whether something moves or drives each multibody of `multibody_roots` through the
     /// current substep's rows, indexed like `multibody_roots`.
     pub multibody_driven: Vec<bool>,
+    /// Whether a contact between two of its own links bears on each multibody of
+    /// `multibody_roots` over the current substep, indexed like `multibody_roots`.
+    pub multibody_self_contacts: Vec<bool>,
+    /// Whether a row of the current substep other than a contact between two of its own links
+    /// bears on each multibody of `multibody_roots`: a contact with anything outside it, a row of
+    /// one of its joints (a limit or a motor), or a row of an impulse joint, indexed like
+    /// `multibody_roots`.
+    pub multibody_bound_out: Vec<bool>,
     /// The multibody joint rows each pass solves its multibody contacts together with, and the
     /// buffers of those blocks (see [`crate::dynamics::solver::coupled_multibody_rows`]).
     pub coupled_rows: CoupledRows,
@@ -152,6 +164,8 @@ impl VelocitySolver {
             multibody_opening_standings: Vec::new(),
             generic_free_vels: DVector::zeros(0),
             multibody_driven: Vec::new(),
+            multibody_self_contacts: Vec::new(),
+            multibody_bound_out: Vec::new(),
             coupled_rows: CoupledRows::default(),
             #[cfg(feature = "dim3")]
             solver_gyro: Vec::new(),
