@@ -173,13 +173,19 @@ impl VelocitySolver {
     /// with, or, for a multibody no row of the substep ties to something that moves or drives it
     /// ([`Self::mark_driven_multibodies`]), with the velocity it started the substep with before
     /// any row was solved if that is less. In the first substep of a step it stands at the energy
-    /// the step before ended at ([`Multibody::open_step`]) where no row bore on it, and at that
-    /// energy less what a knock of its own links took where their contacts on one another are the
-    /// only rows that did: the velocity a whipping chain opens a step with reads tens of
-    /// kilojoules away from the energy that step opened at, and read there, a knock in the first
-    /// substep stood a chain of twelve 4 kg links under a 20000 kg ball 53 kJ below where its last
-    /// step ended, 6% of its swing, at 120 steps a second with `enhanced-determinism`, where the
-    /// knock itself took 2.5 kJ.
+    /// the step before ended at ([`Multibody::open_step`]) where no row bore on it. Where the
+    /// only rows that did are contacts of its own links on one another, it stands at the energy
+    /// it stood at before them (the one the step opened at, in the first substep) less the work
+    /// their impulses did on it, the kinetic energy of the velocity it started the substep with
+    /// less that of the velocity they left, read at those velocities. The velocity a whipping
+    /// chain opens a step with reads tens of kilojoules away from the energy that step opened
+    /// at: read there, a knock in the first substep stood a chain of twelve 4 kg links under a
+    /// 20000 kg ball 53 kJ below where its last step ended, 6% of its swing, at 120 steps a second
+    /// with `enhanced-determinism`, where the knock itself took 2.5 kJ. Read half a kick back,
+    /// the knock's work holds the impulses' work against the half kick as well, which the
+    /// Coriolis terms of a whipping chain make large: the engine's chain at 120 steps a second
+    /// lost 13 kJ, 1.45% of its swing, in a step whose knock pressed 37 N s along its normal and
+    /// 18 N s across it, its links parting at 2 m/s.
     ///
     /// The rows that hold a multibody against fixed bodies and bodies at rest, and its own
     /// joints' limits, give it no energy, but their biased pass pushes it out of what it sank
@@ -244,20 +250,26 @@ impl VelocitySolver {
                 let free = self
                     .generic_free_vels
                     .rows(multibody.solver_id as usize, multibody.ndofs());
-                if let (Some(m), Some(f)) = (held, multibody.kinetic_energy_to_hold(free, bodies)) {
+                let started = multibody.kinetic_energy_to_hold(free, bodies);
+                if let (Some(m), Some(f)) = (held, started) {
                     held = Some(m.min(f));
                 }
-                match (
-                    opening,
-                    left,
-                    multibody.kicked_kinetic_energy(free, -0.5 * params.dt, bodies),
-                ) {
-                    (None, Some(l), Some(f)) => standing = Some(l.min(f)),
-                    // A knock of its own links in the substep a step opens with: the energy the
-                    // step opened at, less what the knock took, both sides of it read at the
-                    // same half kick.
-                    (Some(o), Some(l), Some(f)) if solved => standing = Some(o - (f - l).max(0.0)),
-                    _ => {}
+                let kicked_free = multibody.kicked_kinetic_energy(free, -0.5 * params.dt, bodies);
+                if self_contact_only {
+                    // What the knock took is the work of its impulses: the kinetic energy of
+                    // the velocity it started the substep with less that of the velocity they
+                    // left, where that is a loss, both read at those velocities themselves. The
+                    // half kick the standing energy is read back from is large for a whipping
+                    // chain, and the impulses' work against it is no part of the knock.
+                    let taken = match (started, moved) {
+                        (Some(f), Some(m)) => (f - m).max(0.0),
+                        _ => 0.0,
+                    };
+                    if let Some(base) = opening.or(kicked_free) {
+                        standing = Some(base - taken);
+                    }
+                } else if let (None, Some(l), Some(f)) = (opening, left, kicked_free) {
+                    standing = Some(l.min(f));
                 }
             }
             let damped = if solved && !self_contact_only {
@@ -447,9 +459,9 @@ impl VelocitySolver {
     /// drift alone stands past what either factor allows.
     ///
     /// A contact between two of its own links moves momentum from link to link and does no work
-    /// on the multibody but what it takes from it: what its rows took is the energy of the
-    /// velocity it started the substep with less the energy of the velocity they left, both read
-    /// the same half kick back, and the energy it stood at before its move is that much below the
+    /// on the multibody but what it takes from it: what its rows took is the kinetic energy of
+    /// the velocity it started the substep with less that of the velocity they left, read at
+    /// those velocities, and the energy it stood at before its move is that much below the
     /// energy it stood at before them (the energy the step opened at, in a step's first
     /// substep), so what a knock takes stays taken, and the integration's own rounding on
     /// either side of the knock is given back, up as well as down. Held from above, a chain of
