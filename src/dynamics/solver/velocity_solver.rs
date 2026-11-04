@@ -39,11 +39,13 @@ impl Default for GyroParams {
 pub(crate) struct MultibodyLedger {
     /// The kinetic energy the multibody stood at before its move
     /// (`Multibody::kicked_kinetic_energy`), or, for the first substep of a step, the energy the
-    /// last step left it standing at (`Multibody::open_step`).
+    /// last step left it standing at (`Multibody::open_step`), less what a knock of its own links
+    /// took over the substep's rows where those are the only rows that bore on it.
     pub standing: Real,
     /// The kinetic energy the joints' damping took from the second half of the kick the
     /// multibody moved with, between the energy it stood at and its move
-    /// (`Multibody::moving_damping_loss`); 0 where the substep's rows changed that velocity.
+    /// (`Multibody::moving_damping_loss`); 0 where rows other than the contacts of its own links
+    /// on one another changed that velocity.
     pub damped: Real,
     /// The kinetic energy a substep its rows bore on is held to: the energy of the velocity it
     /// moved with or, as for `standing`, of the velocity it started with if that is less.
