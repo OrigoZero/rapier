@@ -246,7 +246,10 @@ impl VelocitySolver {
                     standing = Some(s.min(f));
                 }
             }
-            let damped = if solved {
+            let self_contact_only = !driven
+                && self.multibody_self_contacts[root]
+                && !self.multibody_bound_out[root];
+            let damped = if solved && !self_contact_only {
                 0.0
             } else {
                 multibody.moving_damping_loss(params.dt, bodies)
@@ -284,6 +287,7 @@ impl VelocitySolver {
                     .kinetic_energy_to_hold(multibody.velocities.as_view(), bodies)
                     .unwrap_or(0.0),
                 solved,
+                self_contact_only,
             });
             self.multibody_ledgers.push(ledger);
         }
@@ -295,7 +299,9 @@ impl VelocitySolver {
     /// whose surface slides along itself (a friction row aiming at a velocity of its own, the
     /// `tangent_velocity` of a conveyor), a row of `joints` tying it to a rigid body or another
     /// multibody, or a motor row of `joints` (a motor of an impulse joint, whatever body it
-    /// ties the multibody to, a fixed one included).
+    /// ties the multibody to, a fixed one included). Marks in `multibody_self_contacts` each
+    /// multibody a contact of two of its own links bears on, and in `multibody_bound_out` each
+    /// one any other row bears on: a contact with anything outside it or any row of `joints`.
     fn mark_driven_multibodies(
         &mut self,
         multibodies: &MultibodyJointSet,
@@ -304,6 +310,12 @@ impl VelocitySolver {
     ) {
         self.multibody_driven.clear();
         self.multibody_driven
+            .resize(self.multibody_roots.len(), false);
+        self.multibody_self_contacts.clear();
+        self.multibody_self_contacts
+            .resize(self.multibody_roots.len(), false);
+        self.multibody_bound_out.clear();
+        self.multibody_bound_out
             .resize(self.multibody_roots.len(), false);
         // The roots take their solver ids in order, each after the one before it.
         let solver_ids: Vec<u32> = self
@@ -347,6 +359,23 @@ impl VelocitySolver {
                         || vel.angular != AngVector::default()
                 }
             };
+            // A contact between two links of one multibody exchanges momentum among its links
+            // alone; any other contact binds the multibody to something outside it.
+            let own_links = generic1 && generic2 && c.solver_vel1 == c.solver_vel2;
+            if own_links {
+                if let Some(root) = root_of(c.solver_vel1) {
+                    self.multibody_self_contacts[root] = true;
+                }
+            } else {
+                for (generic, solver_vel) in [(generic1, c.solver_vel1), (generic2, c.solver_vel2)]
+                {
+                    if generic {
+                        if let Some(root) = root_of(solver_vel) {
+                            self.multibody_bound_out[root] = true;
+                        }
+                    }
+                }
+            }
             if generic1 && (sliding || moves(c.solver_vel2, generic2, c.im2, c.solver_vel1)) {
                 if let Some(root) = root_of(c.solver_vel1) {
                     self.multibody_driven[root] = true;
@@ -371,6 +400,9 @@ impl VelocitySolver {
                 if own_vel == u32::MAX || own_rigid {
                     continue;
                 }
+                if let Some(root) = root_of(own_vel) {
+                    self.multibody_bound_out[root] = true;
+                }
                 let (other_vel, other_rigid) = other;
                 let tied = other_vel != u32::MAX && (other_rigid || other_vel != own_vel);
                 if motor || tied {
@@ -387,7 +419,7 @@ impl VelocitySolver {
     /// accelerations its applied forces give it and the velocity increment of the next substep.
     ///
     /// A multibody whose energy is held, with no joint spring and on which no row bore over the
-    /// substep, stands,
+    /// substep, or none but the contacts of its own links on one another, stands,
     /// once half of the next kick is applied, at the energy it stood at before its move
     /// (`MultibodyLedger::standing`) plus the work the forces on it did over the move
     /// ([`Multibody::work_since`]) less what its joints' damping takes: the velocity it ends at
@@ -402,6 +434,16 @@ impl VelocitySolver {
     /// follows the step push it, and give it no energy. The hold from above scales the velocity
     /// less its drift ([`Multibody::scale_keeping_drift`]), and the whole velocity where the
     /// drift alone stands past what either factor allows.
+    ///
+    /// A contact between two of its own links moves momentum from link to link and does no work
+    /// on the multibody but what it takes from it: the energy it stood at before its move is
+    /// read at the velocity its rows left where that is less than the velocity it started the
+    /// substep with, so what a knock takes stays taken, and the integration's own rounding on
+    /// either side of the knock is given back, up as well as down. Held from above, a chain of
+    /// twelve 4 kg links under a 5000 kg ball, let go 70 degrees up with its links knocking on
+    /// one another, kept every loss the semi-implicit update of its whipping links made in the
+    /// substeps of a knock and none of the gains as large that followed: it lost 14% of its
+    /// swing in one step at 30 steps a second in 2 substeps, and 29% over eight seconds.
     pub(super) fn update_multibody_dynamics(
         &mut self,
         params: &IntegrationParameters,
@@ -426,7 +468,8 @@ impl VelocitySolver {
                 let ended = multibody
                     .kinetic_energy_to_hold(multibody.velocities.as_view(), bodies)
                     .unwrap_or(0.0);
-                let quiet = !ledger.solved && !ledger.sprung && ended == ledger.turned;
+                let quiet = !ledger.sprung
+                    && ((!ledger.solved && ended == ledger.turned) || ledger.self_contact_only);
                 if !quiet {
                     if is_last_substep {
                         multibody.clear_step_end();

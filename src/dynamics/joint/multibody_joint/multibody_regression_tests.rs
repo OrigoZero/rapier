@@ -3102,6 +3102,8 @@ struct HeavyBallSwing {
     not_finite_at: Option<usize>,
     /// The most the chain's energy fell over one step, as a share of the energy its swing has.
     steepest_fall: Real,
+    /// The number of steps in which two of the chain's links, the ball among them, touched.
+    knocks: usize,
 }
 
 /// Twelve 4 kg capsule links 0.55 m apart on spherical multibody joints, hung from a fixed body
@@ -3116,10 +3118,33 @@ fn heavy_ball_on_light_links(
     substeps: usize,
     undamped: bool,
 ) -> HeavyBallSwing {
+    heavy_ball_on_light_links_framed(
+        ball_mass,
+        rate,
+        substeps,
+        undamped,
+        Rotation::IDENTITY,
+        60.0,
+    )
+}
+
+/// The chain of [`heavy_ball_on_light_links`] hung at `x` along X, with each joint's frame turned
+/// by `frame` in both of its bodies. The frames turned from the X axis to the Y axis, as an engine builds a joint
+/// about an axis along each link, round the chain's state off the plane it was raised in: the
+/// chain leaves that plane as it swings, and its links knock on one another.
+#[cfg(feature = "dim3")]
+fn heavy_ball_on_light_links_framed(
+    ball_mass: Real,
+    rate: Real,
+    substeps: usize,
+    undamped: bool,
+    frame: Rotation,
+    x: Real,
+) -> HeavyBallSwing {
     let mut world = PhysicsWorld::new();
     world.integration_parameters.dt = 1.0 / rate;
     world.integration_parameters.num_solver_iterations = substeps;
-    let anchor_at = Vector::new(60.0, 16.0, 60.0);
+    let anchor_at = Vector::new(x, 16.0, 60.0);
     let (pitch, count, ball_radius, eye) = (0.55 as Real, 12, 0.42 as Real, 0.12 as Real);
     let angle = (70.0 as Real).to_radians();
     let raised = Rotation::from_axis_angle(Vector::X, angle);
@@ -3162,8 +3187,8 @@ fn heavy_ball_on_light_links(
             Vector::new(0.0, pitch / 2.0, 0.0)
         };
         let joint = SphericalJointBuilder::new()
-            .local_anchor1(anchor1)
-            .local_anchor2(anchor2)
+            .local_frame1(Pose::from_parts(anchor1, frame))
+            .local_frame2(Pose::from_parts(anchor2, frame))
             .contacts_enabled(false)
             .build();
         world.insert_multibody_joint(parent, *body, joint).unwrap();
@@ -3190,9 +3215,17 @@ fn heavy_ball_on_light_links(
         rose: Real::MIN,
         not_finite_at: None,
         steepest_fall: 0.0,
+        knocks: 0,
     };
     for step in 0..(8.0 * rate) as usize {
         world.step();
+        if world
+            .narrow_phase
+            .contact_pairs()
+            .any(|pair| pair.has_any_active_contact())
+        {
+            result.knocks += 1;
+        }
         let body = &world.bodies[ball];
         if !body.translation().is_finite() || !body.linvel().is_finite() {
             result.not_finite_at = Some(step);
@@ -3290,6 +3323,62 @@ fn a_free_chain_under_a_heavy_ball_on_damped_joints_keeps_its_swing() {
     assert!(
         failed.is_empty(),
         "a free chain under a heavy ball on damped joints did not keep its swing: {failed:?}"
+    );
+}
+
+/// The chain of [`a_free_chain_under_a_heavy_ball_on_damped_joints_keeps_its_swing`] hung at x
+/// 760 on joints whose frames are turned from the X axis to the Y axis
+/// ([`heavy_ball_on_light_links_framed`]), with a 2000, a 5000 and a 20000 kg ball, at 30 steps
+/// a second in 2 substeps, 60 in 2 and in 4, 120 in 1 and 240 in 1: it leaves the plane it was
+/// raised in, and in some of these swings its links knock on one another (the 5000 kg chain at
+/// 30 and 60 steps a second in 2 substeps; the 20000 kg chain at 60 in 2 and 120 in 1 with
+/// `enhanced-determinism`). Its energy never stands 7.5% of its swing's below where it started
+/// nor 2% above, no step takes a tenth of it, and its state stays a number. A substep of a
+/// knock held the chain's energy only from above, keeping every loss the update of its whipping
+/// links made and none of the gains: the 5000 kg chain lost 19% of its swing in one step and
+/// 72% over the eight seconds at 30 steps a second in 2 substeps, and 8% at 60 in 2; with
+/// `enhanced-determinism`, the 20000 kg chain lost 23% in one step and 58% at 60 in 2, and 9%
+/// at 120 in 1. What a knock itself takes stays taken: the 20000 kg chain at 120 steps a second
+/// loses 6% of its swing in the step its ball strikes its eleventh link.
+#[test]
+#[cfg(feature = "dim3")]
+fn a_free_chain_whose_links_knock_on_one_another_keeps_its_swing() {
+    let frame = Rotation::from_rotation_arc(Vector::X, Vector::Y);
+    let mut failed = Vec::new();
+    let mut knocked = Vec::new();
+    for ball_mass in [2000.0 as Real, 5000.0, 20000.0] {
+        for (rate, substeps) in [(30.0, 2), (60.0, 2), (60.0, 4), (120.0, 1), (240.0, 1)] {
+            let swing =
+                heavy_ball_on_light_links_framed(ball_mass, rate, substeps, false, frame, 760.0);
+            if swing.knocks > 0 {
+                knocked.push((ball_mass, rate, substeps, swing.knocks));
+            }
+            if swing.not_finite_at.is_some()
+                || swing.least < -0.075
+                || swing.most > 0.02
+                || swing.steepest_fall > 0.1
+            {
+                failed.push(alloc::format!(
+                    "{ball_mass} kg, {rate} Hz x {substeps}: not finite at {:?}, energy from {} \
+                     to {} of its swing's, {} at the end, {} in one step at most, {} steps \
+                     knocking",
+                    swing.not_finite_at,
+                    swing.least,
+                    swing.most,
+                    swing.end,
+                    swing.steepest_fall,
+                    swing.knocks
+                ));
+            }
+        }
+    }
+    assert!(
+        knocked.len() >= 2,
+        "the chain's links knocked on one another in fewer than two swings: {knocked:?}"
+    );
+    assert!(
+        failed.is_empty(),
+        "a free chain whose links knock on one another did not keep its swing: {failed:?}"
     );
 }
 
