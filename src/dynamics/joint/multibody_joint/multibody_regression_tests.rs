@@ -3332,14 +3332,16 @@ fn a_free_chain_under_a_heavy_ball_on_damped_joints_keeps_its_swing() {
 /// a second in 2 substeps, 60 in 2 and in 4, 120 in 1 and 240 in 1: it leaves the plane it was
 /// raised in, and in some of these swings its links knock on one another (the 5000 kg chain at
 /// 30 and 60 steps a second in 2 substeps; the 20000 kg chain at 60 in 2 and 120 in 1 with
-/// `enhanced-determinism`). Its energy never stands 7.5% of its swing's below where it started
-/// nor 2% above, no step takes a tenth of it, and its state stays a number. A substep of a
-/// knock held the chain's energy only from above, keeping every loss the update of its whipping
+/// `enhanced-determinism`). Its energy never stands 3% of its swing's below where it started
+/// nor 2% above, no step takes 2% of it, and its state stays a number. A substep of a knock
+/// held the chain's energy only from above, keeping every loss the update of its whipping
 /// links made and none of the gains: the 5000 kg chain lost 19% of its swing in one step and
 /// 72% over the eight seconds at 30 steps a second in 2 substeps, and 8% at 60 in 2; with
 /// `enhanced-determinism`, the 20000 kg chain lost 23% in one step and 58% at 60 in 2, and 9%
-/// at 120 in 1. What a knock itself takes stays taken: the 20000 kg chain at 120 steps a second
-/// loses 6% of its swing in the step its ball strikes its eleventh link.
+/// at 120 in 1. A knock in the first substep of a step read the energy the chain stood at from
+/// the velocity it opened the step with, 53 kJ below the energy its last step ended at: with
+/// `enhanced-determinism`, the 20000 kg chain at 120 steps a second lost 6% of its swing in the
+/// step its ball struck its eleventh link, of which the knock took 0.3%.
 #[test]
 #[cfg(feature = "dim3")]
 fn a_free_chain_whose_links_knock_on_one_another_keeps_its_swing() {
@@ -3354,9 +3356,9 @@ fn a_free_chain_whose_links_knock_on_one_another_keeps_its_swing() {
                 knocked.push((ball_mass, rate, substeps, swing.knocks));
             }
             if swing.not_finite_at.is_some()
-                || swing.least < -0.075
+                || swing.least < -0.03
                 || swing.most > 0.02
-                || swing.steepest_fall > 0.1
+                || swing.steepest_fall > 0.02
             {
                 failed.push(alloc::format!(
                     "{ball_mass} kg, {rate} Hz x {substeps}: not finite at {:?}, energy from {} \
