@@ -11,6 +11,8 @@ use crate::dynamics::{IntegrationParameters, JointIndex};
 use crate::math::{DIM, Real};
 use crate::utils;
 #[cfg(feature = "dim3")]
+use crate::utils::CrossProduct;
+#[cfg(feature = "dim3")]
 use crate::utils::OrthonormalBasis;
 use crate::utils::{
     AngularInertiaOps, ComponentMul, CrossProductMatrix, DotProduct, IndexMut2, MatrixColumn,
@@ -128,6 +130,22 @@ pub struct JointConstraintHelper<N: ScalarType> {
     pub cmat2_basis: [N::AngVector; 2],
     pub lin_err: N::Vector,
     pub ang_err: N::Rotation,
+    /// The offset from each body's centre of mass of the point a locked row holds: the second
+    /// frame's origin for both bodies along the locked axes.
+    pub arm1: N::Vector,
+    pub arm2: N::Vector,
+    /// The offset of the first frame's origin from the first body's centre of mass.
+    pub anchor_arm1: N::Vector,
+    /// The velocity of the held points' separation, over a substep, that their arms turning at
+    /// the bodies' angular velocities carry: half a substep of the arms' centripetal
+    /// accelerations (see [`Self::with_motion`]).
+    pub lin_turn: N::Vector,
+    /// The velocity of the second frame's origin relative to the first's (see
+    /// [`Self::with_motion`]).
+    pub anchor_vel: N::Vector,
+    /// The centripetal acceleration of the second frame's origin relative to the first's, the
+    /// bodies turning at their angular velocities (see [`Self::with_motion`]).
+    pub anchor_turn: N::Vector,
 }
 
 impl<N: ScalarType> JointConstraintHelper<N> {
@@ -141,6 +159,7 @@ impl<N: ScalarType> JointConstraintHelper<N> {
         let mut frame1 = *frame1;
         let basis = frame1.rotation().to_mat();
         let lin_err = frame2.translation() - frame1.translation();
+        let anchor_arm1 = frame1.translation() - *world_com1;
 
         // Adjust the point of application of the force for the first body,
         // by snapping free axes to the second frame's center (to account for
@@ -189,6 +208,12 @@ impl<N: ScalarType> JointConstraintHelper<N> {
             ],
             lin_err,
             ang_err,
+            arm1: r1,
+            arm2: r2,
+            anchor_arm1,
+            lin_turn: Default::default(),
+            anchor_vel: Default::default(),
+            anchor_turn: Default::default(),
         };
         #[cfg(feature = "dim3")]
         return Self {
@@ -199,7 +224,70 @@ impl<N: ScalarType> JointConstraintHelper<N> {
             ang_basis,
             lin_err,
             ang_err,
+            arm1: r1,
+            arm2: r2,
+            anchor_arm1,
+            lin_turn: Default::default(),
+            anchor_vel: Default::default(),
+            anchor_turn: Default::default(),
         };
+    }
+
+    /// Sets [`Self::lin_turn`], [`Self::anchor_vel`] and [`Self::anchor_turn`] from the
+    /// bodies' linear velocities `linvel1`, `linvel2`, their angular velocities `angvel1`,
+    /// `angvel2`, and the substep length `dt`.
+    ///
+    /// A substep moves each body's centre of mass along a straight line and turns its arm about
+    /// it, so a row whose velocity holds two points together at the substep's start leaves them
+    /// apart, at its end, by half a substep squared of the arms' centripetal accelerations
+    /// `ω × (ω × r)`: the chord a turning arm cuts across the arc of its point. The row's
+    /// velocity that keeps them together over the substep carries that separation's velocity,
+    /// `dt / 2` of those accelerations, and the stabilization pass that ends the substep keeps
+    /// it rather than taking it back out. Removed there, it was a projection of the velocity the
+    /// bodies move on with, taken at every substep: a 1 kg rod swinging from a ball joint lost
+    /// 56% of its energy in 10 s at 30 steps a second in 4 substeps and 39% at 240 steps in 1.
+    /// Carried, it is the velocity the next substep turns back onto the arc, and the swing keeps
+    /// its energy.
+    #[cfg(feature = "dim3")]
+    #[must_use]
+    pub fn with_motion(
+        mut self,
+        linvel1: N::Vector,
+        angvel1: N::Vector,
+        linvel2: N::Vector,
+        angvel2: N::Vector,
+        dt: N,
+    ) -> Self {
+        let turn1 = angvel1.gcross(angvel1.gcross(self.arm1));
+        let turn2 = angvel2.gcross(angvel2.gcross(self.arm2));
+        self.lin_turn = (turn2 - turn1) * (dt * N::splat(0.5));
+        let anchor_turn1 = angvel1.gcross(angvel1.gcross(self.anchor_arm1));
+        self.anchor_turn = turn2 - anchor_turn1;
+        self.anchor_vel =
+            linvel2 + angvel2.gcross(self.arm2) - linvel1 - angvel1.gcross(self.anchor_arm1);
+        self
+    }
+
+    /// The 2D form of the 3D `with_motion`: sets [`Self::lin_turn`], [`Self::anchor_vel`] and
+    /// [`Self::anchor_turn`] from the bodies' velocities and the substep length `dt`.
+    #[cfg(feature = "dim2")]
+    #[must_use]
+    pub fn with_motion(
+        mut self,
+        linvel1: N::Vector,
+        angvel1: N,
+        linvel2: N::Vector,
+        angvel2: N,
+        dt: N,
+    ) -> Self {
+        let turn1 = -(self.arm1 * (angvel1 * angvel1));
+        let turn2 = -(self.arm2 * (angvel2 * angvel2));
+        self.lin_turn = (turn2 - turn1) * (dt * N::splat(0.5));
+        let anchor_turn1 = -(self.anchor_arm1 * (angvel1 * angvel1));
+        self.anchor_turn = turn2 - anchor_turn1;
+        self.anchor_vel =
+            linvel2 + angvel2.gcross(self.arm2) - linvel1 - angvel1.gcross(self.anchor_arm1);
+        self
     }
 
     pub fn limit_linear<const LANES: usize>(
@@ -263,8 +351,15 @@ impl<N: ScalarType> JointConstraintHelper<N> {
         let mut ang_jac1: N::AngVector = Default::default();
         let mut ang_jac2: N::AngVector = Default::default();
 
+        // The relative velocity and turning acceleration of the frames' origins, within the
+        // coupled axes.
+        let mut coupled_vel: N::Vector = Default::default();
+        let mut coupled_turn: N::Vector = Default::default();
         for i in 0..DIM {
             if coupled_axes & (1 << i) != 0 {
+                let axis = self.basis.column(i);
+                coupled_vel += axis * axis.gdot(self.anchor_vel);
+                coupled_turn += axis * axis.gdot(self.anchor_turn);
                 let coeff = self.basis.column(i).gdot(self.lin_err);
                 lin_jac += self.basis.column(i) * coeff;
                 #[cfg(feature = "dim2")]
@@ -280,14 +375,28 @@ impl<N: ScalarType> JointConstraintHelper<N> {
             }
         }
 
+        let dt = N::splat(params.dt);
+        let inv_dt = N::splat(params.inv_dt());
+        let separation = lin_jac;
         let dist = lin_jac.simd_length();
         let inv_dist = crate::utils::simd_inv(dist);
         lin_jac *= inv_dist;
         ang_jac1 *= inv_dist;
         ang_jac2 *= inv_dist;
 
+        // The velocity the distance takes over a substep beyond its rate of change: the origins
+        // parting at their relative velocity along a straight line part by more than that rate
+        // says (the chord's sag: a rope turning about its anchor lengthens at the square of its
+        // turn), and their arms turning bend their paths. The row carries it in both passes, as a
+        // locked row carries its own (see `with_motion`); dropped by the stabilization pass, a
+        // 1 kg ball swinging on a taut 1 m rope lost 36% of its energy in 10 s at 30 steps a
+        // second in 4 substeps. The chord is measured exactly, so it never exceeds the distance
+        // the velocity across the rope covers in the substep, however short the rope.
+        let moved = (separation + coupled_vel * dt).simd_length();
+        let chord = moved - dist - lin_jac.gdot(coupled_vel) * dt;
+        let curvature_vel = chord * inv_dt + lin_jac.gdot(coupled_turn) * (dt * N::splat(0.5));
+
         let [min, max] = limits;
-        let inv_dt = N::splat(params.inv_dt());
 
         // The upper bound's row (a rope's) pulls the bodies together: a positive
         // impulse closes the distance. It lets them close at any speed and part no
@@ -306,7 +415,8 @@ impl<N: ScalarType> JointConstraintHelper<N> {
         let held = lower & max.simd_le(min);
         let at_lower = lower & !held & (dist - min).simd_lt(max - dist);
 
-        let rhs_wo_bias = zero.select(held, lower_rhs_wo_bias.select(at_lower, upper_rhs_wo_bias));
+        let rhs_wo_bias = zero.select(held, lower_rhs_wo_bias.select(at_lower, upper_rhs_wo_bias))
+            + curvature_vel;
 
         let ii_ang_jac1 = body1.ii.transform_vector(ang_jac1);
         let ii_ang_jac2 = body2.ii.transform_vector(ang_jac2);
@@ -494,7 +604,7 @@ impl<N: ScalarType> JointConstraintHelper<N> {
         #[cfg(feature = "dim3")]
         let ang_jac2 = self.cmat2_basis.column(locked_axis).into();
 
-        let rhs_wo_bias = N::zero();
+        let rhs_wo_bias = lin_jac.gdot(self.lin_turn);
         let rhs_bias = lin_jac.gdot(self.lin_err) * erp_inv_dt;
 
         let ii_ang_jac1 = body1.ii.transform_vector(ang_jac1);
