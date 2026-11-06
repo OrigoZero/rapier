@@ -113,6 +113,23 @@ impl<N: ScalarType, const LANES: usize> JointConstraint<N, LANES> {
     }
 }
 
+/// The part of a row's position correction `bias` (the velocity its biased pass asks for to
+/// close the gap the substep before left) that the stabilization pass ending the substep keeps:
+/// the velocity `turn` that the bodies' turning parts the row's points by over a substep, as far
+/// as it goes the way of the correction and no further than the correction itself.
+///
+/// The gap a turning joint leaves over a substep is the chord its points' arms cut across their
+/// arcs; carried, its velocity is the one the next substep turns back onto the arc. A gap made by
+/// anything else is closed by the biased pass and its velocity taken out by the stabilization
+/// pass, as for any row. Bounding the carry by the correction holds it to a gap the substep
+/// actually left: a carry read from the angular velocities alone fed a body's spin back into its
+/// rows wherever its joints could only be held by turning it (a hinge chain locked to a plane
+/// spun up without bound).
+fn turn_carried<N: ScalarType>(turn: N, bias: N) -> N {
+    let zero = N::zero();
+    turn.simd_clamp(bias.simd_min(zero), bias.simd_max(zero))
+}
+
 #[derive(Debug, Copy, Clone)]
 pub struct JointConstraintHelper<N: ScalarType> {
     pub basis: N::Matrix,
@@ -240,14 +257,13 @@ impl<N: ScalarType> JointConstraintHelper<N> {
     /// A substep moves each body's centre of mass along a straight line and turns its arm about
     /// it, so a row whose velocity holds two points together at the substep's start leaves them
     /// apart, at its end, by half a substep squared of the arms' centripetal accelerations
-    /// `ω × (ω × r)`: the chord a turning arm cuts across the arc of its point. The row's
-    /// velocity that keeps them together over the substep carries that separation's velocity,
-    /// `dt / 2` of those accelerations, and the stabilization pass that ends the substep keeps
-    /// it rather than taking it back out. Removed there, it was a projection of the velocity the
-    /// bodies move on with, taken at every substep: a 1 kg rod swinging from a ball joint lost
-    /// 56% of its energy in 10 s at 30 steps a second in 4 substeps and 39% at 240 steps in 1.
-    /// Carried, it is the velocity the next substep turns back onto the arc, and the swing keeps
-    /// its energy.
+    /// `ω × (ω × r)`: the chord a turning arm cuts across the arc of its point. The next
+    /// substep's biased pass closes that gap at `dt / 2` of those accelerations, and its
+    /// stabilization pass keeps that much of the correction (`turn_carried`) rather than taking
+    /// it back out. Removed there, it was a projection of the velocity the bodies move on with,
+    /// taken at every substep: a 1 kg rod swinging from a ball joint lost 56% of its energy in
+    /// 10 s at 30 steps a second in 4 substeps and 39% at 240 steps in 1. Carried, it is the
+    /// velocity the next substep turns back onto the arc, and the swing keeps its energy.
     #[cfg(feature = "dim3")]
     #[must_use]
     pub fn with_motion(
@@ -324,7 +340,8 @@ impl<N: ScalarType> JointConstraintHelper<N> {
         let rhs_bias = (((dist - limits[1]).simd_max(zero) - (limits[0] - dist).simd_max(zero))
             * erp_inv_dt)
             .simd_clamp(-max_bias, max_bias);
-        constraint.rhs = constraint.rhs_wo_bias + rhs_bias;
+        constraint.rhs_wo_bias = turn_carried(constraint.lin_jac.gdot(self.lin_turn), rhs_bias);
+        constraint.rhs = rhs_bias;
         constraint.cfm_coeff = cfm_coeff;
         constraint.impulse_bounds = [
             N::splat(-Real::INFINITY).select(min_enabled, zero),
@@ -387,11 +404,11 @@ impl<N: ScalarType> JointConstraintHelper<N> {
         // The velocity the distance takes over a substep beyond its rate of change: the origins
         // parting at their relative velocity along a straight line part by more than that rate
         // says (the chord's sag: a rope turning about its anchor lengthens at the square of its
-        // turn), and their arms turning bend their paths. The row carries it in both passes, as a
-        // locked row carries its own (see `with_motion`); dropped by the stabilization pass, a
-        // 1 kg ball swinging on a taut 1 m rope lost 36% of its energy in 10 s at 30 steps a
-        // second in 4 substeps. The chord is measured exactly, so it never exceeds the distance
-        // the velocity across the rope covers in the substep, however short the rope.
+        // turn), and their arms turning bend their paths. The stabilization pass keeps that much
+        // of the row's correction, as a locked row keeps its own (see `with_motion`); dropped
+        // there, a 1 kg ball swinging on a taut 1 m rope lost 36% of its energy in 10 s at 30
+        // steps a second in 4 substeps. The chord is measured exactly, so it never exceeds the
+        // distance the velocity across the rope covers in the substep, however short the rope.
         let moved = (separation + coupled_vel * dt).simd_length();
         let chord = moved - dist - lin_jac.gdot(coupled_vel) * dt;
         let curvature_vel = chord * inv_dt + lin_jac.gdot(coupled_turn) * (dt * N::splat(0.5));
@@ -415,8 +432,7 @@ impl<N: ScalarType> JointConstraintHelper<N> {
         let held = lower & max.simd_le(min);
         let at_lower = lower & !held & (dist - min).simd_lt(max - dist);
 
-        let rhs_wo_bias = zero.select(held, lower_rhs_wo_bias.select(at_lower, upper_rhs_wo_bias))
-            + curvature_vel;
+        let rhs_wo_bias = zero.select(held, lower_rhs_wo_bias.select(at_lower, upper_rhs_wo_bias));
 
         let ii_ang_jac1 = body1.ii.transform_vector(ang_jac1);
         let ii_ang_jac2 = body2.ii.transform_vector(ang_jac2);
@@ -426,6 +442,7 @@ impl<N: ScalarType> JointConstraintHelper<N> {
             .select(held, lower_bias.select(at_lower, upper_bias))
             .simd_clamp(-max_bias, max_bias);
         let rhs = rhs_wo_bias + rhs_bias;
+        let rhs_wo_bias = rhs_wo_bias + turn_carried(curvature_vel, rhs_bias);
         let impulse_bounds = [
             N::splat(-Real::INFINITY).select(held | at_lower, zero),
             N::splat(Real::INFINITY).select(!at_lower, zero),
@@ -604,8 +621,8 @@ impl<N: ScalarType> JointConstraintHelper<N> {
         #[cfg(feature = "dim3")]
         let ang_jac2 = self.cmat2_basis.column(locked_axis).into();
 
-        let rhs_wo_bias = lin_jac.gdot(self.lin_turn);
         let rhs_bias = lin_jac.gdot(self.lin_err) * erp_inv_dt;
+        let rhs_wo_bias = turn_carried(lin_jac.gdot(self.lin_turn), rhs_bias);
 
         let ii_ang_jac1 = body1.ii.transform_vector(ang_jac1);
         let ii_ang_jac2 = body2.ii.transform_vector(ang_jac2);
@@ -627,7 +644,7 @@ impl<N: ScalarType> JointConstraintHelper<N> {
             lhs_scale: N::zero(), // Set by `with_lhs_scale`.
             cfm_coeff,
             cfm_gain: N::zero(),
-            rhs: rhs_wo_bias + rhs_bias,
+            rhs: rhs_bias,
             rhs_wo_bias,
             writeback_id,
         }

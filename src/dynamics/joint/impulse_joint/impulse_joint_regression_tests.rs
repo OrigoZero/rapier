@@ -303,3 +303,87 @@ fn a_ball_caught_by_a_slack_rope_gains_no_energy() {
     }
     assert!(past.is_empty(), "the ball gained energy: {past:?}");
 }
+
+/// A torso, thigh and calf of 5 kg boxes stacked on a floor, joined by hinges about `axis`,
+/// every one held from moving along Z and the torso (or, with `every`, each of them) from
+/// turning about X and Y, falls for 3 s at `dt` in `substeps` substeps: the highest any of
+/// them stood and the widest any hinge's anchors came apart.
+fn planar_hinge_chain(axis: Vector, every: bool, dt: Real, substeps: usize) -> (Real, Real) {
+    let mut world = PhysicsWorld::new();
+    world.integration_parameters.dt = dt;
+    world.integration_parameters.num_solver_iterations = substeps;
+    world.insert(
+        RigidBodyBuilder::fixed().translation(Vector::new(0.0, -0.5, 0.0)),
+        ColliderBuilder::cuboid(3.0, 0.5, 3.0),
+    );
+    let links = [
+        (1.30, Vector::new(0.15, 0.2, 0.1), true),
+        (0.85, Vector::new(0.06, 0.2, 0.06), every),
+        (0.40, Vector::new(0.05, 0.2, 0.05), every),
+    ];
+    let mut bodies = Vec::new();
+    for (y, half, locked) in links {
+        let mut body = RigidBodyBuilder::dynamic()
+            .translation(Vector::new(0.0, y, 0.0))
+            .enabled_translations(true, true, false);
+        if locked {
+            body = body.enabled_rotations(false, false, true);
+        }
+        let (handle, _) = world.insert(body, ColliderBuilder::cuboid(half.x, half.y, half.z).mass(5.0));
+        bodies.push(handle);
+    }
+    let mut hinges = Vec::new();
+    for i in 1..bodies.len() {
+        hinges.push(world.insert_impulse_joint(
+            bodies[i],
+            bodies[i - 1],
+            RevoluteJointBuilder::new(axis.normalize())
+                .local_anchor1(Vector::new(0.0, 0.22, 0.0))
+                .local_anchor2(Vector::new(0.0, -0.23, 0.0)),
+        ));
+    }
+    let mut peak = Real::MIN;
+    for _ in 0..(3.0 / dt) as usize {
+        world.step();
+        for body in &bodies {
+            peak = peak.max(world.bodies[*body].translation().y);
+        }
+    }
+    let gap = hinges
+        .iter()
+        .map(|hinge| {
+            let joint = &world.impulse_joints.get(*hinge).expect("a hinge").data;
+            let (body1, body2) = (world.impulse_joints.get(*hinge).unwrap().body1, world.impulse_joints.get(*hinge).unwrap().body2);
+            let anchor1 = *world.bodies[body1].position() * joint.local_frame1.translation;
+            let anchor2 = *world.bodies[body2].position() * joint.local_frame2.translation;
+            (anchor1 - anchor2).length()
+        })
+        .fold(0.0, Real::max);
+    (peak, gap)
+}
+
+/// A hinge chain held to a plane, falling onto a floor, folds (hinges about Z) or falls as
+/// one piece (hinges about the Y-Z diagonal, which the locks leave no turn about) and comes to
+/// rest: no body climbs above the 1.30 m the torso starts at and every hinge holds its anchors
+/// within 2 cm, with the torso's turning locked or every link's, at 30 steps a second in 4
+/// substeps and 60 in 2. A joint row that carried the velocity of its points' turning read off
+/// the angular velocities alone spun the chain up without bound wherever it could only hold
+/// its points by turning the bodies: its calf reached 1e5 rad/s and climbed to 6 m.
+#[test]
+#[cfg(feature = "dim3")]
+fn a_hinge_chain_held_to_a_plane_falls_to_rest_without_climbing() {
+    let mut failed = Vec::new();
+    for axis in [Vector::Z, Vector::new(0.0, 1.0, 1.0)] {
+        for every in [false, true] {
+            for (dt, substeps) in [(1.0 / 30.0, 4), (1.0 / 60.0, 2)] {
+                let (peak, gap) = planar_hinge_chain(axis, every, dt, substeps);
+                if peak > 1.31 || gap > 0.02 {
+                    failed.push(alloc::format!(
+                        "hinges about {axis:?}, every link locked {every}, dt {dt} x {substeps}: peak {peak} m, gap {gap} m"
+                    ));
+                }
+            }
+        }
+    }
+    assert!(failed.is_empty(), "the chain climbed or came apart: {failed:?}");
+}
