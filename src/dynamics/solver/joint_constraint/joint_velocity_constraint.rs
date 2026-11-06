@@ -157,6 +157,8 @@ impl JointConstraint<Real, 1> {
         // The angular limits, in the form the rows consume (built once per assembly by
         // `JointConstraintBuilder`, not once per substep).
         ang_limits: &[AngularLimitParams<Real>; ANG_DIM],
+        // The velocities the two bodies start the substep with.
+        vels: [SolverVel<Real>; 2],
         out: &mut [Self],
     ) -> usize {
         let mut len = 0;
@@ -186,6 +188,13 @@ impl JointConstraint<Real, 1> {
             &body1.world_com,
             &body2.world_com,
             locked_axes,
+        )
+        .with_motion(
+            vels[0].linear,
+            vels[0].angular,
+            vels[1].linear,
+            vels[1].angular,
+            params.dt,
         );
 
         let start = len;
@@ -423,6 +432,8 @@ impl JointConstraint<SimdReal, SIMD_WIDTH> {
         // `Some` = emit the (2D) angular motor row. Kept out of 3D until the
         // wide builder gathers per-axis motors.
         ang_motor: Option<&MotorParameters<SimdReal>>,
+        // The velocities the two bodies start the substep with.
+        vels: [SolverVel<SimdReal>; 2],
         out: &mut [Self],
     ) -> usize {
         let dt = SimdReal::splat(params.dt);
@@ -435,6 +446,13 @@ impl JointConstraint<SimdReal, SIMD_WIDTH> {
             &body1.world_com,
             &body2.world_com,
             locked_axes,
+        )
+        .with_motion(
+            vels[0].linear,
+            vels[0].angular,
+            vels[1].linear,
+            vels[1].angular,
+            dt,
         );
 
         let mut len = 0;
