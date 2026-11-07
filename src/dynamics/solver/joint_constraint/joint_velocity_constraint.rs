@@ -92,6 +92,19 @@ pub struct JointConstraint<N: ScalarType, const LANES: usize> {
     pub im1: N::Vector,
     pub im2: N::Vector,
 
+    /// On a row holding two points together along `lin_jac`: each point's offset from its
+    /// body's centre of mass, which [`Self::carry_turn`] turns at the bodies' angular
+    /// velocities. Zero on every other row.
+    pub turn_arms: [N::Vector; 2],
+    /// Half the substep length on a row that carries its points' turning through the
+    /// stabilization pass ([`Self::carry_turn`]), zero on every other row.
+    pub turn_half_dt: N,
+    /// On a row holding the distance between two points within limits (a rope): the velocity
+    /// by which that distance grows over a substep beyond its rate of change, the chord of the
+    /// points' paths, which the stabilization pass carries while the row bears on the bodies
+    /// (see [`JointConstraintHelper::limit_linear_coupled`]). Zero on every other row.
+    pub bearing_turn: N,
+
     pub writeback_id: WritebackId,
 }
 
@@ -123,6 +136,77 @@ impl<N: ScalarType, const LANES: usize> JointConstraint<N, LANES> {
     }
 
     pub fn remove_bias_from_rhs(&mut self) {
+        self.rhs = self.rhs_wo_bias;
+    }
+
+    /// The row's direction along the axes on which the bodies' centres of mass can move: its
+    /// components along an axis both bodies' translations are locked on are zero.
+    fn movable_dir(&self) -> N::Vector {
+        self.lin_jac
+            .component_mul(&(self.im1 + self.im2).component_nonzero())
+    }
+
+    /// The velocity along the row by which the bodies' turning at `angvel1` and `angvel2`
+    /// parts its two points over half a substep: `dt / 2` of the difference, along the row's
+    /// movable direction ([`Self::movable_dir`]), of the arms' centripetal accelerations
+    /// `ω × (ω × r)`. It reads angular velocities and arms alone, so it holds to the same
+    /// precision wherever in the world the joint stands.
+    #[cfg(feature = "dim3")]
+    fn turn_vel(&self, angvel1: N::AngVector, angvel2: N::AngVector) -> N {
+        let n: N::AngVector = self.movable_dir().into();
+        // `n · (ω × (ω × r)) = (n · ω) (ω · r) - (ω · ω) (n · r)`.
+        let along = |angvel: N::AngVector, arm: N::Vector| {
+            let arm: N::AngVector = arm.into();
+            n.gdot(angvel) * angvel.gdot(arm) - angvel.gdot(angvel) * n.gdot(arm)
+        };
+        let turn1 = along(angvel1, self.turn_arms[0]);
+        let turn2 = along(angvel2, self.turn_arms[1]);
+        (turn2 - turn1) * self.turn_half_dt
+    }
+
+    /// The 2D form of the 3D `turn_vel`: an arm turning at `ω` accelerates its point at
+    /// `-ω² r`, of which `-ω² (r · n)` lies along the row's movable direction `n`.
+    #[cfg(feature = "dim2")]
+    fn turn_vel(&self, angvel1: N::AngVector, angvel2: N::AngVector) -> N {
+        let n = self.movable_dir();
+        let turn1 = -(angvel1.gdot(angvel1) * n.gdot(self.turn_arms[0]));
+        let turn2 = -(angvel2.gdot(angvel2) * n.gdot(self.turn_arms[1]));
+        (turn2 - turn1) * self.turn_half_dt
+    }
+
+    /// Sets the row's stabilization target to what it is without bias, plus the velocity by
+    /// which its points' turning parts them over a substep (`turn_vel`), read off the angular
+    /// velocities `solver_vel1` and `solver_vel2` the substep moved the bodies with. Called on
+    /// the first iteration of the stabilization pass, after the bodies moved, for every row of
+    /// a joint before any of them is solved.
+    ///
+    /// A substep moves each body's centre of mass along a straight line and turns its arm about
+    /// it, so a row that held two points together leaves them apart at the substep's end by
+    /// half a substep squared of the arms' centripetal accelerations: the chord a turning arm
+    /// cuts across the arc of its point. The next substep's biased pass closes that gap at
+    /// `dt / 2` of those accelerations. A stabilization pass that set the row's velocity back to
+    /// zero took that velocity out of the bodies' motion at every substep, a projection of the
+    /// velocity they move on with: a 1 kg rod swinging from a ball joint lost 56% of its energy
+    /// in 10 s at 30 steps a second in 4 substeps and 39% at 240 steps in 1. Carried, it is the
+    /// velocity the next substep turns back onto the arc, and the swing keeps its energy.
+    ///
+    /// The carried velocity is read from velocities and arms alone, so a joint keeps its swing
+    /// to the same precision at any distance from the origin. It is the chord the substep cut:
+    /// the turning is read after the biased pass, which takes out of a body the spin its joints
+    /// and locks leave it no room for, and the chord is taken along the axes on which the
+    /// bodies' centres of mass can move, where carrying it moves them onto the arc. A hinge
+    /// chain held to a plane, whose rows along the plane's normal only turning its links can
+    /// meet, spun up and climbed when its rows carried the turning along that normal too.
+    ///
+    /// A row holding a distance within limits carries the chord of its points' paths
+    /// (`bearing_turn`) when its biased pass bore on the bodies, that is when the limit held
+    /// them: a slack rope carries nothing.
+    pub fn carry_turn_generic(&mut self, solver_vel1: &SolverVel<N>, solver_vel2: &SolverVel<N>) {
+        let zero = N::zero();
+        let bearing = self.impulse.simd_lt(zero) | zero.simd_lt(self.impulse);
+        let turn = self.turn_vel(solver_vel1.angular, solver_vel2.angular)
+            + self.bearing_turn.select(bearing, zero);
+        self.rhs_wo_bias += turn;
         self.rhs = self.rhs_wo_bias;
     }
 
@@ -194,7 +278,6 @@ impl JointConstraint<Real, 1> {
             vels[0].angular,
             vels[1].linear,
             vels[1].angular,
-            params.dt,
         );
 
         let start = len;
@@ -394,6 +477,13 @@ impl JointConstraint<Real, 1> {
         solver_vels.set_vel(self.solver_vel2[0], solver_vel2);
     }
 
+    /// [`Self::carry_turn_generic`] on the velocities the row's bodies hold.
+    pub fn carry_turn(&mut self, solver_vels: &SolverBodies) {
+        let solver_vel1 = solver_vels.get_vel(self.solver_vel1[0]);
+        let solver_vel2 = solver_vels.get_vel(self.solver_vel2[0]);
+        self.carry_turn_generic(&solver_vel1, &solver_vel2);
+    }
+
     pub fn warmstart(&mut self, solver_vels: &mut SolverBodies) {
         let mut solver_vel1 = solver_vels.get_vel(self.solver_vel1[0]);
         let mut solver_vel2 = solver_vels.get_vel(self.solver_vel2[0]);
@@ -452,7 +542,6 @@ impl JointConstraint<SimdReal, SIMD_WIDTH> {
             vels[0].angular,
             vels[1].linear,
             vels[1].angular,
-            dt,
         );
 
         let mut len = 0;
@@ -550,6 +639,13 @@ impl JointConstraint<SimdReal, SIMD_WIDTH> {
 
         solver_vels.scatter_vels(self.solver_vel1, solver_vel1);
         solver_vels.scatter_vels(self.solver_vel2, solver_vel2);
+    }
+
+    /// [`Self::carry_turn_generic`] on the velocities the row's bodies hold.
+    pub fn carry_turn(&mut self, solver_vels: &SolverBodies) {
+        let solver_vel1 = solver_vels.gather_vels(self.solver_vel1);
+        let solver_vel2 = solver_vels.gather_vels(self.solver_vel2);
+        self.carry_turn_generic(&solver_vel1, &solver_vel2);
     }
 
     pub fn warmstart(&mut self, solver_vels: &mut SolverBodies) {
