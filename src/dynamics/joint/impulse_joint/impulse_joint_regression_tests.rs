@@ -51,8 +51,8 @@ const RATES: [(Real, usize); 7] = [
 const RELEASES: [Real; 6] = [-60.0, -30.0, -10.0, 0.0, 10.0, 30.0];
 
 /// A chain of `links` rods (0.5 m by 0.08 m by 0.08 m, 1 kg each) laid out straight at
-/// `release` degrees above the horizontal from a fixed anchor, each joined to the one above it
-/// by `joint` at their touching ends, and let swing for 10 s at `rate` steps a second in
+/// `release` degrees above the horizontal from a fixed anchor at (0, 10, 0), each joined to the
+/// one above it by `joint` at their touching ends, and let swing for 10 s at `rate` steps a second in
 /// `substeps` substeps: the change of its energy over those 10 s, as a share of the energy it
 /// stands above hanging straight down at its release.
 fn swing(
@@ -62,10 +62,21 @@ fn swing(
     release: Real,
     joint: impl Fn() -> GenericJoint,
 ) -> Real {
+    swing_from(Vector::new(0.0, 10.0, 0.0), links_n, rate, substeps, release, joint)
+}
+
+/// [`swing`] with the anchor at `top`.
+fn swing_from(
+    top: Vector,
+    links_n: usize,
+    rate: Real,
+    substeps: usize,
+    release: Real,
+    joint: impl Fn() -> GenericJoint,
+) -> Real {
     let mut world = PhysicsWorld::new();
     world.integration_parameters.dt = 1.0 / rate;
     world.integration_parameters.num_solver_iterations = substeps;
-    let top = Vector::new(0.0, 10.0, 0.0);
     let anchor = world.insert_body(RigidBodyBuilder::fixed().translation(top));
     let along = Vector::new(release.to_radians().cos(), release.to_radians().sin(), 0.0);
     let turn = Rotation::from_rotation_z(release.to_radians()).to_scaled_axis();
@@ -304,16 +315,24 @@ fn a_ball_caught_by_a_slack_rope_gains_no_energy() {
     assert!(past.is_empty(), "the ball gained energy: {past:?}");
 }
 
-/// A torso, thigh and calf of 5 kg boxes stacked on a floor, joined by hinges about `axis`,
-/// every one held from moving along Z and the torso (or, with `every`, each of them) from
-/// turning about X and Y, falls for 3 s at `dt` in `substeps` substeps: the highest any of
-/// them stood and the widest any hinge's anchors came apart.
-fn planar_hinge_chain(axis: Vector, every: bool, dt: Real, substeps: usize) -> (Real, Real) {
+/// A torso, thigh and calf of 5 kg boxes stacked on a floor at `x` along X, joined by hinges
+/// about `axis` (with `spring`, each driven toward the straight chain by a stiffness of 100 and
+/// a damping of 10), every one held from moving along Z and the torso (or, with `every`, each
+/// of them) from turning about X and Y, falls for 3 s at `dt` in `substeps` substeps: the
+/// highest any of them stood and the widest any hinge's anchors came apart.
+fn planar_hinge_chain(
+    x: Real,
+    axis: Vector,
+    every: bool,
+    spring: bool,
+    dt: Real,
+    substeps: usize,
+) -> (Real, Real) {
     let mut world = PhysicsWorld::new();
     world.integration_parameters.dt = dt;
     world.integration_parameters.num_solver_iterations = substeps;
     world.insert(
-        RigidBodyBuilder::fixed().translation(Vector::new(0.0, -0.5, 0.0)),
+        RigidBodyBuilder::fixed().translation(Vector::new(x, -0.5, 0.0)),
         ColliderBuilder::cuboid(3.0, 0.5, 3.0),
     );
     let links = [
@@ -324,7 +343,7 @@ fn planar_hinge_chain(axis: Vector, every: bool, dt: Real, substeps: usize) -> (
     let mut bodies = Vec::new();
     for (y, half, locked) in links {
         let mut body = RigidBodyBuilder::dynamic()
-            .translation(Vector::new(0.0, y, 0.0))
+            .translation(Vector::new(x, y, 0.0))
             .enabled_translations(true, true, false);
         if locked {
             body = body.enabled_rotations(false, false, true);
@@ -334,13 +353,13 @@ fn planar_hinge_chain(axis: Vector, every: bool, dt: Real, substeps: usize) -> (
     }
     let mut hinges = Vec::new();
     for i in 1..bodies.len() {
-        hinges.push(world.insert_impulse_joint(
-            bodies[i],
-            bodies[i - 1],
-            RevoluteJointBuilder::new(axis.normalize())
-                .local_anchor1(Vector::new(0.0, 0.22, 0.0))
-                .local_anchor2(Vector::new(0.0, -0.23, 0.0)),
-        ));
+        let mut hinge = RevoluteJointBuilder::new(axis.normalize())
+            .local_anchor1(Vector::new(0.0, 0.22, 0.0))
+            .local_anchor2(Vector::new(0.0, -0.23, 0.0));
+        if spring {
+            hinge = hinge.motor_position(0.0, 100.0, 10.0);
+        }
+        hinges.push(world.insert_impulse_joint(bodies[i], bodies[i - 1], hinge));
     }
     let mut peak = Real::MIN;
     for _ in 0..(3.0 / dt) as usize {
@@ -365,25 +384,63 @@ fn planar_hinge_chain(axis: Vector, every: bool, dt: Real, substeps: usize) -> (
 /// A hinge chain held to a plane, falling onto a floor, folds (hinges about Z) or falls as
 /// one piece (hinges about the Y-Z diagonal, which the locks leave no turn about) and comes to
 /// rest: no body climbs above the 1.30 m the torso starts at and every hinge holds its anchors
-/// within 2 cm, with the torso's turning locked or every link's, at 30 steps a second in 4
-/// substeps and 60 in 2. A joint row that carried the velocity of its points' turning read off
-/// the angular velocities alone spun the chain up without bound wherever it could only hold
-/// its points by turning the bodies: its calf reached 1e5 rad/s and climbed to 6 m.
+/// within 2 cm, with the torso's turning locked or every link's, its hinges free or sprung, at
+/// 30 steps a second in 4 substeps and 60 in 2, at the origin and 704 to 720 m out along X.
+/// A joint row that carried its points' turning along the plane's normal, which only turning
+/// the links can meet, or read that turning off the velocities the substep started with rather
+/// than the ones its biased pass left, spun the chain up wherever it could only hold its points
+/// by turning the bodies: its calf reached 1e5 rad/s and the chain climbed to 6 m.
 #[test]
 #[cfg(feature = "dim3")]
 fn a_hinge_chain_held_to_a_plane_falls_to_rest_without_climbing() {
     let mut failed = Vec::new();
-    for axis in [Vector::Z, Vector::new(0.0, 1.0, 1.0)] {
-        for every in [false, true] {
-            for (dt, substeps) in [(1.0 / 30.0, 4), (1.0 / 60.0, 2)] {
-                let (peak, gap) = planar_hinge_chain(axis, every, dt, substeps);
-                if peak > 1.31 || gap > 0.02 {
-                    failed.push(alloc::format!(
-                        "hinges about {axis:?}, every link locked {every}, dt {dt} x {substeps}: peak {peak} m, gap {gap} m"
-                    ));
+    for x in [0.0, 704.0, 712.0, 720.0] {
+        for axis in [Vector::Z, Vector::new(0.0, 1.0, 1.0)] {
+            for every in [false, true] {
+                for spring in [false, true] {
+                    for (dt, substeps) in [(1.0 / 30.0, 4), (1.0 / 60.0, 2)] {
+                        let (peak, gap) = planar_hinge_chain(x, axis, every, spring, dt, substeps);
+                        if peak > 1.31 || gap > 0.02 {
+                            failed.push(alloc::format!(
+                                "at x {x}, hinges about {axis:?}, every link locked {every}, \
+                                 sprung {spring}, dt {dt} x {substeps}: peak {peak} m, gap {gap} m"
+                            ));
+                        }
+                    }
                 }
             }
         }
     }
     assert!(failed.is_empty(), "the chain climbed or came apart: {failed:?}");
+}
+
+/// A rod swinging from a ball joint or a hinge keeps its energy to within 2% over 10 s far from
+/// the origin, at 30 steps a second in 4 substeps and 240 in 1, as it does at the origin: 930 m
+/// out, where positions are held to 61 µm, a substep's chord is a few of those steps. A carry
+/// bounded by the position correction read the chord at that resolution, and the rod lost up
+/// to 4.5% of its energy at (-930, 300, -930) and 3.6% at (562, 20, 140).
+#[test]
+#[cfg(feature = "dim3")]
+fn a_rod_swinging_far_from_the_origin_keeps_its_energy() {
+    let mut past = Vec::new();
+    for top in [Vector::new(562.0, 20.0, 140.0), Vector::new(-930.0, 300.0, -930.0)] {
+        for (rate, substeps) in [(30.0, 4), (240.0, 1)] {
+            for hinge in [false, true] {
+                let change = swing_from(top, 1, rate, substeps, 0.0, || {
+                    if hinge {
+                        RevoluteJointBuilder::new(Vector::Z).build().into()
+                    } else {
+                        SphericalJointBuilder::new().build().into()
+                    }
+                });
+                if change.abs() > 0.02 {
+                    past.push(alloc::format!(
+                        "hinge {hinge} at {top:?}, {rate} Hz x {substeps}: {:+.1}%",
+                        100.0 * change
+                    ));
+                }
+            }
+        }
+    }
+    assert!(past.is_empty(), "the rod's energy changed: {past:?}");
 }

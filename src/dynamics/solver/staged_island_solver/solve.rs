@@ -18,8 +18,10 @@ const MULTIBODY_CONTACT_ROUNDS: usize = 2;
 /// One solve pass: joints (colored, then overflow + generic on worker 0), soft-body rows, then
 /// contact colors (parallel); returns the updated stage ordinal. `soft_update` is set on the
 /// first iteration of each of a substep's passes: it updates the soft constraints from the poses
-/// first, and in the biased pass the multibodies' limits apply the impulse they start from;
-/// `soft_warmstart` is `Some(coefficient)` to warm-start the soft constraints.
+/// first, in the biased pass the multibodies' limits apply the impulse they start from, and in
+/// the stabilization pass the joint rows read the turning of the velocities the substep moved
+/// the bodies with (`JointConstraint::carry_turn`); `soft_warmstart` is `Some(coefficient)` to
+/// warm-start the soft constraints.
 pub(super) unsafe fn solve_pass(
     ctx: &SharedCtx,
     group_index: usize,
@@ -115,6 +117,13 @@ pub(super) unsafe fn solve_pass(
         // overflow stage) touch bodies no other concurrent constraint touches.
         let vs = unsafe { &mut *ctx.velocity_solver };
         let joints = unsafe { &mut *ctx.joint_constraints };
+        if wo_bias && soft_update {
+            // Every row of the joint reads the velocities the substep moved the bodies with
+            // before any of them is solved.
+            for row in ctx.joint_rows[joint_id].clone() {
+                joints.velocity_constraints[row].carry_turn(&vs.solver_bodies);
+            }
+        }
         for row in ctx.joint_rows[joint_id].clone() {
             let c = &mut joints.velocity_constraints[row];
             if wo_bias {
@@ -132,6 +141,13 @@ pub(super) unsafe fn solve_pass(
         // values, so their duplicated scatter is value-identical).
         let vs = unsafe { &mut *ctx.velocity_solver };
         let joints = unsafe { &mut *ctx.joint_constraints };
+        if wo_bias && soft_update {
+            // Every row of the joint reads the velocities the substep moved the bodies with
+            // before any of them is solved.
+            for row in ctx.joint_chunk_rows[chunk_id].clone() {
+                joints.simd_velocity_constraints[row].carry_turn(&vs.solver_bodies);
+            }
+        }
         for row in ctx.joint_chunk_rows[chunk_id].clone() {
             let c = &mut joints.simd_velocity_constraints[row];
             if wo_bias {
