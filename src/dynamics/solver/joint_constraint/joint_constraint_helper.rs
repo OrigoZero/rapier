@@ -11,8 +11,6 @@ use crate::dynamics::{IntegrationParameters, JointIndex};
 use crate::math::{DIM, Real};
 use crate::utils;
 #[cfg(feature = "dim3")]
-use crate::utils::CrossProduct;
-#[cfg(feature = "dim3")]
 use crate::utils::OrthonormalBasis;
 use crate::utils::{
     AngularInertiaOps, ComponentMul, CrossProductMatrix, DotProduct, IndexMut2, MatrixColumn,
@@ -136,12 +134,6 @@ pub struct JointConstraintHelper<N: ScalarType> {
     pub arm2: N::Vector,
     /// The offset of the first frame's origin from the first body's centre of mass.
     pub anchor_arm1: N::Vector,
-    /// The velocity of the second frame's origin relative to the first's (see
-    /// [`Self::with_motion`]).
-    pub anchor_vel: N::Vector,
-    /// The centripetal acceleration of the second frame's origin relative to the first's, the
-    /// bodies turning at their angular velocities (see [`Self::with_motion`]).
-    pub anchor_turn: N::Vector,
 }
 
 impl<N: ScalarType> JointConstraintHelper<N> {
@@ -207,8 +199,6 @@ impl<N: ScalarType> JointConstraintHelper<N> {
             arm1: r1,
             arm2: r2,
             anchor_arm1,
-            anchor_vel: Default::default(),
-            anchor_turn: Default::default(),
         };
         #[cfg(feature = "dim3")]
         return Self {
@@ -222,49 +212,7 @@ impl<N: ScalarType> JointConstraintHelper<N> {
             arm1: r1,
             arm2: r2,
             anchor_arm1,
-            anchor_vel: Default::default(),
-            anchor_turn: Default::default(),
         };
-    }
-
-    /// Sets [`Self::anchor_vel`] and [`Self::anchor_turn`] from the bodies' linear velocities
-    /// `linvel1`, `linvel2` and angular velocities `angvel1`, `angvel2`: what a coupled linear
-    /// limit (a rope) carries through the stabilization pass reads them (see
-    /// [`Self::limit_linear_coupled`]).
-    #[cfg(feature = "dim3")]
-    #[must_use]
-    pub fn with_motion(
-        mut self,
-        linvel1: N::Vector,
-        angvel1: N::Vector,
-        linvel2: N::Vector,
-        angvel2: N::Vector,
-    ) -> Self {
-        let turn2 = angvel2.gcross(angvel2.gcross(self.arm2));
-        let anchor_turn1 = angvel1.gcross(angvel1.gcross(self.anchor_arm1));
-        self.anchor_turn = turn2 - anchor_turn1;
-        self.anchor_vel =
-            linvel2 + angvel2.gcross(self.arm2) - linvel1 - angvel1.gcross(self.anchor_arm1);
-        self
-    }
-
-    /// The 2D form of the 3D `with_motion`: sets [`Self::anchor_vel`] and [`Self::anchor_turn`]
-    /// from the bodies' velocities.
-    #[cfg(feature = "dim2")]
-    #[must_use]
-    pub fn with_motion(
-        mut self,
-        linvel1: N::Vector,
-        angvel1: N,
-        linvel2: N::Vector,
-        angvel2: N,
-    ) -> Self {
-        let turn2 = -(self.arm2 * (angvel2 * angvel2));
-        let anchor_turn1 = -(self.anchor_arm1 * (angvel1 * angvel1));
-        self.anchor_turn = turn2 - anchor_turn1;
-        self.anchor_vel =
-            linvel2 + angvel2.gcross(self.arm2) - linvel1 - angvel1.gcross(self.anchor_arm1);
-        self
     }
 
     pub fn limit_linear<const LANES: usize>(
@@ -328,15 +276,16 @@ impl<N: ScalarType> JointConstraintHelper<N> {
         let mut ang_jac1: N::AngVector = Default::default();
         let mut ang_jac2: N::AngVector = Default::default();
 
-        // The relative velocity and turning acceleration of the frames' origins, within the
-        // coupled axes.
-        let mut coupled_vel: N::Vector = Default::default();
-        let mut coupled_turn: N::Vector = Default::default();
+        // The basis axes the distance is not measured along.
+        let mut free_axes: [N::Vector; DIM - 1] = Default::default();
+        let mut free = 0;
         for i in 0..DIM {
-            if coupled_axes & (1 << i) != 0 {
-                let axis = self.basis.column(i);
-                coupled_vel += axis * axis.gdot(self.anchor_vel);
-                coupled_turn += axis * axis.gdot(self.anchor_turn);
+            if coupled_axes & (1 << i) == 0 {
+                if free < DIM - 1 {
+                    free_axes[free] = self.basis.column(i);
+                    free += 1;
+                }
+            } else {
                 let coeff = self.basis.column(i).gdot(self.lin_err);
                 lin_jac += self.basis.column(i) * coeff;
                 #[cfg(feature = "dim2")]
@@ -360,19 +309,6 @@ impl<N: ScalarType> JointConstraintHelper<N> {
         lin_jac *= inv_dist;
         ang_jac1 *= inv_dist;
         ang_jac2 *= inv_dist;
-
-        // The velocity the distance takes over a substep beyond its rate of change: the origins
-        // parting at their relative velocity along a straight line part by more than that rate
-        // says (the chord's sag: a rope turning about its anchor lengthens at the square of its
-        // turn), and their arms turning bend their paths. The stabilization pass keeps that
-        // velocity while the row bears on the bodies, as a locked row keeps its points' turning
-        // (see `JointConstraint::carry_turn_generic`); dropped there, a 1 kg ball swinging on a
-        // taut 1 m rope lost 36% of its energy in 10 s at 30 steps a second in 4 substeps. The
-        // chord is measured exactly, so it never exceeds the distance the velocity across the
-        // rope covers in the substep, however short the rope.
-        let moved = (separation + coupled_vel * dt).simd_length();
-        let chord = moved - dist - lin_jac.gdot(coupled_vel) * dt;
-        let curvature_vel = chord * inv_dt + lin_jac.gdot(coupled_turn) * (dt * N::splat(0.5));
 
         let [min, max] = limits;
 
@@ -403,8 +339,10 @@ impl<N: ScalarType> JointConstraintHelper<N> {
             .select(held, lower_bias.select(at_lower, upper_bias))
             .simd_clamp(-max_bias, max_bias);
         let rhs = rhs_wo_bias + rhs_bias;
-        // The lower bound's row pushes the bodies apart, the way the chord parts them already.
-        let bearing_turn = zero.select(at_lower, curvature_vel);
+        // The stabilization pass keeps the velocity of the chord of the points' paths while
+        // the row bears on the bodies (see `JointConstraint::carry_turn_generic`). The lower
+        // bound's row pushes the bodies apart, the way the chord parts them already.
+        let chord_dt = zero.select(at_lower, dt);
         let impulse_bounds = [
             N::splat(-Real::INFINITY).select(held | at_lower, zero),
             N::splat(Real::INFINITY).select(!at_lower, zero),
@@ -429,9 +367,11 @@ impl<N: ScalarType> JointConstraintHelper<N> {
             cfm_gain: N::zero(),
             rhs,
             rhs_wo_bias,
-            turn_arms: Default::default(),
+            turn_arms: [self.anchor_arm1, self.arm2],
             turn_half_dt: N::zero(),
-            bearing_turn,
+            chord_sep: separation,
+            chord_free_axes: free_axes,
+            chord_dt,
             writeback_id,
         }
         .with_lhs_scale(body1, body2)
@@ -562,7 +502,9 @@ impl<N: ScalarType> JointConstraintHelper<N> {
             rhs_wo_bias,
             turn_arms: Default::default(),
             turn_half_dt: N::zero(),
-            bearing_turn: N::zero(),
+            chord_sep: Default::default(),
+            chord_free_axes: Default::default(),
+            chord_dt: N::zero(),
             writeback_id,
         }
         .with_lhs_scale(body1, body2)
@@ -617,7 +559,9 @@ impl<N: ScalarType> JointConstraintHelper<N> {
             rhs_wo_bias,
             turn_arms,
             turn_half_dt: N::splat(params.dt * 0.5),
-            bearing_turn: N::zero(),
+            chord_sep: Default::default(),
+            chord_free_axes: Default::default(),
+            chord_dt: N::zero(),
             writeback_id,
         }
         .with_lhs_scale(body1, body2)
@@ -755,7 +699,9 @@ impl<N: ScalarType> JointConstraintHelper<N> {
             rhs_wo_bias,
             turn_arms: Default::default(),
             turn_half_dt: N::zero(),
-            bearing_turn: N::zero(),
+            chord_sep: Default::default(),
+            chord_free_axes: Default::default(),
+            chord_dt: N::zero(),
             writeback_id,
         }
         .with_lhs_scale(body1, body2)
@@ -822,7 +768,9 @@ impl<N: ScalarType> JointConstraintHelper<N> {
             rhs_wo_bias,
             turn_arms: Default::default(),
             turn_half_dt: N::zero(),
-            bearing_turn: N::zero(),
+            chord_sep: Default::default(),
+            chord_free_axes: Default::default(),
+            chord_dt: N::zero(),
             writeback_id,
         }
         .with_lhs_scale(body1, body2)
@@ -874,7 +822,9 @@ impl<N: ScalarType> JointConstraintHelper<N> {
             rhs_wo_bias,
             turn_arms: Default::default(),
             turn_half_dt: N::zero(),
-            bearing_turn: N::zero(),
+            chord_sep: Default::default(),
+            chord_free_axes: Default::default(),
+            chord_dt: N::zero(),
             writeback_id,
         }
         .with_lhs_scale(body1, body2)
@@ -1010,7 +960,9 @@ impl JointConstraintHelper<Real> {
             rhs_wo_bias,
             turn_arms: Default::default(),
             turn_half_dt: 0.0,
-            bearing_turn: 0.0,
+            chord_sep: Default::default(),
+            chord_free_axes: Default::default(),
+            chord_dt: 0.0,
             writeback_id,
         }
         .with_lhs_scale(body1, body2)

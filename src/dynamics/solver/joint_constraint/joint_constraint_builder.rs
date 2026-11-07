@@ -181,7 +181,6 @@ impl JointConstraintBuilder {
             &frame2,
             &self.joint,
             &self.ang_limits,
-            [bodies.get_vel(self.body1), bodies.get_vel(self.body2)],
             out_rows,
         );
         self.rows = len;
@@ -603,10 +602,6 @@ impl JointConstraintBuilderSimd {
             &self.ang_limits,
             self.softness,
             ang_motor_params.as_ref(),
-            [
-                bodies.gather_vels(self.body1),
-                bodies.gather_vels(self.body2),
-            ],
             out_rows,
         );
         self.rows = len;
