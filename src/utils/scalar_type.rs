@@ -79,7 +79,8 @@ pub trait ScalarType:
         + Mul<Self, Output = Self::AngVector>
         + DotProduct<Self::AngVector, Result = Self>
         + num::One
-        + From<Self>;
+        + From<Self>
+        + Into<Self>;
     /// The angular vector type for this scalar (3D).
     #[cfg(feature = "dim3")]
     type AngVector: Copy
@@ -92,7 +93,8 @@ pub trait ScalarType:
         + MulAssign<Self>
         + DivAssign<Self>
         + Mul<Self, Output = Self::AngVector>
-        + DotProduct<Self::AngVector, Result = Self>;
+        + DotProduct<Self::AngVector, Result = Self>
+        + Into<Self::Vector>;
     /// The matrix type for this scalar.
     type Matrix: Copy
         + Debug

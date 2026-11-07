@@ -444,3 +444,63 @@ fn a_rod_swinging_far_from_the_origin_keeps_its_energy() {
     }
     assert!(past.is_empty(), "the rod's energy changed: {past:?}");
 }
+
+/// A 100 kg ball held on a vertical circle of 2 m by a distance held at its radius (a point on
+/// a rail's bend), started at the bottom fast enough to loop, loops for a minute at `rate`
+/// steps a second in `substeps` substeps: the change of its energy over that minute, as a
+/// share of its energy at the start, and the farthest it stood off the circle.
+#[cfg(feature = "dim3")]
+fn circle_loop(rate: Real, substeps: usize) -> (Real, Real) {
+    let radius = 2.0;
+    let mut world = PhysicsWorld::new();
+    world.integration_parameters.dt = 1.0 / rate;
+    world.integration_parameters.num_solver_iterations = substeps;
+    let centre = world.insert_body(RigidBodyBuilder::fixed());
+    let (ball, _) = world.insert(
+        RigidBodyBuilder::dynamic()
+            .translation(Vector::new(0.0, -radius, 0.0))
+            .linvel(Vector::new((7.0 * 9.81 * radius).sqrt(), 0.0, 0.0))
+            .can_sleep(false),
+        ColliderBuilder::ball(0.2).mass(100.0).collision_groups(InteractionGroups::new(
+            Group::GROUP_1,
+            Group::NONE,
+            InteractionTestMode::And,
+        )),
+    );
+    let mut circle = GenericJointBuilder::new(JointAxesMask::LIN_Z)
+        .coupled_axes(JointAxesMask::LIN_X | JointAxesMask::LIN_Y)
+        .build();
+    circle.set_limits(JointAxis::LinX, [radius, radius]);
+    world.insert_impulse_joint(centre, ball, circle);
+    let energy = |world: &PhysicsWorld| {
+        let body = &world.bodies[ball];
+        0.5 * 100.0 * body.linvel().length_squared() + 100.0 * 9.81 * (body.translation().y + radius)
+    };
+    let start = energy(&world);
+    let mut off: Real = 0.0;
+    for _ in 0..(60.0 * rate) as usize {
+        world.step();
+        off = off.max((world.bodies[ball].translation().length() - radius).abs());
+    }
+    ((energy(&world) - start) / start, off)
+}
+
+/// A ball held on a vertical 2 m circle loops for a minute within 1% of its energy, at 30 steps
+/// a second in 4 substeps, 60 in 4 and 240 in 1, never more than 5 mm off the circle. The
+/// chord of the ball's path read off the velocities each substep started with, before its
+/// biased pass, lost 1.5% at 30 Hz x 4.
+#[test]
+#[cfg(feature = "dim3")]
+fn a_ball_held_on_a_vertical_circle_loops_for_a_minute_keeping_its_energy() {
+    let mut past = Vec::new();
+    for (rate, substeps) in [(30.0, 4), (60.0, 4), (240.0, 1)] {
+        let (change, off) = circle_loop(rate, substeps);
+        if change.abs() > 0.01 || off > 0.005 {
+            past.push(alloc::format!(
+                "{rate} Hz x {substeps}: {:+.2}%, {off} m off the circle",
+                100.0 * change
+            ));
+        }
+    }
+    assert!(past.is_empty(), "the loop changed its energy: {past:?}");
+}
