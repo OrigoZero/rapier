@@ -581,3 +581,59 @@ fn a_hanging_chain_of_twenty_rods_holds_its_length() {
     std::println!("twenty-rod hanging chain: stretched by {stretch} m at most");
     assert!(stretch <= 0.001, "the chain stretched by {stretch} m");
 }
+
+/// A door held to its frame by a hinge and by a catch fixed to the frame, both joints of the
+/// world, shoved along its normal at 6000 N for a quarter second at 60 Hz x 2, shares the shove
+/// between the two as the least impulse can: each takes at least a twentieth of it, the catch
+/// (which alone also holds the door from turning about the hinge) most of it. Two joints
+/// holding a body against the same motion leave their rows' system singular; solved as one
+/// with the joint eliminated later taking none of the shared load, a door's catch shoved at
+/// three times its break force held.
+#[test]
+#[cfg(feature = "dim3")]
+fn a_door_held_by_a_hinge_and_a_catch_shares_a_shove_between_them() {
+    let mut world = PhysicsWorld::new();
+    world.gravity = Vector::ZERO;
+    world.integration_parameters.dt = 1.0 / 60.0;
+    world.integration_parameters.num_solver_iterations = 2;
+    let frame = world.insert_body(RigidBodyBuilder::fixed());
+    let (door, _) = world.insert(
+        RigidBodyBuilder::dynamic().translation(Vector::new(0.65, 0.0, 0.0)),
+        ColliderBuilder::cuboid(0.5, 1.0, 0.05).mass(20.0).collision_groups(InteractionGroups::new(
+            Group::GROUP_1,
+            Group::NONE,
+            InteractionTestMode::And,
+        )),
+    );
+    let hinge = world.insert_impulse_joint(
+        door,
+        frame,
+        RevoluteJointBuilder::new(Vector::Y)
+            .local_anchor1(Vector::new(-0.55, 0.0, 0.0))
+            .local_anchor2(Vector::new(0.1, 0.0, 0.0)),
+    );
+    let catch = world.insert_impulse_joint(
+        door,
+        frame,
+        FixedJointBuilder::new()
+            .local_anchor1(Vector::new(0.5, 0.0, 0.0))
+            .local_anchor2(Vector::new(1.15, 0.0, 0.0)),
+    );
+    let mut taken = [0.0 as Real; 2];
+    for _ in 0..15 {
+        world.bodies[door].reset_forces(false);
+        world.bodies[door].add_force(Vector::new(0.0, 0.0, -6000.0), true);
+        world.step();
+        for (k, joint) in [hinge, catch].into_iter().enumerate() {
+            taken[k] += world.impulse_joints.get(joint).unwrap().reaction.linear.z.abs();
+        }
+    }
+    let shove = 6000.0 * 15.0 / 60.0;
+    std::println!("door shove {shove} N s: hinge {} N s, catch {} N s", taken[0], taken[1]);
+    assert!(
+        taken.iter().all(|t| *t >= 0.05 * shove) && taken[1] > taken[0],
+        "the shove of {shove} N s was not shared: hinge {} N s, catch {} N s",
+        taken[0],
+        taken[1]
+    );
+}
