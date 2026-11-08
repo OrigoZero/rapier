@@ -583,15 +583,14 @@ fn a_hanging_chain_of_twenty_rods_holds_its_length() {
 }
 
 /// A door held to its frame by a hinge and by a catch fixed to the frame, both joints of the
-/// world, shoved along its normal at 6000 N for a quarter second at 60 Hz x 2, shares the shove
-/// between the two as the least impulse can: each takes at least a twentieth of it, the catch
-/// (which alone also holds the door from turning about the hinge) most of it. Two joints
-/// holding a body against the same motion leave their rows' system singular; solved as one
-/// with the joint eliminated later taking none of the shared load, a door's catch shoved at
-/// three times its break force held.
+/// world, shoved along its normal at 6000 N for a quarter second at 60 Hz x 2, puts at least a
+/// third of the shove through the catch: enough for a catch that breaks at 2000 N to break.
+/// The second joint to the world closes a loop through it and is solved with Gauss-Seidel
+/// beside the first. Solved exactly with the first, the two joints' rows were singular and the
+/// joint eliminated later, the catch, took 0.0009 N s of the 1500.
 #[test]
 #[cfg(feature = "dim3")]
-fn a_door_held_by_a_hinge_and_a_catch_shares_a_shove_between_them() {
+fn a_door_held_by_a_hinge_and_a_catch_puts_a_shove_through_the_catch() {
     let mut world = PhysicsWorld::new();
     world.gravity = Vector::ZERO;
     world.integration_parameters.dt = 1.0 / 60.0;
@@ -631,7 +630,7 @@ fn a_door_held_by_a_hinge_and_a_catch_shares_a_shove_between_them() {
     let shove = 6000.0 * 15.0 / 60.0;
     std::println!("door shove {shove} N s: hinge {} N s, catch {} N s", taken[0], taken[1]);
     assert!(
-        taken.iter().all(|t| *t >= 0.05 * shove) && taken[1] > taken[0],
+        taken[1] >= shove / 3.0,
         "the shove of {shove} N s was not shared: hinge {} N s, catch {} N s",
         taken[0],
         taken[1]
