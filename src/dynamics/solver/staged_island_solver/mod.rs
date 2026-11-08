@@ -5,6 +5,7 @@
 
 mod helpers;
 mod init;
+mod joint_trees;
 mod joints;
 mod solve;
 mod sync;
@@ -136,6 +137,8 @@ struct GroupLayout {
     /// This group's scalar overflow joint-builder range (tail of
     /// `joint_builders`).
     joint_overflow: Range<usize>,
+    /// This group's joint trees (into `joint_trees`), solved exactly.
+    joint_trees: Range<usize>,
     /// Substeps to run for this group.
     num_substeps: usize,
     /// Internal PGS iterations per substep for this group (`num_internal_pgs_iterations` plus the
@@ -158,6 +161,8 @@ struct GroupJointRanges {
     builders: Range<usize>,
     /// Scalar overflow builder range (tail of `builders`).
     overflow: Range<usize>,
+    /// The group's joint trees.
+    trees: Range<usize>,
 }
 
 /// State shared between solver workers. Safety: the raw pointers are dereferenced by multiple
@@ -175,6 +180,9 @@ struct SharedCtx<'a> {
     color_ranges: &'a [(u8, Range<usize>)],
     joint_color_ranges: &'a [(u8, Range<usize>)],
     joint_rows: &'a [Range<usize>],
+    /// The joints solved exactly as trees: each tree is touched by the one worker that claims
+    /// it in a joint-tree stage.
+    joint_trees: *mut joint_trees::JointTrees,
     /// Constraint-row range of each SIMD joint chunk in
     /// `joint_constraints.simd_velocity_constraints`.
     joint_chunk_rows: &'a [Range<usize>],
@@ -284,6 +292,9 @@ pub(crate) struct StagedIslandSolver {
     /// `joint_constraints.velocity_constraints` (a joint yields several rows which
     /// must be solved by a same worker since they touch the same bodies).
     joint_rows: Vec<Range<usize>>,
+    /// The joints of the islands that join their bodies as trees, solved exactly
+    /// (see [`joint_trees`]); laid out and reused with the joint assembly.
+    joint_trees: joint_trees::JointTrees,
     // Staged joint-assembly persistence: coloring/chunk layout/builders reused while the joint
     // list, island layout, assembly inputs AND every parallel-joint-chunk body's
     // contact color mask are unchanged (a color-`c` joint chunk must still avoid contact-color-`c` bodies).
@@ -336,6 +347,7 @@ impl StagedIslandSolver {
             joint_overflow_workspace: Vec::new(),
             joint_overflow_range: 0..0,
             joint_rows: Vec::new(),
+            joint_trees: joint_trees::JointTrees::default(),
             staged_joints_valid: false,
             prev_staged_active_set_epoch: 0,
             prev_staged_assembly_epoch: 0,

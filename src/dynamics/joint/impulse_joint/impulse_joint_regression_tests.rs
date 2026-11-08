@@ -504,3 +504,80 @@ fn a_ball_held_on_a_vertical_circle_loops_for_a_minute_keeping_its_energy() {
     }
     assert!(past.is_empty(), "the loop changed its energy: {past:?}");
 }
+
+/// A free-swinging chain of five rods on ball joints, released level, keeps 65% of the energy
+/// it can give up over 10 s at 120 substeps a second (30 Hz x 4, 60 x 2, 120 x 1), 95% of it at
+/// 240 (60 x 4, 120 x 2, 240 x 1) and 99% at 960 (240 x 4). Its whipping end makes its motion
+/// chaotic, so at 120 substeps a second where it ends depends on the last bits of where it
+/// starts: the engine reads 13% and 29% lost from one release at 30 Hz x 4 and 60 x 2. Solved by
+/// Gauss-Seidel, one sweep a pass, the chain's joints left most of the tension each substep
+/// needs unsolved, and the stabilization pass took the velocity it would have turned out of the
+/// links' motion: the chain lost 62% at 120 substeps a second and 63% at 240.
+#[test]
+#[cfg(feature = "dim3")]
+fn a_chain_of_five_rods_on_ball_joints_keeps_most_of_its_energy_at_every_substep_length() {
+    let mut past = Vec::new();
+    let mut read = Vec::new();
+    for ((rate, substeps), bound) in [
+        ((30.0, 4), 0.35),
+        ((60.0, 2), 0.35),
+        ((120.0, 1), 0.35),
+        ((60.0, 4), 0.05),
+        ((120.0, 2), 0.05),
+        ((240.0, 1), 0.05),
+        ((240.0, 4), 0.01),
+    ] {
+        let change = swing(5, rate, substeps, 0.0, || {
+            SphericalJointBuilder::new().build().into()
+        });
+        read.push(alloc::format!("{rate} Hz x {substeps}: {:+.1}%", 100.0 * change));
+        if change.abs() > bound {
+            past.push(alloc::format!("{rate} Hz x {substeps}: {:+.1}%", 100.0 * change));
+        }
+    }
+    std::println!("five-rod chain, released level, 10 s: {read:?}");
+    assert!(past.is_empty(), "the chain's energy changed: {past:?}");
+}
+
+/// A chain of twenty rods on ball joints hanging straight down from a fixed anchor holds its
+/// length to within 1 mm over 2 s at 60 Hz x 2: the joints of a chain are solved together, so
+/// each one carries the weight of the links below it in the same substep. Solved by
+/// Gauss-Seidel, one sweep a pass, an impulse travelled one joint along the chain per sweep.
+#[test]
+#[cfg(feature = "dim3")]
+fn a_hanging_chain_of_twenty_rods_holds_its_length() {
+    let mut world = PhysicsWorld::new();
+    world.integration_parameters.dt = 1.0 / 60.0;
+    world.integration_parameters.num_solver_iterations = 2;
+    let top = Vector::new(0.0, 20.0, 0.0);
+    let anchor = world.insert_body(RigidBodyBuilder::fixed().translation(top));
+    let down = Rotation::from_rotation_z(-(core::f64::consts::FRAC_PI_2 as Real)).to_scaled_axis();
+    let mut above = anchor;
+    let mut links = Vec::new();
+    for i in 0..20 {
+        let (link, _) = world.insert(
+            RigidBodyBuilder::dynamic()
+                .translation(top - Vector::Y * (0.25 + i as Real * 0.5))
+                .rotation(down),
+            untouching_rod(),
+        );
+        let mut data: GenericJoint = SphericalJointBuilder::new().build().into();
+        data.set_local_anchor1(Vector::new(-0.25, 0.0, 0.0));
+        data.set_local_anchor2(if above == anchor {
+            Vector::ZERO
+        } else {
+            Vector::new(0.25, 0.0, 0.0)
+        });
+        world.insert_impulse_joint(link, above, data);
+        links.push(link);
+        above = link;
+    }
+    let mut stretch: Real = 0.0;
+    for _ in 0..120 {
+        world.step();
+        let tip = world.bodies[links[19]].position() * Vector::new(0.25, 0.0, 0.0);
+        stretch = stretch.max((top - tip).length() - 10.0);
+    }
+    std::println!("twenty-rod hanging chain: stretched by {stretch} m at most");
+    assert!(stretch <= 0.001, "the chain stretched by {stretch} m");
+}

@@ -135,6 +135,7 @@ impl StagedIslandSolver {
                     joint_chunks: 0..0,
                     joint_builders: 0..0,
                     joint_overflow: 0..0,
+                    joint_trees: 0..0,
                     num_substeps,
                     num_pgs_iterations,
                     dt: base_params.dt / num_substeps as Real,
@@ -158,6 +159,7 @@ impl StagedIslandSolver {
                 joint_chunks: 0..0,
                 joint_builders: 0..0,
                 joint_overflow: 0..0,
+                joint_trees: 0..0,
                 num_substeps,
                 num_pgs_iterations,
                 dt: base_params.dt / num_substeps as Real,
@@ -353,6 +355,7 @@ impl StagedIslandSolver {
             g.joint_chunks = l.chunks.clone();
             g.joint_builders = l.builders.clone();
             g.joint_overflow = l.overflow.clone();
+            g.joint_trees = l.trees.clone();
         }
 
         let set = &mut self.contact_constraints;
@@ -680,6 +683,7 @@ impl StagedIslandSolver {
             color_ranges: &self.color_ranges,
             joint_color_ranges: &self.joint_color_ranges,
             joint_rows: &self.joint_rows,
+            joint_trees: &mut self.joint_trees as *mut _,
             joint_chunk_rows: &self.joint_chunk_rows,
             island_bodies,
             has_multibodies: !self.velocity_solver.multibody_roots.is_empty(),

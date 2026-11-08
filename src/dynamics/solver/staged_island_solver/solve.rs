@@ -197,6 +197,40 @@ pub(super) unsafe fn solve_pass(
             .generic_velocity_constraints
             .is_empty();
 
+    // Joint-tree stage (parallel over the group's trees: no two trees share a moving body).
+    // Each tree solves its rows exactly; its factorization is built on the substep's first
+    // biased iteration (or its first stabilization iteration when it runs no biased one).
+    if !group.joint_trees.is_empty() {
+        let factor = soft_update && (!wo_bias || group.num_pgs_iterations == 0);
+        let trees = group.joint_trees.clone();
+        let mut done = 0;
+        while let Some(claimed) = sync.claim(stage, &trees, 1, worker_id) {
+            let claimed_len = claimed.len();
+            for tree in claimed {
+                // SAFETY: a tree is claimed by one worker per stage, and the trees of a group
+                // share no moving body, so its rows and its bodies' velocities are its own.
+                let vs = unsafe { &mut *ctx.velocity_solver };
+                let joints = unsafe { &mut *ctx.joint_constraints };
+                unsafe {
+                    super::joint_trees::JointTrees::solve(
+                        ctx.joint_trees,
+                        tree,
+                        &mut joints.velocity_constraints,
+                        ctx.joint_rows,
+                        &mut vs.solver_bodies,
+                        wo_bias,
+                        soft_update,
+                        warmstart_joints,
+                        factor,
+                    );
+                }
+            }
+            done += claimed_len;
+        }
+        sync.complete(stage, done, trees.len());
+        stage = sync.sync(stage, trees.len());
+    }
+
     // Joint color stages (ascending color id; parallel within a color:
     // constraints of a color touch pairwise-disjoint bodies). Only this group's
     // slices of the layout tables participate.

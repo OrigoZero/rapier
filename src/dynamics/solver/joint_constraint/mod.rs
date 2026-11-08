@@ -1,4 +1,5 @@
 pub use joint_velocity_constraint::{JointSolverBody, MotorParameters, WritebackId};
+pub(crate) use joint_velocity_constraint::JointConstraint;
 
 pub use any_joint_constraint::AnyJointConstraintMut;
 pub use generic_joint_constraint::GenericJointConstraint;
