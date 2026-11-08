@@ -8,20 +8,24 @@
 //! five rods on ball joints lost 62% of its energy in 10 s at 120 substeps a second in one pass
 //! of each kind, and 17% with every pass solved to convergence.
 //!
-//! The joints of an island whose bodies they join as a forest (no loop through the moving
-//! bodies; any number of joints to fixed bodies) are taken out of the coloured sweeps and
-//! solved here, one tree at a time, with every row of unbounded impulse (a locked axis, an
+//! The joints of an island that join its bodies and the world as a forest (no loop through
+//! the moving bodies, and at most one joint from each tree to the world) are taken out of the
+//! coloured sweeps and solved here, one tree at a time, with every row of unbounded impulse (a locked axis, an
 //! unbounded motor) solved exactly against every other: the system the rows' Gauss-Seidel
 //! converges to, `(J M⁻¹ Jᵀ + C) Δ = J v + b - C λ`, factored once a substep and solved in
 //! each pass. Eliminating the joints from the leaves towards the root fills no entry the
 //! system does not already hold (the rows of a joint couple only to the rows of joints that
 //! share one of its bodies, and once a joint's other body has no joint left but this one,
 //! every row it still couples to shares the same body), so the factorization costs time
-//! linear in the number of joints for chains and ragdolls alike. Joints that hold a body against
-//! the same motion share it as the least impulse can ([`REGULARIZATION`]). A row of bounded
-//! impulse (a limit, a bounded motor) and a row its bodies' locks leave next to nothing to move
-//! are solved by Gauss-Seidel after the exact solve, in the same stage. A joint that closes a
-//! loop through the moving bodies stays in the coloured sweeps.
+//! linear in the number of joints for chains and ragdolls alike. A row of bounded impulse (a
+//! limit, a bounded motor), a row its bodies' locks leave next to nothing to move and a row the
+//! factorization finds the others already hold are solved by Gauss-Seidel after the exact
+//! solve, in the same stage. A joint that closes a loop, through the moving bodies or through
+//! the world, stays in the coloured sweeps: two joints holding a body against the same motion
+//! (a door's hinge and the catch latched onto its frame, a span fixed to anchors at both ends)
+//! leave the system singular, and solved exactly the joint eliminated later took none of the
+//! load they share, so a catch shoved at three times its break force held; regularized, a pair
+//! that disagrees by a rounding answered with impulses that broke the catch at a touch.
 
 use crate::alloc_prelude::*;
 use core::ops::Range;
@@ -44,17 +48,15 @@ const NONE: u32 = u32::MAX;
 /// to move (what the orthogonalization of a joint's rows leaves of a row the others already
 /// hold) is solved by Gauss-Seidel after the exact solve, as it was before.
 const ROW_TOLERANCE: Real = 1.0e-4;
-/// The share of each exactly solved row's own inverse mass added to its diagonal entry. Two
-/// joints holding one body against the same motion (a door's hinge and the catch latched onto
-/// its frame, a span fixed to anchors at both ends, the rows of two hinges on a link held to a
-/// plane) leave the system singular; with this term it has one solution, the one that shares
-/// the load between them as the least impulse can, which a joint's break force reads. Without
-/// it the joint eliminated later took none of the shared load, so a latch shoved at three times
-/// its break force held. It moves an exact row's answer by about this share.
-const REGULARIZATION: Real = 1.0e-3;
-/// A pivot at or below this share of its row's own inverse mass is one rounding left: the row
-/// is solved by Gauss-Seidel after the exact solve.
-const PIVOT_FLOOR: Real = 1.0e-6;
+/// A row is solved exactly while the share of its own inverse mass that the joints eliminated
+/// before it leave it stays above this; below it the row is solved by Gauss-Seidel after the
+/// exact solve. Bodies held from moving along or turning about an axis can leave the rows of
+/// two joints on one body dependent on each other (a hinge chain held to a plane: the rows
+/// across the plane of two hinges on the thigh ask for the thigh's two free turns three times),
+/// and solved exactly a row the others already hold takes an impulse made of roundings. A row
+/// holding the axis of a chain of `n` like links hanging from the world keeps about `1 / n` of
+/// its own.
+const PIVOT_TOLERANCE: Real = 1.0e-3;
 
 /// The solver colour a joint solved in a tree carries: it is solved in no coloured sweep.
 pub(crate) const SOLVER_COLOR_TREE: u8 = 200;
@@ -111,8 +113,7 @@ pub(crate) struct JointTrees {
     row_counts: Vec<u8>,
     /// Per row slot: whether the factorization left the row inverse mass to solve it with.
     row_kept: Vec<bool>,
-    /// Per row slot: the row's own inverse mass, its diagonal entry before regularization and
-    /// elimination.
+    /// Per row slot: the row's own inverse mass, its diagonal entry before elimination.
     row_diag: Vec<Real>,
     /// Per row slot: the residual the pass solves, then the impulse that solves it.
     rhs: Vec<Real>,
@@ -143,8 +144,8 @@ impl JointTrees {
     /// solve group (empty for a single group). A joint qualifies when it locks an axis and
     /// every side of it that moves is an awake dynamic body of one group; the joints are taken
     /// in the order `interactions` holds them, and one that would close a loop through the
-    /// moving bodies stays, as does one with a side on a kinematic body. Each taken joint's `builder` holds its graph index until
-    /// [`Self::set_builder`] replaces it.
+    /// moving bodies or the world stays, as does one with a side on a kinematic body. Each taken
+    /// joint's `builder` holds its graph index until [`Self::generate_builders`] replaces it.
     pub(super) fn select(
         &mut self,
         interactions: &mut Vec<JointIndex>,
@@ -181,8 +182,12 @@ impl JointTrees {
             Some(sides)
         };
 
-        // Union-find over the island's bodies, joined by the taken joints.
+        // Union-find over the island's bodies, joined by the taken joints between two of them
+        // (the trees), and the same with the world as one more body, joined by the joints to it
+        // as well (the loops).
         let mut parent: Vec<u32> = (0..num_island_bodies as u32).collect();
+        let world = num_island_bodies as u32;
+        let mut loops: Vec<u32> = (0..=num_island_bodies as u32).collect();
         fn find(parent: &mut [u32], mut i: u32) -> u32 {
             while parent[i as usize] != i {
                 let up = parent[parent[i as usize] as usize];
@@ -203,16 +208,22 @@ impl JointTrees {
             match sides {
                 [NONE, NONE] => continue,
                 [a, NONE] | [NONE, a] => {
-                    let _ = a;
+                    let (ra, rw) = (find(&mut loops, a), find(&mut loops, world));
+                    if ra == rw {
+                        continue;
+                    }
+                    loops[ra.max(rw) as usize] = ra.min(rw);
                 }
                 [a, b] => {
                     if group_of(a) != group_of(b) {
                         continue;
                     }
-                    let (ra, rb) = (find(&mut parent, a), find(&mut parent, b));
-                    if ra == rb {
+                    let (la, lb) = (find(&mut loops, a), find(&mut loops, b));
+                    if la == lb {
                         continue;
                     }
+                    loops[la.max(lb) as usize] = la.min(lb);
+                    let (ra, rb) = (find(&mut parent, a), find(&mut parent, b));
                     parent[ra.max(rb) as usize] = ra.min(rb);
                 }
             }
@@ -535,8 +546,7 @@ impl JointTrees {
                         let rb = &row_vels[j * ROWS + b];
                         d[a * ROWS + b] = -(dot(&ra[0], &rb[2]) + dot(&ra[1], &rb[3]));
                     }
-                    d[a * ROWS + a] += rows[row_ids[j * ROWS + a] as usize].cfm_gain
-                        + REGULARIZATION * row_diag[j * ROWS + a];
+                    d[a * ROWS + a] += rows[row_ids[j * ROWS + a] as usize].cfm_gain;
                 }
             }
             // The blocks of every two joints sharing a body, through that body.
@@ -711,9 +721,9 @@ impl JointTrees {
 }
 
 /// The inverse of the symmetric `k`-by-`k` block `a` (stride [`ROWS`]) into `out`, through its
-/// `L D Lᵀ` factorization. A row whose pivot falls to [`PIVOT_FLOOR`] of its own inverse mass
-/// `own` is left out: its row and column of the inverse are zero, and `kept` reads false for
-/// it.
+/// `L D Lᵀ` factorization. A row whose pivot falls to [`PIVOT_TOLERANCE`] of its own inverse
+/// mass `own` is left out: its row and column of the inverse are zero, and `kept` reads false
+/// for it.
 fn invert(a: &[Real], own: &[Real], k: usize, out: &mut [Real], kept: &mut [bool]) {
     let mut l = [0.0; BLOCK];
     let mut d = [0.0; ROWS];
@@ -722,7 +732,7 @@ fn invert(a: &[Real], own: &[Real], k: usize, out: &mut [Real], kept: &mut [bool
         for m in 0..i {
             di -= l[i * ROWS + m] * l[i * ROWS + m] * d[m];
         }
-        kept[i] = own[i] > 0.0 && di > PIVOT_FLOOR * own[i];
+        kept[i] = own[i] > 0.0 && di > PIVOT_TOLERANCE * own[i];
         d[i] = if kept[i] { di } else { 0.0 };
         for r in i + 1..k {
             let mut s = a[r * ROWS + i];
