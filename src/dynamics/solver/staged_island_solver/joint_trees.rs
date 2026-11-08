@@ -161,6 +161,7 @@ impl JointTrees {
         self.body_joints.clear();
         self.body_joints_at.clear();
         self.body_pairs.clear();
+        self.matrices.clear();
 
         let group_of = |slot: u32| -> usize { slot_group.get(slot as usize).copied().unwrap_or(0) as usize };
         // The moving sides of a joint: the solver slot of each side that is an awake dynamic
