@@ -6,6 +6,8 @@ use core::sync::atomic::Ordering;
 
 #[cfg(feature = "dim3")]
 use crate::dynamics::rigid_body::gyroscopic_corrected_angvel;
+#[cfg(feature = "dim3")]
+use crate::dynamics::rigid_body_components::effective_world_inv_inertia;
 use crate::dynamics::solver::JointConstraintsSet;
 use crate::dynamics::solver::contact_constraint::ContactWithCoulombFrictionBuilder;
 #[cfg(feature = "dim3")]
@@ -17,6 +19,8 @@ use crate::dynamics::solver::solver_body::{
 };
 use crate::dynamics::solver::solver_contact_graph::ContactRef;
 use crate::dynamics::solver::velocity_solver::SolverGravity;
+#[cfg(feature = "dim3")]
+use crate::dynamics::solver::velocity_solver::SolverInertia;
 use crate::dynamics::{JointGraphEdge, RigidBodySubstep, RigidBodyType, RigidBodyVelocity};
 use crate::geometry::ContactManifold;
 use crate::math::Real;
@@ -118,6 +122,15 @@ pub(super) unsafe fn run_worker(ctx: &SharedCtx, worker_id: usize) {
                         unsafe { &*ctx.any_gyroscopic }.store(true, Ordering::Relaxed);
                     } else {
                         gyro.enabled = false;
+                    }
+                    // What the substeps after the first turn the body's inertia with.
+                    if rb.is_dynamic() && !rb.is_sleeping() && !rb.is_soft_frame() {
+                        vs.solver_inertia[i] = SolverInertia {
+                            local_mprops: rb.mprops.local_mprops,
+                            locks: rb.mprops.flags,
+                            torque: rb.forces.torque,
+                            turns: true,
+                        };
                     }
                 }
             }
@@ -328,6 +341,20 @@ pub(super) unsafe fn run_worker(ctx: &SharedCtx, worker_id: usize) {
                         }
                         if vs.solver_bodies.flags[i] & SOLVER_BODY_KEEP_ENDED != 0 {
                             vs.ended_vels[i] = vs.solver_bodies.vels[i].linear;
+                        }
+                        // A body's world-space inverse inertia turns with it: every substep
+                        // after the first solves the body's joints and adds its torque with the
+                        // inertia at the rotation the previous substep left it at.
+                        #[cfg(feature = "dim3")]
+                        if substep_id > 0 && vs.solver_inertia[i].turns {
+                            let inertia = vs.solver_inertia[i];
+                            let ii = effective_world_inv_inertia(
+                                &inertia.local_mprops,
+                                inertia.locks,
+                                &vs.solver_bodies.poses[i].rotation,
+                            );
+                            vs.solver_bodies.poses[i].ii = ii;
+                            vs.solver_vels_increment[i].angular = ii * inertia.torque * params.dt;
                         }
                         let incr = vs.solver_vels_increment[i];
                         {

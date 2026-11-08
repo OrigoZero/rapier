@@ -6,6 +6,32 @@ use crate::dynamics::{MultibodyLinkId, solver::SolverVel};
 use crate::math::AngVector;
 use crate::math::{DVector, Real, Rotation, Vector};
 
+/// What a substep needs to turn a solver body's world-space inverse inertia, and the angular
+/// velocity its torque adds, to the rotation the body starts the substep at (3D only): the
+/// body's local mass properties, the rotation axes it locks and the torque it is driven by.
+/// `turns` is set for an awake dynamic body that is no soft frame; every other solver body keeps
+/// the inertia the step copied.
+#[cfg(feature = "dim3")]
+#[derive(Copy, Clone)]
+pub(crate) struct SolverInertia {
+    pub local_mprops: crate::dynamics::MassProperties,
+    pub locks: crate::dynamics::LockedAxes,
+    pub torque: AngVector,
+    pub turns: bool,
+}
+
+#[cfg(feature = "dim3")]
+impl Default for SolverInertia {
+    fn default() -> Self {
+        Self {
+            local_mprops: Default::default(),
+            locks: crate::dynamics::LockedAxes::empty(),
+            torque: AngVector::ZERO,
+            turns: false,
+        }
+    }
+}
+
 /// Per-solver-body data for the staged solver's per-substep gyroscopic pass (3D
 /// only). `enabled` is false for bodies whose gyroscopic forces are off (the
 /// default), for frontier/sleeping bodies, and for multibody links.
@@ -112,6 +138,10 @@ pub(crate) struct VelocitySolver {
     /// gyro-free scenes (the common case) skip the pass entirely.
     #[cfg(feature = "dim3")]
     pub solver_gyro: Vec<GyroParams>,
+    /// Per-solver-body inertia (3D), indexed like `solver_bodies`: what each substep after the
+    /// first turns the body's world-space inverse inertia with (see [`SolverInertia`]).
+    #[cfg(feature = "dim3")]
+    pub solver_inertia: Vec<SolverInertia>,
     /// The velocity and centre-of-mass pose each recording solver body
     /// (`SOLVER_BODY_RECORD_SUBSTEPS`: a rigid body that records its substeps, or a recorded
     /// soft-body particle) ended each substep but the last with, indexed like `solver_bodies`.
@@ -172,6 +202,8 @@ impl VelocitySolver {
             coupled_rows: CoupledRows::default(),
             #[cfg(feature = "dim3")]
             solver_gyro: Vec::new(),
+            #[cfg(feature = "dim3")]
+            solver_inertia: Vec::new(),
             substep_vels: Vec::new(),
             solver_gravity: Vec::new(),
             ended_vels: Vec::new(),

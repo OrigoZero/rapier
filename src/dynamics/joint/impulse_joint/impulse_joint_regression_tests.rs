@@ -659,3 +659,95 @@ fn a_door_held_by_a_hinge_and_a_catch_puts_a_shove_through_the_catch() {
         taken[1]
     );
 }
+
+/// The chain of [`swing`], five rods on ball joints laid out level from a fixed anchor at
+/// (0, 10, 0), released turning at `spin` rad/s about the vertical through the anchor, swung for
+/// 10 s at `rate` steps a second in `substeps` substeps: the change of its energy as a share of
+/// what it stands above hanging straight down at rest, and the farthest any rod's centre of mass
+/// went from the vertical plane it was released in.
+#[cfg(feature = "dim3")]
+fn spun_chain(rate: Real, substeps: usize, spin: Real) -> (Real, Real) {
+    let mut world = PhysicsWorld::new();
+    world.integration_parameters.dt = 1.0 / rate;
+    world.integration_parameters.num_solver_iterations = substeps;
+    let top = Vector::new(0.0, 10.0, 0.0);
+    let anchor = world.insert_body(RigidBodyBuilder::fixed().translation(top));
+    let turning = Vector::new(0.0, spin, 0.0);
+    let mut above = anchor;
+    let mut links = Vec::new();
+    for i in 0..5 {
+        let at = top + Vector::X * (0.25 + i as Real * 0.5);
+        let (link, _) = world.insert(
+            RigidBodyBuilder::dynamic()
+                .translation(at)
+                .linvel(turning.cross(at - top))
+                .angvel(turning)
+                .allow_fast_rotation(true),
+            untouching_rod(),
+        );
+        let mut data: GenericJoint = SphericalJointBuilder::new().build().into();
+        data.set_local_anchor1(Vector::new(-0.25, 0.0, 0.0));
+        data.set_local_anchor2(if above == anchor {
+            Vector::ZERO
+        } else {
+            Vector::new(0.25, 0.0, 0.0)
+        });
+        world.insert_impulse_joint(link, above, data);
+        links.push(link);
+        above = link;
+    }
+    let gravity = world.gravity;
+    let start = links_energy(&world.bodies, &links, gravity);
+    let hanging: Real = (0..5)
+        .map(|i| -gravity.y * (top.y - 0.25 - i as Real * 0.5))
+        .sum();
+    let mut out_of_plane: Real = 0.0;
+    for _ in 0..(10.0 * rate) as usize {
+        world.step();
+        for link in &links {
+            out_of_plane = out_of_plane.max(world.bodies[*link].translation().z.abs());
+        }
+    }
+    let change = (links_energy(&world.bodies, &links, gravity) - start) / (start - hanging);
+    (change, out_of_plane)
+}
+
+/// The chain of [`spun_chain`], released turning at 1 rad/s about the vertical, swings out of
+/// its plane and keeps the same share of its energy over 10 s however many substeps a step is
+/// split into: within half a point of the steps of one substep of the same length, and within
+/// 10% of what it can give up at substeps of a 120th of a second (30 Hz x 4, 60 x 2, 120 x 1)
+/// and 1% at a 240th (60 x 4, 120 x 2, 240 x 1) and a 480th (120 x 4, 240 x 2, 480 x 1). A
+/// substep after the first solved the rods' joints with the inertia the step began with: the
+/// chain lost 36% at 60 Hz x 2 against 6% at 120 x 1, and 23% at 240 x 2 against 0.2% at 480 x 1.
+#[test]
+#[cfg(feature = "dim3")]
+fn a_chain_swinging_out_of_its_plane_keeps_its_energy_however_its_steps_are_split() {
+    let mut past = Vec::new();
+    let mut read = Vec::new();
+    for (single, split, bound) in [
+        (120.0, [(30.0, 4), (60.0, 2)], 0.10),
+        (240.0, [(60.0, 4), (120.0, 2)], 0.01),
+        (480.0, [(120.0, 4), (240.0, 2)], 0.01),
+    ] {
+        let (whole, reach) = spun_chain(single, 1, 1.0);
+        assert!(reach > 0.5, "the chain stayed within {reach} m of its plane");
+        read.push(alloc::format!("{single} Hz x 1: {:+.2}%", 100.0 * whole));
+        if whole.abs() > bound {
+            past.push(alloc::format!("{single} Hz x 1: {:+.2}%", 100.0 * whole));
+        }
+        for (rate, substeps) in split {
+            let (change, _) = spun_chain(rate, substeps, 1.0);
+            read.push(alloc::format!("{rate} Hz x {substeps}: {:+.2}%", 100.0 * change));
+            if change.abs() > bound || (change - whole).abs() > 0.005 {
+                past.push(alloc::format!(
+                    "{rate} Hz x {substeps}: {:+.2}% against {:+.2}% at {single} Hz x 1",
+                    100.0 * change,
+                    100.0 * whole
+                ));
+            }
+        }
+    }
+    std::println!("five-rod chain turning out of its plane, 10 s: {read:?}");
+    assert!(past.is_empty(), "the chain's energy changed: {past:?}");
+}
+
