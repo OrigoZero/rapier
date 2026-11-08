@@ -17,6 +17,7 @@ use crate::dynamics::{
 };
 use parry::math::SIMD_WIDTH;
 
+use super::joint_trees::SOLVER_COLOR_TREE;
 use super::{GroupJointRanges, JOINT_BATCH, LAYOUT_REF_WORKERS, StagedIslandSolver};
 
 impl StagedIslandSolver {
@@ -99,6 +100,24 @@ impl StagedIslandSolver {
             joint_indices,
             &mut joints.two_body_interactions,
             &mut joints.generic_two_body_interactions,
+        );
+
+        // The joints that join their bodies as trees leave the coloured sweeps.
+        let num_groups = self.groups.len();
+        let mut tree_slot_group: Vec<u16> = Vec::new();
+        if num_groups > 1 {
+            tree_slot_group.resize(island_bodies.len(), 0);
+            for (gi, g) in self.groups.iter().enumerate() {
+                tree_slot_group[g.bodies.clone()].fill(gi as u16);
+            }
+        }
+        self.joint_trees.select(
+            &mut joints.two_body_interactions,
+            impulse_joints,
+            bodies,
+            island_bodies.len(),
+            &tree_slot_group,
+            num_groups,
         );
 
         joints.simd_velocity_constraints.clear();
@@ -232,6 +251,7 @@ impl StagedIslandSolver {
                         chunks: chunks_start..self.joint_chunk_lanes.len(),
                         builders: 0..0,
                         overflow: 0..0,
+                        trees: 0..0,
                     });
                 }
 
@@ -265,8 +285,9 @@ impl StagedIslandSolver {
             // group's parallel scalar colors first (recording their builder
             // ranges), then the group's worker-0 overflow.
             let num_parallel_scalar = 0usize;
-            let num_scalar =
-                num_parallel_scalar + scalar_by_group.iter().map(|v| v.len()).sum::<usize>();
+            let num_scalar = num_parallel_scalar
+                + scalar_by_group.iter().map(|v| v.len()).sum::<usize>()
+                + self.joint_trees.num_joints();
             unsafe {
                 reset_buffer(&mut joints.velocity_constraints_builder, num_scalar);
             }
@@ -288,9 +309,25 @@ impl StagedIslandSolver {
                     self.joint_rows.push(row_start..num_rows);
                     num_builders += 1;
                 }
+                let overflow_end = num_builders;
+                let joint_rows = &mut self.joint_rows;
+                self.joint_trees.generate_builders(gi, |joint_i| {
+                    let row_start = num_rows;
+                    JointConstraintBuilder::generate(
+                        &impulse_joints[joint_i].weight,
+                        bodies,
+                        joint_i,
+                        &mut joints.velocity_constraints_builder[num_builders],
+                        &mut num_rows,
+                    );
+                    joint_rows.push(row_start..num_rows);
+                    num_builders += 1;
+                    num_builders - 1
+                });
                 let l = &mut self.staged_group_joint_layout[gi];
                 l.builders = builders_start..num_builders;
-                l.overflow = overflow_start..num_builders;
+                l.overflow = overflow_start..overflow_end;
+                l.trees = self.joint_trees.group_trees(gi);
             }
             unsafe {
                 reset_buffer(&mut joints.velocity_constraints, num_rows);
@@ -471,7 +508,7 @@ impl StagedIslandSolver {
         unsafe {
             reset_buffer(
                 &mut joints.velocity_constraints_builder,
-                self.joint_overflow_workspace.len(),
+                self.joint_overflow_workspace.len() + self.joint_trees.num_joints(),
             );
         }
 
@@ -491,6 +528,21 @@ impl StagedIslandSolver {
         }
         self.joint_overflow_range = overflow_start..num_builders;
 
+        let joint_rows = &mut self.joint_rows;
+        self.joint_trees.generate_builders(0, |joint_i| {
+            let row_start = num_rows;
+            JointConstraintBuilder::generate(
+                &impulse_joints[joint_i].weight,
+                bodies,
+                joint_i,
+                &mut joints.velocity_constraints_builder[num_builders],
+                &mut num_rows,
+            );
+            joint_rows.push(row_start..num_rows);
+            num_builders += 1;
+            num_builders - 1
+        });
+
         unsafe {
             reset_buffer(&mut joints.velocity_constraints, num_rows);
         }
@@ -501,6 +553,7 @@ impl StagedIslandSolver {
             chunks: 0..self.joint_chunk_lanes.len(),
             builders: 0..self.joint_rows.len(),
             overflow: self.joint_overflow_range.clone(),
+            trees: self.joint_trees.group_trees(0),
         });
     }
 
@@ -513,6 +566,10 @@ impl StagedIslandSolver {
     ) -> bool {
         for joint_i in &self.prev_staged_joint_indices {
             let joint = &impulse_joints[*joint_i].weight;
+            // A joint of a tree is solved in a stage of its own, before every coloured sweep.
+            if joint.solver_color == SOLVER_COLOR_TREE {
+                continue;
+            }
             if joint.solver_color >= 128 {
                 return false;
             }
