@@ -552,7 +552,11 @@ impl RigidBodyMassProps {
         }
         self.world_com = self.local_mprops.world_com(position);
         self.effective_inv_mass = Vector::splat(self.local_mprops.inv_mass);
-        self.effective_world_inv_inertia = self.local_mprops.world_inv_inertia(&position.rotation);
+        #[cfg(feature = "dim2")]
+        {
+            self.effective_world_inv_inertia =
+                self.local_mprops.world_inv_inertia(&position.rotation);
+        }
 
         // Take into account translation/rotation locking.
         if !body_type.is_dynamic() || self.flags.contains(LockedAxes::TRANSLATION_LOCKED_X) {
@@ -576,24 +580,44 @@ impl RigidBodyMassProps {
         }
         #[cfg(feature = "dim3")]
         {
-            if !body_type.is_dynamic() || self.flags.contains(LockedAxes::ROTATION_LOCKED_X) {
-                self.effective_world_inv_inertia.m11 = 0.0;
-                self.effective_world_inv_inertia.m12 = 0.0;
-                self.effective_world_inv_inertia.m13 = 0.0;
-            }
-
-            if !body_type.is_dynamic() || self.flags.contains(LockedAxes::ROTATION_LOCKED_Y) {
-                self.effective_world_inv_inertia.m22 = 0.0;
-                self.effective_world_inv_inertia.m12 = 0.0;
-                self.effective_world_inv_inertia.m23 = 0.0;
-            }
-            if !body_type.is_dynamic() || self.flags.contains(LockedAxes::ROTATION_LOCKED_Z) {
-                self.effective_world_inv_inertia.m33 = 0.0;
-                self.effective_world_inv_inertia.m13 = 0.0;
-                self.effective_world_inv_inertia.m23 = 0.0;
-            }
+            let locks = if body_type.is_dynamic() {
+                self.flags
+            } else {
+                LockedAxes::ROTATION_LOCKED
+            };
+            self.effective_world_inv_inertia =
+                effective_world_inv_inertia(&self.local_mprops, locks, &position.rotation);
         }
     }
+}
+
+/// The effective world-space inverse angular inertia of a body whose local mass properties are
+/// `local_mprops` and whose rotation about the axes `locks` names is locked, turned to
+/// `rotation`: the local inverse inertia turned to it, with the row and the column of each locked
+/// rotation axis zero.
+#[cfg(feature = "dim3")]
+pub(crate) fn effective_world_inv_inertia(
+    local_mprops: &MassProperties,
+    locks: LockedAxes,
+    rotation: &Rotation,
+) -> AngularInertia {
+    let mut inv_inertia = local_mprops.world_inv_inertia(rotation);
+    if locks.contains(LockedAxes::ROTATION_LOCKED_X) {
+        inv_inertia.m11 = 0.0;
+        inv_inertia.m12 = 0.0;
+        inv_inertia.m13 = 0.0;
+    }
+    if locks.contains(LockedAxes::ROTATION_LOCKED_Y) {
+        inv_inertia.m22 = 0.0;
+        inv_inertia.m12 = 0.0;
+        inv_inertia.m23 = 0.0;
+    }
+    if locks.contains(LockedAxes::ROTATION_LOCKED_Z) {
+        inv_inertia.m33 = 0.0;
+        inv_inertia.m13 = 0.0;
+        inv_inertia.m23 = 0.0;
+    }
+    inv_inertia
 }
 
 #[cfg_attr(feature = "serde-serialize", derive(Serialize, Deserialize))]

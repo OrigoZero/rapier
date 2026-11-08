@@ -14,6 +14,8 @@ use crate::dynamics::solver::manifold_store::ManifoldStore;
 use crate::dynamics::solver::solver_contact_graph::SolverContactGraph;
 #[cfg(feature = "dim3")]
 use crate::dynamics::solver::velocity_solver::GyroParams;
+#[cfg(feature = "dim3")]
+use crate::dynamics::solver::velocity_solver::SolverInertia;
 use crate::dynamics::solver::velocity_solver::MultibodyLedger;
 use crate::dynamics::{
     IntegrationParameters, Multibody, MultibodyForces, MultibodyJointSet, RigidBodyHandle,
@@ -97,12 +99,15 @@ impl VelocitySolver {
             .resize(aligned_solver_bodies_len, SolverVel::zero());
 
         // Reset every step so multibody/padding slots (which the body-copy stage
-        // skips) read as gyro-disabled.
+        // skips) read as gyro-disabled and keep the inertia they were copied with.
         #[cfg(feature = "dim3")]
         {
             self.solver_gyro.clear();
             self.solver_gyro
                 .resize(aligned_solver_bodies_len, GyroParams::default());
+            self.solver_inertia.clear();
+            self.solver_inertia
+                .resize(aligned_solver_bodies_len, SolverInertia::default());
         }
 
         // Grown, never shrunk: a slot is read only once the stage owning it flagged and wrote it.
