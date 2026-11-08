@@ -8,24 +8,28 @@
 //! five rods on ball joints lost 62% of its energy in 10 s at 120 substeps a second in one pass
 //! of each kind, and 17% with every pass solved to convergence.
 //!
-//! The joints of an island that join its bodies and the world as a forest (no loop through
-//! the moving bodies, and at most one joint from each tree to the world) are taken out of the
-//! coloured sweeps and solved here, one tree at a time, with every row of unbounded impulse (a locked axis, an
-//! unbounded motor) solved exactly against every other: the system the rows' Gauss-Seidel
-//! converges to, `(J M⁻¹ Jᵀ + C) Δ = J v + b - C λ`, factored once a substep and solved in
-//! each pass. Eliminating the joints from the leaves towards the root fills no entry the
-//! system does not already hold (the rows of a joint couple only to the rows of joints that
-//! share one of its bodies, and once a joint's other body has no joint left but this one,
-//! every row it still couples to shares the same body), so the factorization costs time
-//! linear in the number of joints for chains and ragdolls alike. A row of bounded impulse (a
-//! limit, a bounded motor), a row its bodies' locks leave next to nothing to move and a row the
-//! factorization finds the others already hold are solved by Gauss-Seidel after the exact
-//! solve, in the same stage. A joint that closes a loop, through the moving bodies or through
-//! the world, stays in the coloured sweeps: two joints holding a body against the same motion
-//! (a door's hinge and the catch latched onto its frame, a span fixed to anchors at both ends)
-//! leave the system singular, and solved exactly the joint eliminated later took none of the
-//! load they share, so a catch shoved at three times its break force held; regularized, a pair
-//! that disagrees by a rounding answered with impulses that broke the catch at a touch.
+//! The joints of an island that join its bodies and the world as a forest (no loop through the
+//! moving bodies, and at most one joint from each tree to the world) and whose moving bodies are
+//! free on every axis are taken out of the coloured sweeps and solved here, one tree at a time,
+//! with every row of unbounded impulse (a locked axis, an unbounded motor) solved exactly against
+//! every other: the system the rows' Gauss-Seidel converges to, `(J M⁻¹ Jᵀ + C) Δ = J v + b - C λ`,
+//! factored once a substep and solved in each pass. Eliminating the joints from the leaves towards
+//! the root fills no entry the system does not already hold (the rows of a joint couple only to the
+//! rows of joints that share one of its bodies, and once a joint's other body has no joint left but
+//! this one, every row it still couples to shares the same body), so the factorization costs time
+//! linear in the number of joints for chains and ragdolls alike. A row of bounded impulse (a limit,
+//! a bounded motor) and a row the factorization finds the others already hold are solved by
+//! Gauss-Seidel after the exact solve, in the same stage. A joint with a side on a body that locks
+//! an axis stays in the coloured sweeps: the locks leave the rows of the joints on such a body
+//! dependent on each other at some poses and nearly so at the poses around them (a hinge chain held
+//! to a plane: the rows across the plane of the two hinges on the thigh ask for the thigh's two
+//! free turns three times), and solved exactly a row the others nearly hold takes an impulse many
+//! times the momentum the bodies carry. A joint that closes a loop, through the moving bodies or
+//! through the world, stays in the coloured sweeps: two joints holding a body against the same
+//! motion (a door's hinge and the catch latched onto its frame, a span fixed to anchors at both
+//! ends) leave the system singular, and solved exactly the joint eliminated later took none of the
+//! load they share, so a catch shoved at three times its break force held; regularized, a pair that
+//! disagrees by a rounding answered with impulses that broke the catch at a touch.
 
 use crate::alloc_prelude::*;
 use core::ops::Range;
@@ -43,19 +47,16 @@ const BLOCK: usize = ROWS * ROWS;
 /// A side of a joint that no moving body of the tree is on.
 const NONE: u32 = u32::MAX;
 /// A row joins the exact solve while its own inverse mass is more than this share of its scale
-/// (`JointConstraint::lhs_scale`, the inverse mass it would have were neither body held from
-/// moving along or turning about any axis). A row whose bodies' locks leave it next to nothing
-/// to move (what the orthogonalization of a joint's rows leaves of a row the others already
-/// hold) is solved by Gauss-Seidel after the exact solve, as it was before.
+/// (`JointConstraint::lhs_scale`). A row the orthogonalization of its joint's rows leaves next to
+/// nothing to move (what remains of a row the joint's other rows already hold) is solved by
+/// Gauss-Seidel after the exact solve.
 const ROW_TOLERANCE: Real = 1.0e-4;
 /// A row is solved exactly while the share of its own inverse mass that the joints eliminated
 /// before it leave it stays above this; below it the row is solved by Gauss-Seidel after the
-/// exact solve. Bodies held from moving along or turning about an axis can leave the rows of
-/// two joints on one body dependent on each other (a hinge chain held to a plane: the rows
-/// across the plane of two hinges on the thigh ask for the thigh's two free turns three times),
-/// and solved exactly a row the others already hold takes an impulse made of roundings. A row
-/// holding the axis of a chain of `n` like links hanging from the world keeps about `1 / n` of
-/// its own.
+/// exact solve. The bodies of a tree are free on every axis, so the rows of its joints are
+/// independent of each other at every pose, and the share a row keeps falls with the mass the
+/// tree hangs from it: a row holding the axis of a chain of `n` like links hanging from the
+/// world keeps about `1 / n` of its own.
 const PIVOT_TOLERANCE: Real = 1.0e-3;
 
 /// The solver colour a joint solved in a tree carries: it is solved in no coloured sweep.
@@ -142,9 +143,10 @@ impl JointTrees {
     /// Takes out of `interactions` the joints that join their bodies as trees of two or more
     /// joints and lays the trees out, group by group. `slot_group` names each island body's
     /// solve group (empty for a single group). A joint qualifies when it locks an axis and
-    /// every side of it that moves is an awake dynamic body of one group; the joints are taken
-    /// in the order `interactions` holds them, and one that would close a loop through the
-    /// moving bodies or the world stays, as does one with a side on a kinematic body. Each taken
+    /// every side of it that moves is an awake dynamic body of one group that locks none of its
+    /// own axes; the joints are taken in the order `interactions` holds them, and one that would
+    /// close a loop through the moving bodies or the world stays, as does one with a side on a
+    /// kinematic body or on a body that locks an axis. Each taken
     /// joint's `builder` holds its graph index until [`Self::generate_builders`] replaces it.
     pub(super) fn select(
         &mut self,
@@ -165,8 +167,9 @@ impl JointTrees {
 
         let group_of = |slot: u32| -> usize { slot_group.get(slot as usize).copied().unwrap_or(0) as usize };
         // The moving sides of a joint: the solver slot of each side that is an awake dynamic
-        // island body. `None` for a joint with a side on any other solver body (a kinematic or
-        // a sleeping body's read-only slot), whose velocity slot other constraints share.
+        // island body free on every axis. `None` for a joint with a side on any other solver
+        // body (a kinematic or a sleeping body's read-only slot, whose velocity slot other
+        // constraints share, or a body that locks an axis).
         let moving = |joint_i: JointIndex| -> Option<[u32; 2]> {
             let joint = &impulse_joints[joint_i].weight;
             let mut sides = [NONE; 2];
@@ -175,7 +178,11 @@ impl JointTrees {
                 if id == NONE {
                     continue;
                 }
-                if (id as usize) >= num_island_bodies || !bodies[handle].is_dynamic() {
+                let body = &bodies[handle];
+                if (id as usize) >= num_island_bodies
+                    || !body.is_dynamic()
+                    || !body.locked_axes().is_empty()
+                {
                     return None;
                 }
                 sides[s] = id;

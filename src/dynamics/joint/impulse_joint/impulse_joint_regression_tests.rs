@@ -414,6 +414,29 @@ fn a_hinge_chain_held_to_a_plane_falls_to_rest_without_climbing() {
     assert!(failed.is_empty(), "the chain climbed or came apart: {failed:?}");
 }
 
+/// The chain of [`planar_hinge_chain`] with the torso's turning locked alone, hinged about Z,
+/// free or sprung, falls to rest at 120 steps a second in 1 substep at the origin and 704 to
+/// 720 m out along X: no body climbs above the 1.30 m the torso starts at and every hinge holds
+/// its anchors within 2 cm. Solved exactly as a tree, the hinges on its free thigh and calf came
+/// apart by 6 to 24 cm 704 to 720 m out, a row the others nearly held taking an impulse of up to
+/// 23000 N s on its 5 kg bodies.
+#[test]
+#[cfg(feature = "dim3")]
+fn a_hinge_chain_locked_at_the_torso_holds_together_far_from_the_origin_in_one_substep() {
+    let mut failed = Vec::new();
+    for x in [0.0, 704.0, 712.0, 720.0] {
+        for spring in [false, true] {
+            let (peak, gap) = planar_hinge_chain(x, Vector::Z, false, spring, 1.0 / 120.0, 1);
+            if peak > 1.31 || gap > 0.02 {
+                failed.push(alloc::format!(
+                    "at x {x}, sprung {spring}: peak {peak} m, gap {gap} m"
+                ));
+            }
+        }
+    }
+    assert!(failed.is_empty(), "the chain climbed or came apart: {failed:?}");
+}
+
 /// A rod swinging from a ball joint or a hinge keeps its energy to within 2% over 10 s far from
 /// the origin, at 30 steps a second in 4 substeps and 240 in 1, as it does at the origin: 930 m
 /// out, where positions are held to 61 µm, a substep's chord is a few of those steps. A carry
