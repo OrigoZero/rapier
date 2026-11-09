@@ -591,19 +591,31 @@ impl JointConstraintHelper<Real> {
         );
 
         let dist = self.lin_err.dot(lin_jac);
-        let min_enabled = dist <= limits[0];
-        let max_enabled = limits[1] <= dist;
+        let [min, max] = limits;
 
+        // See `limit_linear`: the row holds the bound the distance is nearer from the substep
+        // it is built in, whether or not the distance has reached it, letting the distance
+        // close the gap to that bound within the substep and no further; a lower bound at the
+        // upper one holds the distance there from both sides.
+        let held = max <= min;
+        let at_lower = !held && dist - min < max - dist;
+        let inv_dt = params.inv_dt();
         let erp_inv_dt = softness.erp_inv_dt(params.dt);
+        let (rhs_wo_bias, rhs_bias) = if held {
+            (0.0, (dist - max) * erp_inv_dt)
+        } else if at_lower {
+            ((dist - min).max(0.0) * inv_dt, (dist - min).min(0.0) * erp_inv_dt)
+        } else {
+            ((dist - max).min(0.0) * inv_dt, (dist - max).max(0.0) * erp_inv_dt)
+        };
 
         // See `limit_linear`: the bias is capped so deep violations don't catapult.
         let max_bias = params.max_corrective_velocity();
-        let rhs_bias = (((dist - limits[1]).max(0.0) - (limits[0] - dist).max(0.0)) * erp_inv_dt)
-            .clamp(-max_bias, max_bias);
-        constraint.rhs += rhs_bias;
+        constraint.rhs += rhs_wo_bias + rhs_bias.clamp(-max_bias, max_bias);
+        constraint.rhs_wo_bias += rhs_wo_bias;
         constraint.impulse_bounds = [
-            min_enabled as u32 as Real * -Real::MAX,
-            max_enabled as u32 as Real * Real::MAX,
+            if held || at_lower { -Real::MAX } else { 0.0 },
+            if at_lower { 0.0 } else { Real::MAX },
         ];
 
         constraint
