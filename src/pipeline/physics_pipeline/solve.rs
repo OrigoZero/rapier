@@ -319,10 +319,12 @@ impl PhysicsPipeline {
         );
 
         // Substep solve-groups: partition the awake body list by effective
-        // `additional_solver_iterations`. Must run after `update_islands` (last mutator of the
-        // awake list) and before the maintenance below (consumes the body order). No elevated body => one branch.
+        // `additional_solver_iterations` and the substeps the tension of each body's joints asks
+        // for. Must run after `update_islands` (last mutator of the awake list) and before the
+        // maintenance below (consumes the body order). No elevated body => one branch.
         islands.update_substep_groups(
             any_extra_iterations,
+            integration_parameters,
             bodies,
             narrow_phase,
             colliders,

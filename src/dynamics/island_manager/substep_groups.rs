@@ -3,10 +3,13 @@
 //! into contiguous ranges. Applied (reorder, re-stamp, epoch bump) only when not already grouped.
 
 use super::IslandManager;
+use super::tension_substeps::{tension_extra_substeps, tension_tilt_rates};
 use crate::data::union_find::UnionFind;
 use crate::dynamics::{
-    ImpulseJointSet, MultibodyJointSet, RigidBodyHandle, RigidBodySet, SoftBodySet,
+    ImpulseJointSet, IntegrationParameters, MultibodyJointSet, RigidBodyHandle, RigidBodySet,
+    SoftBodySet,
 };
+use crate::math::Real;
 use crate::geometry::{ColliderSet, ContactPair, NarrowPhase};
 use alloc::vec::Vec;
 use core::ops::Range;
@@ -54,15 +57,20 @@ pub(crate) struct SubstepGroupsWorkspace {
     offsets: Vec<usize>,
     /// Reorder workspace for the awake `bodies` vec.
     workspace: Vec<RigidBodyHandle>,
+    /// Per awake body slot: the square of the angular frequency at which the tension of its
+    /// joints tilts it (see `tension_substeps`).
+    tension_rates: Vec<Real>,
 }
 
 impl IslandManager {
     /// Recomputes the awake set's substep solve-groups, reordering the awake island's body list so
     /// groups are contiguous (descending extra count). Must run after `update_islands` (last
-    /// mutator of the awake body list) and before anything consumes body order or stamps solver-body indices. `any_extra` = caller's OR of `additional_solver_iterations > 0`; when `false` this is one branch + `Vec::clear` (empty groups = one implicit whole-set group).
+    /// mutator of the awake body list) and before anything consumes body order or stamps solver-body indices. `any_extra` = caller's OR of `additional_solver_iterations > 0`. A body's extra substeps are the greater of the ones it is set to and the ones the tension of its joints asks for at `params`' step length and substeps (`tension_substeps`); when no body asks for any this is one pass over the joints + `Vec::clear` (empty groups = one implicit whole-set group).
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn update_substep_groups(
         &mut self,
         any_extra: bool,
+        params: &IntegrationParameters,
         bodies: &mut RigidBodySet,
         narrow_phase: &NarrowPhase,
         colliders: &ColliderSet,
@@ -71,16 +79,10 @@ impl IslandManager {
         soft_bodies: &SoftBodySet,
     ) {
         self.solve_groups.clear();
-        if !any_extra {
-            return;
-        }
         let Some(awake_id) = self.awake_island else {
             return;
         };
         let num_bodies = self.islands[awake_id].bodies.len();
-
-        let ws = &mut self.substep_groups_workspace;
-        ws.uf.reset(num_bodies);
 
         // An edge merges components only between awake *dynamic* bodies: fixed/kinematic bodies
         // are not solver DOFs and must not glue unrelated components (a kinematic platform would
@@ -90,6 +92,24 @@ impl IslandManager {
             (rb.is_dynamic() && !rb.is_sleeping() && rb.ids.active_island_id == awake_id as u32)
                 .then_some(rb.ids.active_set_id)
         };
+
+        let ws = &mut self.substep_groups_workspace;
+        tension_tilt_rates(
+            &mut ws.tension_rates,
+            num_bodies,
+            params.dt,
+            bodies,
+            impulse_joints,
+            slot,
+        );
+        let base = params.num_solver_iterations;
+        let tension_extra =
+            |rates: &[Real], i: usize| tension_extra_substeps(base, params.dt, rates[i]);
+        let any_tension = (0..num_bodies).any(|i| tension_extra(&ws.tension_rates, i) > 0);
+        if !any_extra && !any_tension {
+            return;
+        }
+        ws.uf.reset(num_bodies);
 
         // Contact edges from the narrow-phase's current pairs; solver-side filters are ignored as
         // under-merging would split coupled bodies' cadences. A soft body's colliders hang on its
@@ -156,7 +176,7 @@ impl IslandManager {
             let handle = self.islands[awake_id].bodies[i];
             let rb = &bodies[handle];
             let body_key = key(
-                rb.additional_solver_iterations() as u32,
+                (rb.additional_solver_iterations() as u32).max(tension_extra(&ws.tension_rates, i)),
                 rb.additional_pgs_iterations() as u32,
             );
             if body_key > 0 {
