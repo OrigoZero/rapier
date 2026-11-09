@@ -751,3 +751,80 @@ fn a_chain_swinging_out_of_its_plane_keeps_its_energy_however_its_steps_are_spli
     assert!(past.is_empty(), "the chain's energy changed: {past:?}");
 }
 
+
+/// A chain of `links_n` 1 kg rods (0.1 m by 0.5 m by 0.1 m) hanging straight down by ball joints
+/// from a fixed anchor at (0, 50, 0), its last rod `load` kg, stepped for `seconds` at `rate`
+/// steps a second in `substeps` substeps: how far its end stands past the chain's length from
+/// the anchor, as a share of that length. The joints' frames turn X onto the chain's axis the way
+/// the engine builds a ball joint, so the rounding of that turn leaves the rows a hair off the
+/// vertical and the chain is not held exactly upright by its own symmetry.
+#[cfg(feature = "dim3")]
+fn loaded_chain_stretch(links_n: usize, load: Real, rate: Real, substeps: usize, seconds: Real) -> Real {
+    let mut world = PhysicsWorld::new();
+    world.integration_parameters.dt = 1.0 / rate;
+    world.integration_parameters.num_solver_iterations = substeps;
+    world.integration_parameters.normalized_max_linear_velocity = Real::MAX;
+    let top = Vector::new(0.0, 50.0, 0.0);
+    let anchor = world.insert_body(RigidBodyBuilder::fixed().translation(top));
+    let turn = Rotation::from_rotation_arc(Vector::X, Vector::Y);
+    let mut above = anchor;
+    let mut links = Vec::new();
+    for i in 0..links_n {
+        let mass = if i + 1 == links_n { load } else { 1.0 };
+        let (link, _) = world.insert(
+            RigidBodyBuilder::dynamic()
+                .translation(top - Vector::Y * (0.25 + i as Real * 0.5))
+                .can_sleep(false)
+                .allow_fast_rotation(true),
+            ColliderBuilder::cuboid(0.05, 0.25, 0.05).mass(mass).collision_groups(
+                InteractionGroups::new(Group::GROUP_1, Group::NONE, InteractionTestMode::And),
+            ),
+        );
+        let mut data: GenericJoint = SphericalJointBuilder::new().build().into();
+        data.set_local_frame1(Pose::from_parts(Vector::new(0.0, 0.25, 0.0), turn));
+        data.set_local_frame2(Pose::from_parts(
+            if above == anchor { Vector::ZERO } else { Vector::new(0.0, -0.25, 0.0) },
+            turn,
+        ));
+        world.insert_impulse_joint(link, above, data);
+        links.push(link);
+        above = link;
+    }
+    for _ in 0..(seconds * rate).round() as usize {
+        world.step();
+    }
+    let end = world.bodies[links[links_n - 1]].position() * Vector::new(0.0, -0.25, 0.0);
+    (top - end).length() / (0.5 * links_n as Real) - 1.0
+}
+
+/// A chain of thirty 1 kg links holding a 50 kg block holds its length to within 0.1% over 6 s
+/// at every split of a step into substeps, down to one substep a step at 10 steps a second, and
+/// so do the same chain holding 500 kg at 30 steps a second in one substep and a chain of 100
+/// links holding 50 kg. The tension of the load holds each light link upright against a tilt as
+/// a stiff spring would, which a substep steps forward explicitly: the island is stepped in
+/// substeps short enough to keep that tilt stable. Stepped in the substeps it was set to, the
+/// 50 kg chain stretched by 30% of its length over 6 s in one substep at 30 steps a second, and
+/// at 20 its end stood 8.9e8 times its length from the anchor; the 500 kg chain stood 6.0e7
+/// times its length away at 30.
+#[test]
+#[cfg(feature = "dim3")]
+fn a_chain_holding_a_heavy_load_keeps_its_length_however_its_steps_are_split() {
+    let mut past = Vec::new();
+    let cases = [
+        (30, 50.0, 60.0, 4),
+        (30, 50.0, 60.0, 1),
+        (30, 50.0, 30.0, 1),
+        (30, 50.0, 20.0, 1),
+        (30, 50.0, 10.0, 1),
+        (30, 500.0, 30.0, 1),
+        (100, 50.0, 30.0, 1),
+    ];
+    for (links_n, load, rate, substeps) in cases {
+        let stretch = loaded_chain_stretch(links_n, load, rate, substeps, 6.0);
+        std::println!("{links_n} links holding {load} kg at {rate} Hz x {substeps}: stretched {stretch:e} of its length");
+        if !(stretch.abs() < 1.0e-3) {
+            past.push(alloc::format!("{links_n} links, {load} kg at {rate} Hz x {substeps}: {stretch:e}"));
+        }
+    }
+    assert!(past.is_empty(), "the loaded chain left its length: {past:?}");
+}
