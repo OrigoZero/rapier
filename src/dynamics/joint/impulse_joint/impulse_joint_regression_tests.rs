@@ -751,14 +751,15 @@ fn a_chain_swinging_out_of_its_plane_keeps_its_energy_however_its_steps_are_spli
     assert!(past.is_empty(), "the chain's energy changed: {past:?}");
 }
 
-
 /// An 80 kg ball held, at a point 1 m above its centre, to a line sloping 2 degrees down
 /// toward an end stop (a joint locking the point's motion across the line, with a limit along
 /// it at the end), hung under the stop with the point at rest there and the ball swinging
 /// about it at 0.05 rad/s, too gently for the swing to pull the point back up the slope, for
 /// 10 s at `rate` steps a second in `substeps` substeps: the most the point stood past the
-/// stop or short of it, and the fastest it moved along the line, as any step ended.
-fn held_at_a_stop(rate: Real, substeps: usize) -> (Real, Real) {
+/// stop or short of it, and the fastest it moved along the line, as any step ended. With
+/// `link`, a 1 kg weight fixed 0.5 m under the ball by a multibody joint makes the ball the root
+/// link of a multibody, so the joint holding it is solved as a joint on a multibody link.
+fn held_at_a_stop(rate: Real, substeps: usize, link: bool) -> (Real, Real) {
     let mut world = PhysicsWorld::new();
     world.integration_parameters.dt = 1.0 / rate;
     world.integration_parameters.num_solver_iterations = substeps;
@@ -780,6 +781,22 @@ fn held_at_a_stop(rate: Real, substeps: usize) -> (Real, Real) {
                 InteractionTestMode::And,
             )),
     );
+    if link {
+        let (weight, _) = world.insert(
+            RigidBodyBuilder::dynamic()
+                .translation(end - Vector::Y * 1.5)
+                .can_sleep(false),
+            ColliderBuilder::ball(0.05)
+                .mass(1.0)
+                .collision_groups(InteractionGroups::new(
+                    Group::GROUP_1,
+                    Group::NONE,
+                    InteractionTestMode::And,
+                )),
+        );
+        let fixed = FixedJointBuilder::new().local_anchor1(-Vector::Y * 0.5);
+        world.insert_multibody_joint(ball, weight, fixed).unwrap();
+    }
     let frame = Pose::from_parts(end, Rotation::from_rotation_z(slope));
     let mut data = GenericJointBuilder::new(JointAxesMask::LIN_Y | JointAxesMask::LIN_Z)
         .local_frame1(frame)
@@ -798,8 +815,9 @@ fn held_at_a_stop(rate: Real, substeps: usize) -> (Real, Real) {
     (off, moving)
 }
 
-/// A point resting against a joint's linear limit stays there at every substep length: every
-/// step ends with it within 0.01 mm of the bound and moving along the line at under 1 mm/s.
+/// A point resting against a joint's linear limit stays there at every substep length, on a
+/// lone body and on a multibody link: every step ends with it within 0.01 mm of the bound and
+/// moving along the line at under 1 mm/s.
 /// The limit's row took hold only in a substep that began with the point at or past the bound,
 /// and its bias leaves a point resting on the bound a rounding short of it, so in every few
 /// substeps the row held nothing and the rows carrying the ball's weight across the sloping
@@ -809,15 +827,17 @@ fn held_at_a_stop(rate: Real, substeps: usize) -> (Real, Real) {
 #[cfg(feature = "dim3")]
 fn a_point_resting_against_a_linear_limit_stays_at_it_at_every_substep_length() {
     let mut failed = Vec::new();
-    for (rate, substeps) in RATES {
-        let (off, moving) = held_at_a_stop(rate, substeps);
-        if off > 1.0e-5 || moving > 1.0e-3 {
-            failed.push(alloc::format!(
-                "{rate} Hz x {substeps}: {:.4} mm off the stop, moving at {moving:.4} m/s",
-                off * 1000.0
-            ));
+    for link in [false, true] {
+        for (rate, substeps) in RATES {
+            let (off, moving) = held_at_a_stop(rate, substeps, link);
+            if off > 1.0e-5 || moving > 1.0e-3 {
+                failed.push(alloc::format!(
+                    "{} at {rate} Hz x {substeps}: {:.4} mm off the stop, moving at {moving:.4} m/s",
+                    if link { "a multibody link" } else { "a body" },
+                    off * 1000.0
+                ));
+            }
         }
     }
     assert!(failed.is_empty(), "the point left its limit: {failed:?}");
 }
-
