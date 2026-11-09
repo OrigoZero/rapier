@@ -295,6 +295,10 @@ pub(crate) struct StagedIslandSolver {
     /// The joints of the islands that join their bodies as trees, solved exactly
     /// (see [`joint_trees`]); laid out and reused with the joint assembly.
     joint_trees: joint_trees::JointTrees,
+    /// Per island body: the square of the angular frequency at which the tension of its joints
+    /// tilts it, from which each solve group's substep count is chosen (see
+    /// `init::tension_substeps`).
+    tension_tilt_rates: Vec<Real>,
     // Staged joint-assembly persistence: coloring/chunk layout/builders reused while the joint
     // list, island layout, assembly inputs AND every parallel-joint-chunk body's
     // contact color mask are unchanged (a color-`c` joint chunk must still avoid contact-color-`c` bodies).
@@ -348,6 +352,7 @@ impl StagedIslandSolver {
             joint_overflow_range: 0..0,
             joint_rows: Vec::new(),
             joint_trees: joint_trees::JointTrees::default(),
+            tension_tilt_rates: Vec::new(),
             staged_joints_valid: false,
             prev_staged_active_set_epoch: 0,
             prev_staged_assembly_epoch: 0,
