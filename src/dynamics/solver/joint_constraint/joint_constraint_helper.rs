@@ -239,21 +239,39 @@ impl<N: ScalarType> JointConstraintHelper<N> {
             cfm_coeff,
         );
 
+        let inv_dt = N::splat(params.inv_dt());
         let dist = self.lin_err.gdot(constraint.lin_jac);
-        let min_enabled = dist.simd_le(limits[0]);
-        let max_enabled = limits[1].simd_le(dist);
+        let [min, max] = limits;
+
+        // The row holds the bound the distance is nearer, from the substep the row is built
+        // in whether or not the distance has reached it, the way a contact holds a gap: the
+        // upper bound's row pushes with a positive impulse, and lets the distance grow no
+        // faster than reaches the bound within the substep; the lower bound's row is its
+        // mirror. A distance resting against its bound, which the bias leaves a rounding
+        // short of it, is held through every substep, so the other rows on the bodies cannot
+        // drive it through the bound for a substep before the row takes hold. A lower bound
+        // at the upper one holds the distance there from both sides.
+        let held = max.simd_le(min);
+        let at_lower = !held & (dist - min).simd_lt(max - dist);
+
+        let upper_rhs_wo_bias = (dist - max).simd_min(zero) * inv_dt;
+        let lower_rhs_wo_bias = (dist - min).simd_max(zero) * inv_dt;
+        let rhs_wo_bias = zero.select(held, lower_rhs_wo_bias.select(at_lower, upper_rhs_wo_bias));
 
         // Like the contact solver, cap the bias so a deep limit violation recovers over a
         // few steps instead of catapulting the bodies (the erp gain is ~1/dt).
         let max_bias = N::splat(params.max_corrective_velocity());
-        let rhs_bias = (((dist - limits[1]).simd_max(zero) - (limits[0] - dist).simd_max(zero))
-            * erp_inv_dt)
+        let upper_bias = (dist - max).simd_max(zero) * erp_inv_dt;
+        let lower_bias = (dist - min).simd_min(zero) * erp_inv_dt;
+        let rhs_bias = ((dist - max) * erp_inv_dt)
+            .select(held, lower_bias.select(at_lower, upper_bias))
             .simd_clamp(-max_bias, max_bias);
-        constraint.rhs = rhs_bias;
+        constraint.rhs = rhs_wo_bias + rhs_bias;
+        constraint.rhs_wo_bias = rhs_wo_bias;
         constraint.cfm_coeff = cfm_coeff;
         constraint.impulse_bounds = [
-            N::splat(-Real::INFINITY).select(min_enabled, zero),
-            N::splat(Real::INFINITY).select(max_enabled, zero),
+            N::splat(-Real::INFINITY).select(held | at_lower, zero),
+            N::splat(Real::INFINITY).select(!at_lower, zero),
         ];
 
         constraint
