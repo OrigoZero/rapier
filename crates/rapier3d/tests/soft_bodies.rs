@@ -2165,6 +2165,80 @@ fn impact_extra_substeps_are_a_rate() {
     }
 }
 
+/// The first rebound of a 0.6 m, 5 kg rigid box dropped with its middle at `drop_height` onto
+/// a soft slab resting on the ground, stepped `rate` times a second in `iterations` substeps: the
+/// highest the box's middle reaches once it has started to rise.
+fn rebound_off_a_soft_slab(rate: Real, iterations: usize, drop_height: Real) -> Real {
+    let mut world = world_with_ground();
+    world.integration_parameters.dt = 1.0 / rate;
+    world.integration_parameters.num_solver_iterations = iterations;
+    let slab = SoftBodyBuilder::cuboid(
+        Vector::new(0.0, 0.5, 0.0),
+        Vector::new(1.5, 0.5, 1.5),
+        6,
+        3,
+        6,
+    )
+    .cell_model(SoftBodyCellModel::Corotational)
+    .material(SoftBodyMaterial {
+        young_modulus: 1.0e4,
+        poisson_ratio: 0.3,
+        elastic_damping_ratio: 0.5,
+        ..Default::default()
+    })
+    .mass(40.0)
+    .surface_collider(ColliderBuilder::ball(0.05));
+    world.insert_soft_body(slab);
+    for _ in 0..(1.0 * rate) as usize {
+        world.step();
+    }
+    let (block, _) = world.insert(
+        RigidBodyBuilder::dynamic().translation(Vector::new(0.0, drop_height, 0.0)),
+        ColliderBuilder::cuboid(0.3, 0.3, 0.3).mass(5.0),
+    );
+    let mut risen = false;
+    for _ in 0..(1.5 * rate) as usize {
+        world.step();
+        let body = &world.bodies[block];
+        if body.linvel().y > 0.0 {
+            risen = true;
+        } else if risen {
+            return body.translation().y;
+        }
+    }
+    panic!(
+        "{rate} Hz x {iterations}, dropped from {drop_height} m: the box did not rebound and come down within 1.5 s"
+    );
+}
+
+/// A rigid box dropped onto a soft slab rebounds alike at one number of substeps a second
+/// however the steps divide them (30 steps of 8 substeps, 60 of 4, 120 of 2), from drop heights
+/// spread across the 0.2 m the box falls in one 30 Hz step near the slab, so its first touch
+/// comes at every part of a step. The contacts it reaches within a step are predicted over its
+/// travel (its broad-phase box swept along it, the soft contacts' reach grown by it), so it never
+/// sinks into the slab unopposed for the part of a step after its touch.
+#[test]
+fn a_rigid_body_rebounds_off_a_soft_body_alike_however_a_step_divides_its_substeps() {
+    let mut rebounds = Vec::new();
+    for drop_height in [2.85, 2.9, 2.95, 3.0] {
+        for (rate, iterations) in [(30.0, 8), (60.0, 4), (120.0, 2)] {
+            rebounds.push((
+                drop_height,
+                rate,
+                iterations,
+                rebound_off_a_soft_slab(rate, iterations, drop_height),
+            ));
+        }
+    }
+    println!("rebounds at 240 substeps a second: {rebounds:?}");
+    let lowest = rebounds.iter().map(|r| r.3).fold(Real::MAX, Real::min);
+    let highest = rebounds.iter().map(|r| r.3).fold(Real::MIN, Real::max);
+    assert!(
+        highest - lowest < 0.03,
+        "the box rebounds to between {lowest} and {highest} m at 240 substeps a second: {rebounds:?}"
+    );
+}
+
 /// A fully pinned cloth (every particle kinematic) still collides: a box dropped on it rests on
 /// it instead of falling through (a body without a free particle used to be left out of the
 /// solver's awake list, so its surface had no contact constraint).

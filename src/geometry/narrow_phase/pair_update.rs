@@ -327,6 +327,16 @@ pub(super) fn process_pair(
         let soft_margin1 = rb1.map_or(0.0, |rb| co1.soft_motion_margin(rb));
         let soft_margin2 = rb2.map_or(0.0, |rb| co2.soft_motion_margin(rb));
         let soft_body_prediction = soft_margin1 + soft_margin2;
+        // A rigid collider meeting a soft surface adds its own travel over the step: the contact
+        // it reaches within the step is predicted at the step's start, wherever in the step it
+        // comes, as a soft surface's contacts are predicted over its particles' travel.
+        let rigid_motion_prediction =
+            if co1.is_deformable_collider() != co2.is_deformable_collider() {
+                rb1.map_or(0.0, |rb| co1.rigid_motion_margin(rb, dt))
+                    + rb2.map_or(0.0, |rb| co2.rigid_motion_margin(rb, dt))
+            } else {
+                0.0
+            };
         let contact_skin_sum = co1.contact_skin() + co2.contact_skin();
         let soft_ccd_prediction1 = rb1.map(|rb| rb.soft_ccd_prediction()).unwrap_or(0.0);
         let soft_ccd_prediction2 = rb2.map(|rb| rb.soft_ccd_prediction()).unwrap_or(0.0);
@@ -355,8 +365,9 @@ pub(super) fn process_pair(
             prediction_distance.max(dt * (linvel1 - linvel2).length())
                 + contact_skin_sum
                 + soft_body_prediction
+                + rigid_motion_prediction
         } else {
-            prediction_distance + contact_skin_sum + soft_body_prediction
+            prediction_distance + contact_skin_sum + soft_body_prediction + rigid_motion_prediction
         };
 
         outcome = OUTCOME_FULL;
@@ -490,7 +501,10 @@ pub(super) fn process_pair(
                 (collider1, co1),
                 (collider2, co2),
                 bodies,
-                prediction_distance + soft_body_prediction,
+                (
+                    prediction_distance + soft_body_prediction,
+                    rigid_motion_prediction,
+                ),
                 soft,
             );
         }
