@@ -92,19 +92,76 @@ impl Collider {
         }
     }
 
-    /// The broad-phase box of a collider padded by `prediction`, swept by its soft-body
-    /// motion: a soft body's deformable collider reaches as far as its particles travel over the
-    /// coming step along each axis, and in no other direction.
-    pub(crate) fn soft_swept_collision_aabb(
+    /// The motion of a rigid collider over a step of `dt` at its parent's velocities: the
+    /// travel of its parent's centre of mass, and the farthest any point of the shape moves about
+    /// that centre (the angular speed times the shape's farthest reach from it). `None` for a
+    /// deformable collider, whose particles' travel is its [`Self::soft_motion_margin`], for a
+    /// collider on a soft body's cluster proxy, which the soft body carries, for a CCD-enabled
+    /// parent (a bullet) the continuous pass sweeps this step (`ccd_active`), whose travel that
+    /// pass sweeps against every body in its path, and for a parent that is not dynamic or
+    /// kinematic.
+    fn rigid_motion(
+        &self,
+        parent: &crate::dynamics::RigidBody,
+        dt: Real,
+    ) -> Option<(Vector, Real)> {
+        if self.is_deformable_collider()
+            || parent.is_soft_frame()
+            || (parent.ccd.ccd_enabled && parent.ccd.ccd_active)
+            || !parent.is_dynamic_or_kinematic()
+        {
+            return None;
+        }
+        #[cfg(feature = "dim3")]
+        let turning = parent.angvel().length();
+        #[cfg(feature = "dim2")]
+        let turning = parent.angvel().abs();
+        let travel = parent.linvel() * dt;
+        if !(turning > 0.0) {
+            return Some((travel, 0.0));
+        }
+        let com = parent.mprops.local_mprops.world_com(&parent.pos.position);
+        let sphere = self.shape.compute_bounding_sphere(&self.pos);
+        let arm = (sphere.center - com).length() + sphere.radius;
+        Some((travel, turning * arm * dt))
+    }
+
+    /// How far any point of a rigid collider travels over a step of `dt` at its parent's
+    /// velocities: the reach over which its contacts with a soft surface are predicted, the
+    /// counterpart of a soft surface's particle travel. Zero where [`Self::rigid_motion`] states
+    /// none.
+    pub(crate) fn rigid_motion_margin(
+        &self,
+        parent: &crate::dynamics::RigidBody,
+        dt: Real,
+    ) -> Real {
+        self.rigid_motion(parent, dt)
+            .map_or(0.0, |(travel, turning)| travel.length() + turning)
+    }
+
+    /// The broad-phase box of a collider padded by `prediction`, swept by its motion over the
+    /// coming step of `dt`: a soft body's deformable collider reaches as far as its particles
+    /// travel along each axis, and in no other direction; a rigid collider on a dynamic or
+    /// kinematic body reaches along its parent's travel and as far as its turning carries any of
+    /// its points (see [`Self::rigid_motion_margin`]), so a soft surface it reaches within the
+    /// step is paired with it at the step's start.
+    pub(crate) fn motion_swept_collision_aabb(
         &self,
         parent: &crate::dynamics::RigidBody,
         prediction: Real,
+        dt: Real,
     ) -> Aabb {
         let mut aabb = self.compute_collision_aabb(prediction);
         if self.is_deformable_collider() {
             let [least, most] = parent.soft_motion_sweep;
             aabb.mins += least;
             aabb.maxs += most;
+        } else if let Some((travel, turning)) = self.rigid_motion(parent, dt) {
+            aabb.mins += travel.min(Vector::ZERO);
+            aabb.maxs += travel.max(Vector::ZERO);
+            if turning > 0.0 {
+                aabb = aabb.loosened(turning);
+            }
         }
         aabb
     }
@@ -669,7 +726,9 @@ impl Collider {
         });
         let prediction_distance = params.prediction_distance();
         let mut aabb = match parent {
-            Some((_, parent)) => self.soft_swept_collision_aabb(parent, prediction_distance / 2.0),
+            Some((_, parent)) => {
+                self.motion_swept_collision_aabb(parent, prediction_distance / 2.0, params.dt)
+            }
             None => self.compute_collision_aabb(prediction_distance / 2.0),
         };
         if let Some(next_pose) = next_pose {
