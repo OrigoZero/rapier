@@ -96,10 +96,10 @@ impl Collider {
     /// travel of its parent's centre of mass, and the farthest any point of the shape moves about
     /// that centre (the angular speed times the shape's farthest reach from it). `None` for a
     /// deformable collider, whose particles' travel is its [`Self::soft_motion_margin`], for a
-    /// collider on a soft body's cluster proxy, which the soft body carries, for a parent the
-    /// continuous pass sweeps this step (a fast body, `ccd_active`: that pass stops it at the
-    /// soft surface in its path and splits the step there), and for a parent that is not
-    /// dynamic or kinematic.
+    /// collider on a soft body's cluster proxy, which the soft body carries, for a CCD-enabled
+    /// parent (a bullet), whose continuous pass sweeps its whole travel against every body in
+    /// its path and splits the step at the impact, and for a parent that is not dynamic or
+    /// kinematic.
     fn rigid_motion(
         &self,
         parent: &crate::dynamics::RigidBody,
@@ -107,7 +107,7 @@ impl Collider {
     ) -> Option<(Vector, Real)> {
         if self.is_deformable_collider()
             || parent.is_soft_frame()
-            || parent.ccd.ccd_active
+            || parent.ccd.ccd_enabled
             || !parent.is_dynamic_or_kinematic()
         {
             return None;
