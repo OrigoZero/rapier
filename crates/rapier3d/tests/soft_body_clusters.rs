@@ -993,8 +993,9 @@ fn points_past_aabb(world: &PhysicsWorld, co: ColliderHandle, dist: Real) -> Vec
 }
 
 /// The soft-body motion margin pads the deformable colliders of a fast jelly only, along the way
-/// its particles travel: the rigid colliders on its proxies get the broad-phase AABB of a collider
-/// on a dynamic body.
+/// its particles travel: the rigid colliders on its proxies, which the jelly carries, get no
+/// padding. The same collider on a dynamic body moving like the jelly reaches along its own
+/// travel, and no farther than the prediction distance to its sides or behind it.
 #[test]
 fn only_deformable_colliders_are_padded_by_the_soft_motion_margin() {
     let mut world = PhysicsWorld::new();
@@ -1021,7 +1022,7 @@ fn only_deformable_colliders_are_padded_by_the_soft_motion_margin() {
         .translation(Vector::new(0.3, 0.2, -0.1));
     let root = world.soft_bodies[h].root_body();
     let proxy = world.soft_bodies[h].cluster_proxy(cluster).unwrap();
-    let mut rigid: Vec<ColliderHandle> = [root, proxy]
+    let on_proxies: Vec<ColliderHandle> = [root, proxy]
         .into_iter()
         .map(|parent| {
             world
@@ -1036,12 +1037,11 @@ fn only_deformable_colliders_are_padded_by_the_soft_motion_margin() {
             .linvel(velocity),
         shape,
     );
-    rigid.push(reference);
 
     let params = world.integration_parameters;
     for step in 0..10 {
         world.step();
-        for co in &rigid {
+        for co in &on_proxies {
             let collider = &world.colliders[*co];
             assert_eq!(
                 collider.compute_broad_phase_aabb(&params, &world.bodies),
@@ -1055,9 +1055,9 @@ fn only_deformable_colliders_are_padded_by_the_soft_motion_margin() {
                 );
             }
         }
-        for co in &surfaces {
-            // The jelly travels along +x: its surfaces reach ahead of it, and no farther than the
-            // prediction distance to its sides or behind it.
+        for co in surfaces.iter().chain([&reference]) {
+            // The jelly and the reference travel along +x: their colliders reach ahead of them,
+            // and no farther than the prediction distance to their sides or behind them.
             let points = points_past_aabb(&world, *co, 0.2);
             let (behind, ahead) = (points[0], points[1]);
             assert!(

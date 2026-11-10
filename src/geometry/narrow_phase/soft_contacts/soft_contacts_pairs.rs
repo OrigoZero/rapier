@@ -48,14 +48,16 @@ pub(crate) fn update_pair_soft_soft(
 }
 
 /// The soft contacts of a soft-rigid pair beside its manifolds (computed first): the
-/// predictive vertex contacts within `reach` (the solver contacts' separation bound) and the
-/// volume patch.
+/// predictive vertex contacts and the volume patch. `reach` is the solver contacts' separation
+/// bound, `(within, travel)`: a vertex within `within` of the rigid collider is in reach, and
+/// one up to `travel` (the rigid collider's travel over the step) farther is in reach when the
+/// collider closes on it fast enough to arrive within the step.
 pub(crate) fn update_pair_soft_rigid(
     rigid: &mut RigidPairContacts,
     (h1, co1): (ColliderHandle, &Collider),
     (h2, co2): (ColliderHandle, &Collider),
     bodies: &RigidBodySet,
-    reach: Real,
+    reach: (Real, Real),
     ctx: &SoftDetectionCtx,
 ) {
     let (r, soft_first) = match (co1.deformable_mesh_ref, co2.deformable_mesh_ref) {
@@ -83,8 +85,9 @@ pub(crate) fn update_pair_soft_rigid(
         &rigid.manifolds,
         soft_first,
         (sb, mesh, soft_co),
-        other_co,
+        (other_co, bodies),
         reach,
+        ctx.dt,
     );
     if soft.patch.is_some() || !soft.vertices.is_empty() {
         rigid.soft = Some(soft);
@@ -92,16 +95,20 @@ pub(crate) fn update_pair_soft_rigid(
 }
 
 /// The predictive vertex contacts of a soft-rigid pair: every vertex of an element the
-/// manifolds reached, within `reach` of a convex rigid collider and exposed toward it (see
-/// `SoftCollisionMesh::vertex_exposed`), warm-started from the previous contacts by vertex.
+/// manifolds reached, within reach of a convex rigid collider (see [`update_pair_soft_rigid`]:
+/// past `reach.0`, only while the collider closes on the vertex fast enough to arrive within the
+/// step of `dt`) and exposed toward it (see `SoftCollisionMesh::vertex_exposed`), warm-started
+/// from the previous contacts by vertex.
 fn detect_rigid_vertices(
     out: &mut Vec<SoftRigidVertexContact>,
     manifolds: &[ContactManifold],
     soft_first: bool,
     (sb, mesh, soft_co): (&SoftBody, &SoftCollisionMesh, &Collider),
-    other_co: &Collider,
-    reach: Real,
+    (other_co, bodies): (&Collider, &RigidBodySet),
+    (within, travel): (Real, Real),
+    dt: Real,
 ) {
+    let other_rb = other_co.parent().and_then(|h| bodies.get(h));
     let previous = core::mem::take(out);
     let shape = other_co.shape();
     // A composite rigid collider meets the elements with manifolds of several points already.
@@ -157,8 +164,18 @@ fn detect_rigid_vertices(
         };
         let dist = separation - skins;
         let dir = pose.rotation * local_dir;
-        if dist >= reach || !mesh.vertex_exposed(sb, vertex, dir) {
+        if dist >= within + travel || !mesh.vertex_exposed(sb, vertex, dir) {
             continue;
+        }
+        // Past the reach of the vertex's own travel, the vertex is in reach only if the rigid
+        // collider closes on it fast enough to arrive within the step (`dir` points from the
+        // collider toward the vertex).
+        if dist >= within {
+            let rigid_vel = other_rb.map_or(Vector::ZERO, |rb| rb.velocity_at_point(point));
+            let closing = (rigid_vel - mesh.vertex_velocity(sb, vertex as usize)).dot(dir);
+            if dist - closing * dt >= within {
+                continue;
+            }
         }
         // An incident element's contact must agree with the direction: inside a polyhedral
         // shape, the feature closest to the vertex can be another face than the one it met.
