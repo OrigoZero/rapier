@@ -1,7 +1,8 @@
 //! The continuous pass sweeps a fast dynamic body against the collision meshes of soft bodies
 //! where the solve left their particles: a fast body pushing a soft body ahead of it moves as far
 //! through every step as its contacts allow, the same with the continuous pass on as off, and a
-//! fast body the contacts did not meet is still stopped at the soft surface in its path.
+//! fast body the pass sweeps, which its contacts leave to it, is still stopped at the soft
+//! surface in its path.
 
 use rapier3d::prelude::*;
 
@@ -77,9 +78,10 @@ fn a_fast_body_pushing_a_soft_body_moves_through_every_step_as_its_contacts_allo
     }
 }
 
-/// A 0.05 m ball 2 m left of a 0.6 m jelly cube floating at the origin, shot through it at
-/// `speed` along +x for `steps` steps at 60 Hz, no gravity. Returns the ball's final x.
-fn shoot_through_a_jelly(speed: Real, ccd: bool, steps: usize) -> Real {
+/// A 0.05 m ball `distance` m left of a 0.6 m jelly cube floating at the origin, shot through it
+/// at `speed` along +x for `steps` steps at 60 Hz, no gravity. Returns the ball's final x and the
+/// substeps the continuous pass split the last step into.
+fn shoot_through_a_jelly(speed: Real, ccd: bool, distance: Real, steps: usize) -> (Real, usize) {
     let mut world = PhysicsWorld::new();
     world.gravity = Vector::ZERO;
     if !ccd {
@@ -100,27 +102,38 @@ fn shoot_through_a_jelly(speed: Real, ccd: bool, steps: usize) -> Real {
     );
     let (ball, _) = world.insert(
         RigidBodyBuilder::dynamic()
-            .translation(Vector::new(-2.0, 0.0, 0.0))
+            .translation(Vector::new(-distance, 0.0, 0.0))
             .linvel(Vector::new(speed, 0.0, 0.0)),
         ColliderBuilder::ball(0.05).density(100.0),
     );
     for _ in 0..steps {
         world.step();
     }
-    world.bodies[ball].translation().x
+    (
+        world.bodies[ball].translation().x,
+        world.physics_pipeline.counters.ccd.num_substeps,
+    )
 }
 
 #[test]
 fn a_fast_body_the_contacts_miss_is_stopped_at_the_soft_surface_in_its_path() {
-    // 240 m/s: 4 m a step, from x = -2 to x = 2 in one step, through the whole jelly.
-    let through = shoot_through_a_jelly(240.0, false, 1);
-    assert!(
-        through > 0.3,
-        "with the continuous pass off the ball ended at x = {through}: the scene no longer shoots through the jelly"
-    );
-    let stopped = shoot_through_a_jelly(240.0, true, 1);
+    // 240 m/s: 4 m a step, from x = -6 to x = -2 over the first step and from x = -2 to x = 2
+    // over the second, through the whole jelly. By the second step the continuous pass sweeps
+    // the ball, so its contacts leave it to the pass: the pass stops it, splitting that step.
+    let (stopped, substeps) = shoot_through_a_jelly(240.0, true, 6.0, 2);
     assert!(
         stopped < -0.25,
         "with the continuous pass on the ball ended at x = {stopped}, past the jelly's near face at x = -0.3"
+    );
+    assert!(
+        substeps >= 1,
+        "the continuous pass did not act on the step the ball reached the jelly: {substeps} substeps"
+    );
+    // With the pass off, the contacts are predicted over the ball's whole travel in the step it
+    // reaches the jelly, and stop it there.
+    let (stopped, _) = shoot_through_a_jelly(240.0, false, 6.0, 2);
+    assert!(
+        stopped < -0.25,
+        "with the continuous pass off the ball ended at x = {stopped}, past the jelly's near face at x = -0.3"
     );
 }

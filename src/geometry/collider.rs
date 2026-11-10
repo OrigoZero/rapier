@@ -95,14 +95,21 @@ impl Collider {
     /// The motion of a rigid collider over a step of `dt` at its parent's velocities: the
     /// travel of its parent's centre of mass, and the farthest any point of the shape moves about
     /// that centre (the angular speed times the shape's farthest reach from it). `None` for a
-    /// deformable collider, whose particles' travel is its [`Self::soft_motion_margin`], and for a
-    /// parent that is not dynamic or kinematic.
+    /// deformable collider, whose particles' travel is its [`Self::soft_motion_margin`], for a
+    /// collider on a soft body's cluster proxy, which the soft body carries, for a parent the
+    /// continuous pass sweeps this step (a fast body, `ccd_active`: that pass stops it at the
+    /// soft surface in its path and splits the step there), and for a parent that is not
+    /// dynamic or kinematic.
     fn rigid_motion(
         &self,
         parent: &crate::dynamics::RigidBody,
         dt: Real,
     ) -> Option<(Vector, Real)> {
-        if self.is_deformable_collider() || !parent.is_dynamic_or_kinematic() {
+        if self.is_deformable_collider()
+            || parent.is_soft_frame()
+            || parent.ccd.ccd_active
+            || !parent.is_dynamic_or_kinematic()
+        {
             return None;
         }
         #[cfg(feature = "dim3")]
@@ -121,8 +128,8 @@ impl Collider {
 
     /// How far any point of a rigid collider travels over a step of `dt` at its parent's
     /// velocities: the reach over which its contacts with a soft surface are predicted, the
-    /// counterpart of a soft surface's particle travel. Zero for a deformable collider and for a
-    /// parent that is not dynamic or kinematic.
+    /// counterpart of a soft surface's particle travel. Zero where [`Self::rigid_motion`] states
+    /// none.
     pub(crate) fn rigid_motion_margin(
         &self,
         parent: &crate::dynamics::RigidBody,
