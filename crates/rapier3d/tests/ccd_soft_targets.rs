@@ -1,8 +1,8 @@
 //! The continuous pass sweeps a fast dynamic body against the collision meshes of soft bodies
 //! where the solve left their particles: a fast body pushing a soft body ahead of it moves as far
 //! through every step as its contacts allow, the same with the continuous pass on as off, and a
-//! CCD-enabled body, whose contacts leave its travel to the pass, is still stopped at the soft
-//! surface in its path.
+//! fast CCD-enabled body, whose contacts leave its travel to the pass, is still stopped at the
+//! soft surface in its path.
 
 use rapier3d::prelude::*;
 
@@ -78,9 +78,9 @@ fn a_fast_body_pushing_a_soft_body_moves_through_every_step_as_its_contacts_allo
     }
 }
 
-/// A 0.05 m ball (CCD-enabled when `bullet`) 2 m left of a 0.6 m jelly cube floating at the
-/// origin, shot through it at `speed` along +x for one step at 60 Hz, no gravity. Returns the
-/// ball's final x and the substeps the continuous pass split the step into.
+/// A 0.05 m ball (CCD-enabled when `bullet`) 6 m left of a 0.6 m jelly cube floating at the
+/// origin, shot at it at `speed` along +x for two steps at 60 Hz, no gravity. Returns the ball's
+/// final x and the substeps the continuous pass split the last step into.
 fn shoot_through_a_jelly(speed: Real, ccd: bool, bullet: bool) -> (Real, usize) {
     let mut world = PhysicsWorld::new();
     world.gravity = Vector::ZERO;
@@ -102,11 +102,12 @@ fn shoot_through_a_jelly(speed: Real, ccd: bool, bullet: bool) -> (Real, usize) 
     );
     let (ball, _) = world.insert(
         RigidBodyBuilder::dynamic()
-            .translation(Vector::new(-2.0, 0.0, 0.0))
+            .translation(Vector::new(-6.0, 0.0, 0.0))
             .linvel(Vector::new(speed, 0.0, 0.0))
             .ccd_enabled(bullet),
         ColliderBuilder::ball(0.05).density(100.0),
     );
+    world.step();
     world.step();
     (
         world.bodies[ball].translation().x,
@@ -116,14 +117,10 @@ fn shoot_through_a_jelly(speed: Real, ccd: bool, bullet: bool) -> (Real, usize) 
 
 #[test]
 fn a_fast_body_the_contacts_miss_is_stopped_at_the_soft_surface_in_its_path() {
-    // 240 m/s: 4 m a step, from x = -2 to x = 2 in one step, through the whole jelly. A
-    // CCD-enabled ball's contacts leave its travel to the continuous pass: with the pass off it
-    // goes through, and with the pass on the pass stops it, splitting the step.
-    let (through, _) = shoot_through_a_jelly(240.0, false, true);
-    assert!(
-        through > 0.3,
-        "with the continuous pass off the CCD-enabled ball ended at x = {through}: the scene no longer shoots through the jelly"
-    );
+    // 240 m/s: 4 m a step, from x = -6 to x = -2 over the first step and from x = -2 to x = 2
+    // over the second, through the whole jelly. By the second step the continuous pass sweeps
+    // the CCD-enabled ball, so its contacts leave its travel to the pass: the pass stops it,
+    // splitting that step.
     let (stopped, substeps) = shoot_through_a_jelly(240.0, true, true);
     assert!(
         stopped < -0.25,
@@ -133,11 +130,13 @@ fn a_fast_body_the_contacts_miss_is_stopped_at_the_soft_surface_in_its_path() {
         substeps >= 1,
         "the continuous pass did not act on the step the ball reached the jelly: {substeps} substeps"
     );
-    // Any other ball's contacts are predicted over its whole travel in the step, so they stop it
-    // at the jelly with the pass off.
-    let (stopped, _) = shoot_through_a_jelly(240.0, false, false);
-    assert!(
-        stopped < -0.25,
-        "with the continuous pass off the ball ended at x = {stopped}, past the jelly's near face at x = -0.3"
-    );
+    // With the pass off, the contacts of a ball, CCD-enabled or not, are predicted over its
+    // whole travel in the step, so they stop it at the jelly.
+    for bullet in [true, false] {
+        let (stopped, _) = shoot_through_a_jelly(240.0, false, bullet);
+        assert!(
+            stopped < -0.25,
+            "with the continuous pass off the ball (CCD-enabled {bullet}) ended at x = {stopped}, past the jelly's near face at x = -0.3"
+        );
+    }
 }
