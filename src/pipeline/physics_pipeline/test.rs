@@ -388,6 +388,113 @@ fn rigid_body_type_changed_dynamic_is_in_active_set() {
     assert!(!body.is_sleeping());
 }
 
+/// Every body of every active-set chunk names the chunk and slot it sits in.
+fn assert_active_chunks_consistent(islands: &IslandManager, bodies: &RigidBodySet) {
+    for (island_id, island) in islands.islands.iter() {
+        for (slot, handle) in island.bodies().iter().enumerate() {
+            let rb = &bodies[*handle];
+            assert!(!rb.is_fixed(), "a fixed body sits in active-set chunk {island_id}");
+            assert_eq!(rb.ids.active_island_id as usize, island_id);
+            assert_eq!(rb.ids.active_set_id as usize, slot);
+        }
+    }
+}
+
+#[test]
+fn rigid_body_turned_fixed_leaves_the_active_set() {
+    let mut colliders = ColliderSet::new();
+    let mut impulse_joints = ImpulseJointSet::new();
+    let mut multibody_joints = MultibodyJointSet::new();
+    let mut soft_bodies = SoftBodySet::new();
+    let mut pipeline = PhysicsPipeline::new();
+    let mut bf = BroadPhaseBvh::new();
+    let mut nf = NarrowPhase::new();
+    let mut islands = IslandManager::new();
+    let mut bodies = RigidBodySet::new();
+    let gravity = Vector::Y * -9.81;
+
+    let mut step = |islands: &mut IslandManager, bodies: &mut RigidBodySet| {
+        pipeline.step(
+            gravity,
+            &IntegrationParameters::default(),
+            islands,
+            &mut bf,
+            &mut nf,
+            bodies,
+            &mut colliders,
+            &mut impulse_joints,
+            &mut multibody_joints,
+            &mut soft_bodies,
+            &mut CCDSolver::new(),
+            &(),
+            &(),
+        );
+    };
+
+    // Three awake falling bodies, and one inserted asleep in a chunk of its own.
+    let awake: crate::alloc_prelude::Vec<_> = (0..3)
+        .map(|_| bodies.insert(RigidBodyBuilder::dynamic().additional_mass(1.0).build()))
+        .collect();
+    let asleep = bodies.insert(
+        RigidBodyBuilder::dynamic()
+            .additional_mass(1.0)
+            .sleeping(true)
+            .build(),
+    );
+    step(&mut islands, &mut bodies);
+    assert_eq!(islands.num_active_bodies(), 3);
+    let chunks_before = islands.islands.len();
+    assert_active_chunks_consistent(&islands, &bodies);
+
+    // The middle awake body and the sleeping one are turned fixed.
+    bodies
+        .get_mut(awake[1])
+        .unwrap()
+        .set_body_type(RigidBodyType::Fixed, true);
+    bodies
+        .get_mut(asleep)
+        .unwrap()
+        .set_body_type(RigidBodyType::Fixed, true);
+    step(&mut islands, &mut bodies);
+
+    assert_eq!(islands.num_active_bodies(), 2);
+    assert!(islands.active_bodies().all(|h| h != awake[1]));
+    // The sleeping chunk the fixed body was alone in is gone.
+    assert_eq!(islands.islands.len(), chunks_before - 1);
+    assert_active_chunks_consistent(&islands, &bodies);
+
+    // The fixed body stays where it was turned fixed, step after step.
+    let held = bodies[awake[1]].translation();
+    for _ in 0..10 {
+        step(&mut islands, &mut bodies);
+    }
+    assert_eq!(bodies[awake[1]].translation(), held);
+    assert_eq!(islands.num_active_bodies(), 2);
+
+    // Turned dynamic again, it rejoins the active set and falls.
+    bodies
+        .get_mut(awake[1])
+        .unwrap()
+        .set_body_type(RigidBodyType::Dynamic, true);
+    step(&mut islands, &mut bodies);
+    assert_eq!(islands.num_active_bodies(), 3);
+    assert!(islands.active_bodies().any(|h| h == awake[1]));
+    assert!(bodies[awake[1]].translation().y < held.y);
+    assert_active_chunks_consistent(&islands, &bodies);
+
+    // Every awake body turned fixed leaves no awake island behind.
+    for h in &awake {
+        bodies
+            .get_mut(*h)
+            .unwrap()
+            .set_body_type(RigidBodyType::Fixed, true);
+    }
+    step(&mut islands, &mut bodies);
+    assert_eq!(islands.num_active_bodies(), 0);
+    assert!(islands.awake_island.is_none());
+    assert_active_chunks_consistent(&islands, &bodies);
+}
+
 #[test]
 fn joint_step_delta_time_0() {
     let mut colliders = ColliderSet::new();
