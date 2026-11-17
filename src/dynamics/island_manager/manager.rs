@@ -78,38 +78,56 @@ impl IslandManager {
         self.persistent
             .remove_body_raw(bodies, removed_ids.island_id, removed_ids.island_index);
 
-        let Some(island) = self.islands.get_mut(removed_ids.active_island_id as usize) else {
+        self.remove_from_active_chunk(
+            removed_handle,
+            removed_ids.active_island_id,
+            removed_ids.active_set_id,
+            bodies,
+        );
+    }
+
+    /// Takes a body out of the active-set chunk it is a member of (the awake
+    /// island or a sleeping chunk), given the chunk ids it held there, and
+    /// clears those ids on the body when it is still in the body set. A chunk
+    /// left empty is deleted, and the awake island with it.
+    fn remove_from_active_chunk(
+        &mut self,
+        handle: RigidBodyHandle,
+        active_island_id: u32,
+        active_set_id: u32,
+        bodies: &mut RigidBodySet,
+    ) {
+        let Some(island) = self.islands.get_mut(active_island_id as usize) else {
             // The island already doesn’t exist.
             return;
         };
 
-        // If the rigid-body was disabled, it is still in the body set. Invalid its islands ids.
-        if let Some(body) = bodies.get_mut_internal(removed_handle) {
+        // A body still in the body set (disabled, or turned fixed) keeps no chunk ids.
+        if let Some(body) = bodies.get_mut_internal(handle) {
             body.ids.active_island_id = u32::MAX;
             body.ids.active_set_id = u32::MAX;
         }
 
-        let swapped_handle = island.bodies.last().copied().unwrap_or(removed_handle);
-        island
-            .bodies
-            .swap_remove(removed_ids.active_set_id as usize);
+        let swapped_handle = island.bodies.last().copied().unwrap_or(handle);
+        island.bodies.swap_remove(active_set_id as usize);
 
         // Remap the active_set_id of the body we moved with the `swap_remove`.
-        if swapped_handle != removed_handle {
+        if swapped_handle != handle {
+            // The remap is island bookkeeping, so it does not flag the moved body as
+            // user-modified.
             let swapped_body = bodies
-                .get_mut(swapped_handle)
+                .get_mut_internal(swapped_handle)
                 .expect("Internal error: bodies must be removed from islands on at a times");
-            swapped_body.ids.active_set_id = removed_ids.active_set_id;
+            swapped_body.ids.active_set_id = active_set_id;
         }
 
         // If we deleted the last body from this island, delete the island.
         if island.bodies.is_empty() {
-            if self.awake_island == Some(removed_ids.active_island_id as usize) {
+            if self.awake_island == Some(active_island_id as usize) {
                 self.awake_island = None;
             }
-            self.islands.remove(removed_ids.active_island_id as usize);
-            self.free_islands
-                .push(removed_ids.active_island_id as usize);
+            self.islands.remove(active_island_id as usize);
+            self.free_islands.push(active_island_id as usize);
         }
     }
 
@@ -305,9 +323,13 @@ impl IslandManager {
         };
 
         if rb.is_fixed() {
-            // A body turned fixed leaves the persistent islands (fixed bodies
-            // are never island members).
+            // A body turned fixed leaves the persistent islands and the active-set
+            // chunk it was in (fixed bodies are never island members, and the
+            // solver never integrates them), so it costs a step what a body
+            // inserted fixed costs.
+            let (active_island_id, active_set_id) = (rb.ids.active_island_id, rb.ids.active_set_id);
             self.persistent.remove_body(bodies, handle);
+            self.remove_from_active_chunk(handle, active_island_id, active_set_id, bodies);
             return;
         }
 
