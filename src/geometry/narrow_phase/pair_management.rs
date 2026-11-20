@@ -252,9 +252,13 @@ impl NarrowPhase {
                     // collision groups. Waking up the modified collider's parent isn't enough because
                     // it could be a fixed or kinematic body which don't propagate the wake-up state.
                     // A pure in-place deformation (soft-body surface) is simulation-driven, not a
-                    // user change: it must not keep its island awake.
+                    // user change: it must not keep its island awake. A change of the parent's
+                    // predicted motion wakes the parent alone, as the velocity or force setter
+                    // that made it does.
                     let deformed_only = (co.changes
-                        & !(ColliderChanges::IN_MODIFIED_SET | ColliderChanges::DEFORMED))
+                        & !(ColliderChanges::IN_MODIFIED_SET
+                            | ColliderChanges::DEFORMED
+                            | ColliderChanges::PARENT_MOTION))
                         .is_empty();
                     if let Some(islands) = islands.as_deref_mut().filter(|_| !deformed_only) {
                         if let Some(co_parent) = &co.parent {

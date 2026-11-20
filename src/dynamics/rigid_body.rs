@@ -849,7 +849,10 @@ impl RigidBody {
     /// [`RigidBody::enable_ccd`] since it relies on predictive constraints instead of
     /// shape-cast and substeps.
     pub fn set_soft_ccd_prediction(&mut self, prediction_distance: Real) {
-        self.ccd.soft_ccd_prediction = prediction_distance;
+        if self.ccd.soft_ccd_prediction != prediction_distance {
+            self.ccd.soft_ccd_prediction = prediction_distance;
+            self.changes.insert(RigidBodyChanges::MOTION);
+        }
     }
 
     /// The soft-CCD prediction distance for this rigid-body.
@@ -1090,6 +1093,7 @@ impl RigidBody {
             }
 
             self.forces.gravity_scale = scale;
+            self.changes.insert(RigidBodyChanges::MOTION);
         }
     }
 
@@ -1113,6 +1117,7 @@ impl RigidBody {
                 self.activation.sleeping = false;
             }
             self.forces.gravity_field = enabled;
+            self.changes.insert(RigidBodyChanges::MOTION);
         }
     }
 
@@ -1283,6 +1288,7 @@ impl RigidBody {
                     self.vels.linvel = linvel;
                     self.impulse_vels.linvel = Vector::ZERO;
                     self.drop_locked_motion();
+                    self.changes.insert(RigidBodyChanges::MOTION);
                     if wake_up {
                         self.wake_up(true)
                     }
@@ -1311,6 +1317,7 @@ impl RigidBody {
                     self.vels.angvel = angvel;
                     self.impulse_vels.angvel = Default::default();
                     self.drop_locked_motion();
+                    self.changes.insert(RigidBodyChanges::MOTION);
                     if wake_up {
                         self.wake_up(true)
                     }
@@ -1339,6 +1346,7 @@ impl RigidBody {
                     self.vels.angvel = angvel;
                     self.impulse_vels.angvel = Default::default();
                     self.drop_locked_motion();
+                    self.changes.insert(RigidBodyChanges::MOTION);
                     if wake_up {
                         self.wake_up(true)
                     }
@@ -1556,6 +1564,7 @@ impl RigidBody {
     pub fn reset_forces(&mut self, wake_up: bool) {
         if self.forces.user_force != Vector::ZERO {
             self.forces.user_force = Vector::ZERO;
+            self.changes.insert(RigidBodyChanges::MOTION);
 
             if wake_up {
                 self.wake_up(true);
@@ -1571,6 +1580,7 @@ impl RigidBody {
     pub fn reset_torques(&mut self, wake_up: bool) {
         if self.forces.user_torque != 0.0 {
             self.forces.user_torque = 0.0;
+            self.changes.insert(RigidBodyChanges::MOTION);
 
             if wake_up {
                 self.wake_up(true);
@@ -1586,6 +1596,7 @@ impl RigidBody {
     pub fn reset_torques(&mut self, wake_up: bool) {
         if self.forces.user_torque != AngVector::ZERO {
             self.forces.user_torque = AngVector::ZERO;
+            self.changes.insert(RigidBodyChanges::MOTION);
 
             if wake_up {
                 self.wake_up(true);
@@ -1620,6 +1631,7 @@ impl RigidBody {
     pub fn add_force(&mut self, force: Vector, wake_up: bool) {
         if force != Vector::ZERO && self.body_type.is_dynamic() {
             self.forces.user_force += force;
+            self.changes.insert(RigidBodyChanges::MOTION);
 
             if wake_up {
                 self.wake_up(true);
@@ -1638,6 +1650,7 @@ impl RigidBody {
     pub fn add_torque(&mut self, torque: Real, wake_up: bool) {
         if !torque.is_zero() && self.body_type.is_dynamic() {
             self.forces.user_torque += torque;
+            self.changes.insert(RigidBodyChanges::MOTION);
 
             if wake_up {
                 self.wake_up(true);
@@ -1655,6 +1668,7 @@ impl RigidBody {
     pub fn add_torque(&mut self, torque: Vector, wake_up: bool) {
         if torque != Vector::ZERO && self.body_type.is_dynamic() {
             self.forces.user_torque += torque;
+            self.changes.insert(RigidBodyChanges::MOTION);
 
             if wake_up {
                 self.wake_up(true);
@@ -1678,6 +1692,7 @@ impl RigidBody {
         if force != Vector::ZERO && self.body_type.is_dynamic() {
             self.forces.user_force += force;
             self.forces.user_torque += (point - self.mprops.world_com).gcross(force);
+            self.changes.insert(RigidBodyChanges::MOTION);
 
             if wake_up {
                 self.wake_up(true);
@@ -1719,6 +1734,7 @@ impl RigidBody {
             if self.records_substeps {
                 self.impulse_vels.linvel += change;
             }
+            self.changes.insert(RigidBodyChanges::MOTION);
 
             if wake_up {
                 self.wake_up(true);
@@ -1738,6 +1754,7 @@ impl RigidBody {
             if self.records_substeps {
                 self.impulse_vels.angvel += change;
             }
+            self.changes.insert(RigidBodyChanges::MOTION);
 
             if wake_up {
                 self.wake_up(true);
@@ -1758,6 +1775,7 @@ impl RigidBody {
             if self.records_substeps {
                 self.impulse_vels.angvel += change;
             }
+            self.changes.insert(RigidBodyChanges::MOTION);
 
             if wake_up {
                 self.wake_up(true);

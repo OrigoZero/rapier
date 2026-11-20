@@ -117,6 +117,12 @@ bitflags::bitflags! {
         const LOCAL_MASS_PROPERTIES = 1 << 6;
         /// Flag indicating that the rigid-body was enabled or disabled.
         const ENABLED_OR_DISABLED = 1 << 7;
+        /// Flag indicating that what this rigid-body's motion over the next step is predicted
+        /// from (its velocities, the forces, torques and impulses applied to it, its gravity
+        /// scale or gravity field, or its soft-CCD prediction distance) has been modified: its
+        /// colliders' broad-phase AABBs, swept along that motion, are recomputed at the next
+        /// step's start.
+        const MOTION = 1 << 8;
     }
 }
 
