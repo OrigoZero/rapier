@@ -22,6 +22,8 @@ mod substep;
 mod test;
 #[cfg(all(test, feature = "dim3"))]
 mod test_gravity_field;
+#[cfg(all(test, feature = "dim3"))]
+mod test_soft_ccd;
 #[cfg(test)]
 mod test_staged;
 

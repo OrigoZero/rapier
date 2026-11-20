@@ -39,6 +39,14 @@ bitflags::bitflags! {
         /// active hooks were changed: NF update, never recycled, so every pair it is in takes the
         /// new material from the next step.
         const MATERIAL = 1 << 10;
+        /// Flag indicating that what the parent rigid-body's motion over the next step is
+        /// predicted from was modified (`RigidBodyChanges::MOTION`): BF update of the AABB swept
+        /// along that motion and NF update of the pair's prediction distance, without waking the
+        /// bodies this collider touches.
+        ///
+        /// This flag is automatically set by the `PhysicsPipeline` when the
+        /// `RigidBodyChanges::MOTION` of the parent rigid-body of this collider is detected.
+        const PARENT_MOTION = 1 << 11;
     }
 }
 
@@ -56,7 +64,8 @@ impl ColliderChanges {
                 | ColliderChanges::POSITION
                 | ColliderChanges::SHAPE
                 | ColliderChanges::ENABLED_OR_DISABLED
-                | ColliderChanges::DEFORMED,
+                | ColliderChanges::DEFORMED
+                | ColliderChanges::PARENT_MOTION,
         )
     }
 

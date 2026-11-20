@@ -102,6 +102,21 @@ pub(crate) fn handle_user_changes_to_rigid_bodies(
                     .update_world_mass_properties(rb.body_type, &rb.pos.position);
             }
 
+            // The colliders' broad-phase AABBs are swept along the body's motion over the step
+            // (and, with soft-CCD, grown to its predicted pose): a new velocity, force or
+            // prediction distance recomputes them now, so a body launched this step is paired
+            // with what it reaches within it.
+            if changes.contains(RigidBodyChanges::MOTION) {
+                for handle in rb.colliders.0.iter() {
+                    // NOTE: we can’t just use `colliders.get_mut_internal_with_modification_tracking`
+                    // here because that would modify the `modified_colliders` inside of the `ColliderSet`
+                    // instead of the one passed to this method.
+                    let co = colliders.index_mut_internal(*handle);
+                    modified_colliders.push_once(*handle, co);
+                    co.changes |= ColliderChanges::PARENT_MOTION;
+                }
+            }
+
             type_changed = changes.contains(RigidBodyChanges::TYPE);
 
             if changes.contains(RigidBodyChanges::DOMINANCE)
