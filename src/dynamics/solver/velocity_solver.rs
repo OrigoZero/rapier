@@ -100,6 +100,11 @@ pub(crate) struct MultibodyLedger {
 pub(crate) struct VelocitySolver {
     pub solver_bodies: SolverBodies,
     pub solver_vels_increment: Vec<SolverVel<Real>>,
+    /// The velocity each soft-CCD solver body's forces add to it over the whole step, indexed
+    /// like `solver_bodies` (zero for every other body): a contact's approach velocity, which
+    /// its restitution and its reported closing speed are taken from, is read at the velocity
+    /// the step's forces take such a body to, the motion the narrow phase kept the contact by.
+    pub solver_approach_increments: Vec<SolverVel<Real>>,
     pub generic_solver_vels: DVector,
     pub generic_solver_vels_increment: DVector,
     pub multibody_roots: Vec<MultibodyLinkId>,
@@ -189,6 +194,7 @@ impl VelocitySolver {
         Self {
             solver_bodies: SolverBodies::default(),
             solver_vels_increment: Vec::new(),
+            solver_approach_increments: Vec::new(),
             generic_solver_vels: DVector::zeros(0),
             generic_solver_vels_increment: DVector::zeros(0),
             multibody_roots: Vec::new(),

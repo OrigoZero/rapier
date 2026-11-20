@@ -23,7 +23,7 @@ use crate::dynamics::solver::velocity_solver::SolverGravity;
 use crate::dynamics::solver::velocity_solver::SolverInertia;
 use crate::dynamics::{JointGraphEdge, RigidBodySubstep, RigidBodyType, RigidBodyVelocity};
 use crate::geometry::ContactManifold;
-use crate::math::Real;
+use crate::math::{AngVector, Real, Vector};
 use parry::math::SIMD_WIDTH;
 
 use super::solve::solve_pass;
@@ -106,6 +106,23 @@ pub(super) unsafe fn run_worker(ctx: &SharedCtx, worker_id: usize) {
                     incr.linear = rb.forces.force * rb.mprops.effective_inv_mass * slot_dt;
                 }
 
+                // A soft-CCD body's approach velocity is the one its forces take it to over the
+                // step (`RigidBody::approach_velocity`): the contacts generated below read it
+                // through this increment.
+                if rb.soft_ccd_prediction() > 0.0
+                    && rb.is_dynamic()
+                    && !rb.is_sleeping()
+                    && (rb.forces.force != Vector::ZERO || rb.forces.torque != AngVector::default())
+                {
+                    let step_dt = ctx.base_params.dt;
+                    let approach = &mut vs.solver_approach_increments[i];
+                    approach.linear = rb.forces.force * rb.mprops.effective_inv_mass * step_dt;
+                    approach.angular =
+                        rb.mprops.effective_world_inv_inertia * rb.forces.torque * step_dt;
+                    // SAFETY: shared atomic; claimed slots make the writes disjoint.
+                    unsafe { &*ctx.any_approach_increment }.store(true, Ordering::Relaxed);
+                }
+
                 // Gyroscopic forces (3D) are applied per-substep by the increment
                 // stage; record the body's diagonal local inertia here.
                 #[cfg(feature = "dim3")]
@@ -147,6 +164,9 @@ pub(super) unsafe fn run_worker(ctx: &SharedCtx, worker_id: usize) {
      */
     {
         let bodies = unsafe { &*ctx.bodies };
+        // Published by the body-copy stage's barrier, so every worker reads the same value.
+        let has_approach_increment =
+            unsafe { &*ctx.any_approach_increment }.load(Ordering::Relaxed);
         let mut done = 0;
         let mut local_bouncy = false;
         while let Some(claimed) = sync.claim(
@@ -186,6 +206,9 @@ pub(super) unsafe fn run_worker(ctx: &SharedCtx, worker_id: usize) {
                 // SAFETY: reads solver bodies (no other writer during this stage),
                 //         writes the claimed constraint slot only.
                 let solver_bodies = unsafe { &(*ctx.velocity_solver).solver_bodies };
+                let approach_increments = has_approach_increment.then(|| unsafe {
+                    (*ctx.velocity_solver).solver_approach_increments.as_slice()
+                });
 
                 #[cfg(feature = "dim3")]
                 if ctx.use_twist {
@@ -196,6 +219,7 @@ pub(super) unsafe fn run_worker(ctx: &SharedCtx, worker_id: usize) {
                         manifold_refs,
                         bodies,
                         solver_bodies,
+                        approach_increments,
                         builder,
                         constraint,
                     );
@@ -209,6 +233,7 @@ pub(super) unsafe fn run_worker(ctx: &SharedCtx, worker_id: usize) {
                         manifold_refs,
                         bodies,
                         solver_bodies,
+                        approach_increments,
                         builder,
                         constraint,
                     );

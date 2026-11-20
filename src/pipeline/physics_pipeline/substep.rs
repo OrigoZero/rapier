@@ -404,6 +404,20 @@ impl PhysicsPipeline {
             &mut modified_colliders,
         );
 
+        // A body whose forces, gravity scale or velocities were written this step takes its
+        // effective force and torque from them now: the broad phase's soft-CCD box and the
+        // narrow phase's prediction, both read below before the solve, predict its motion over
+        // this step from the force applied in it.
+        for handle in modified_bodies.iter() {
+            if let Some(rb) = bodies.get_mut_internal(*handle) {
+                if rb.changes.contains(RigidBodyChanges::MOTION) {
+                    let effective_mass = rb.mprops.effective_mass();
+                    rb.forces
+                        .compute_effective_force_and_torque(gravity, effective_mass);
+                }
+            }
+        }
+
         // Disabled colliders are treated as if they were removed.
         // NOTE: this must be called here, after handle_user_changes_to_rigid_bodies to take into
         //       account colliders disabled because of their parent rigid-body.

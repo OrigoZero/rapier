@@ -2,7 +2,7 @@ use super::{ContactConstraintNormalPart, ContactConstraintTangentPart};
 #[cfg(feature = "block-solver")]
 use crate::dynamics::solver::contact_constraint::BLOCK_SOLVER_MIN_CONDITION;
 use crate::dynamics::solver::manifold_store::ManifoldStore;
-use crate::dynamics::solver::solver_body::SolverBodies;
+use crate::dynamics::solver::solver_body::{SolverBodies, SolverVel};
 use crate::dynamics::solver::solver_contact_graph::ContactRef;
 use crate::dynamics::{IntegrationParameters, MultibodyJointSet, RigidBodySet};
 use crate::geometry::{ContactManifold, SimdSolverContact};
@@ -54,6 +54,7 @@ impl ContactWithCoulombFrictionBuilder {
         manifolds: [&ContactManifold; SIMD_WIDTH],
         bodies: &RigidBodySet,
         solver_bodies: &SolverBodies,
+        approach_increments: Option<&[SolverVel<Real>]>,
         out_builder: &mut ContactWithCoulombFrictionBuilder,
         out_constraint: &mut ContactWithCoulombFriction<SimdReal>,
     ) {
@@ -95,6 +96,20 @@ impl ContactWithCoulombFrictionBuilder {
         let mut poses1 = solver_bodies.gather_poses(ids1);
         let vels2 = solver_bodies.gather_vels(ids2);
         let mut poses2 = solver_bodies.gather_poses(ids2);
+        // The velocity each side approaches the contact with (`RigidBody::approach_velocity`):
+        // its velocity, plus what a soft-CCD body's forces add to it over the step
+        // (`VelocitySolver::solver_approach_increments`). The restitution and the reported
+        // closing speed are taken from it.
+        let (approach_vels1, approach_vels2) = match approach_increments {
+            Some(increments) => {
+                let mut approach_vels1 = vels1;
+                approach_vels1 += SolverVel::gather(increments, ids1);
+                let mut approach_vels2 = vels2;
+                approach_vels2 += SolverVel::gather(increments, ids2);
+                (approach_vels1, approach_vels2)
+            }
+            None => (vels1, vels2),
+        };
         if mass_ids1 != ids1 {
             let masses = solver_bodies.gather_poses(mass_ids1);
             poses1.im = masses.im;
@@ -224,8 +239,8 @@ impl ContactWithCoulombFrictionBuilder {
             let dp2 =
                 <SimdReal as ScalarType>::Vector::from(gather![|ii| pt_data(ii).solver_dp2.into()]);
 
-            let vel1 = vels1.linear + vels1.angular.gcross(dp1);
-            let vel2 = vels2.linear + vels2.angular.gcross(dp2);
+            let vel1 = approach_vels1.linear + approach_vels1.angular.gcross(dp1);
+            let vel2 = approach_vels2.linear + approach_vels2.angular.gcross(dp2);
 
             out_constraint.limit = friction;
             // `u8::MAX` marks an inactive slot: the impulse writeback skips it.
@@ -871,6 +886,7 @@ mod test {
             manifolds,
             &bodies,
             &solver_bodies,
+            None,
             &mut builder,
             &mut constraint,
         );

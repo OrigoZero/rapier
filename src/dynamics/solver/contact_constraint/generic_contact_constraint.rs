@@ -43,6 +43,7 @@ impl GenericContactConstraintBuilder {
     pub fn generate(
         manifold_id: ContactRef,
         manifold: &ContactManifold,
+        dt: Real,
         bodies: &RigidBodySet,
         multibodies: &MultibodyJointSet,
         out_builder: &mut GenericContactConstraintBuilder,
@@ -74,8 +75,20 @@ impl GenericContactConstraintBuilder {
                 rb.body_type
             }
         };
-        let (vels1, mprops1, type1) = (&rb1.vels, &rb1.mprops, effective_type(rb1));
-        let (vels2, mprops2, type2) = (&rb2.vels, &rb2.mprops, effective_type(rb2));
+        let (mprops1, type1) = (&rb1.mprops, effective_type(rb1));
+        let (mprops2, type2) = (&rb2.mprops, effective_type(rb2));
+        // The velocity each side approaches the contact with (`RigidBody::approach_velocity`),
+        // which the restitution and the reported closing speed are taken from.
+        let approach_velocity =
+            |rb: &crate::dynamics::RigidBody, body_type: crate::dynamics::RigidBodyType| {
+                if body_type.is_dynamic() {
+                    rb.approach_velocity(dt)
+                } else {
+                    rb.vels
+                }
+            };
+        let approach_vels1 = approach_velocity(rb1, type1);
+        let approach_vels2 = approach_velocity(rb2, type2);
 
         // A multibody's fixed root behaves exactly like a regular fixed body.
         // Thus, a contact against a fixed root must not reference the multibody's
@@ -112,8 +125,8 @@ impl GenericContactConstraintBuilder {
         #[cfg(feature = "dim3")]
         let tangents1 = super::compute_tangent_contact_directions::<Real>(
             &force_dir1,
-            &vels1.linvel,
-            &vels2.linvel,
+            &rb1.vels.linvel,
+            &rb2.vels.linvel,
         );
 
         let multibodies_ndof = multibody1.map(|m| m.0.ndofs()).unwrap_or(0)
@@ -180,8 +193,8 @@ impl GenericContactConstraintBuilder {
                     mprops1.world_com + dp1
                 };
 
-            let vel1 = vels1.linvel + vels1.angvel.gcross(dp1);
-            let vel2 = vels2.linvel + vels2.angvel.gcross(dp2);
+            let vel1 = approach_vels1.linvel + approach_vels1.angvel.gcross(dp1);
+            let vel2 = approach_vels2.linvel + approach_vels2.angvel.gcross(dp2);
 
             out_constraint.limit = manifold.data.friction;
             out_constraint.manifold_contact_id[k] =
