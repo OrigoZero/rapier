@@ -21,13 +21,14 @@ use crate::dynamics::{
     IntegrationParameters, Multibody, MultibodyForces, MultibodyJointSet, RigidBodyHandle,
     RigidBodySet,
 };
-use crate::math::{AngVector, DVector, Vector};
+use crate::math::{AngVector, DVector, Real, Vector};
 use parry::math::SIMD_WIDTH;
 
 impl ContactConstraintsSet {
     /// Builds the generic (multibody) contact constraints for the staged solver.
     pub(super) fn compute_generic_constraints(
         &mut self,
+        dt: Real,
         bodies: &RigidBodySet,
         multibody_joints: &MultibodyJointSet,
         graph: &SolverContactGraph,
@@ -63,6 +64,7 @@ impl ContactConstraintsSet {
             GenericContactConstraintBuilder::generate(
                 *r,
                 manifold,
+                dt,
                 bodies,
                 multibody_joints,
                 &mut self.generic_velocity_constraints_builder[curr_id],
@@ -96,6 +98,9 @@ impl VelocitySolver {
 
         self.solver_vels_increment.clear();
         self.solver_vels_increment
+            .resize(aligned_solver_bodies_len, SolverVel::zero());
+        self.solver_approach_increments.clear();
+        self.solver_approach_increments
             .resize(aligned_solver_bodies_len, SolverVel::zero());
 
         // Reset every step so multibody/padding slots (which the body-copy stage

@@ -347,11 +347,19 @@ pub(super) fn process_pair(
             let aabb2 = co2.compute_collision_aabb(0.0);
             let inv_dt = crate::utils::inv(dt);
 
+            // Each body's velocity at the step's end, its forces integrated over the step: the
+            // motion the broad phase's soft-CCD box is grown along.
             let linvel1 = rb1
-                .map(|rb| rb.linvel().clamp_length_max(soft_ccd_prediction1 * inv_dt))
+                .map(|rb| {
+                    rb.predict_linvel_using_forces(dt)
+                        .clamp_length_max(soft_ccd_prediction1 * inv_dt)
+                })
                 .unwrap_or_default();
             let linvel2 = rb2
-                .map(|rb| rb.linvel().clamp_length_max(soft_ccd_prediction2 * inv_dt))
+                .map(|rb| {
+                    rb.predict_linvel_using_forces(dt)
+                        .clamp_length_max(soft_ccd_prediction2 * inv_dt)
+                })
                 .unwrap_or_default();
 
             if !aabb1.intersects(&aabb2) && !aabb1.intersects_moving_aabb(&aabb2, linvel2 - linvel1)
@@ -630,15 +638,24 @@ pub(super) fn process_pair(
                 let contact = &manifold.points[*contact_id];
                 let effective_contact_dist = contact.dist - co1.contact_skin() - co2.contact_skin();
 
+                // A point the bodies close within the step is kept. Each body's closing speed is
+                // read at its approach velocity (`RigidBody::approach_velocity`): a soft-CCD
+                // body's is the one the step's forces take it to, the motion its broad-phase box
+                // and prediction distance are grown along, so a body set moving by a force in
+                // this step meets what it reaches in it.
+                let closing_velocity_at = |rb: &crate::dynamics::RigidBody, point| {
+                    rb.approach_velocity(dt)
+                        .velocity_at_point(point, rb.mprops.world_com)
+                };
                 let keep_solver_contact =
                     effective_contact_dist < prediction_distance + soft_body_prediction || {
                         let world_pt1 = world_pos1 * contact.local_p1;
                         let world_pt2 = world_pos2 * contact.local_p2;
                         let vel1 = rb1
-                            .map(|rb| rb.velocity_at_point(world_pt1))
+                            .map(|rb| closing_velocity_at(rb, world_pt1))
                             .unwrap_or_default();
                         let vel2 = rb2
-                            .map(|rb| rb.velocity_at_point(world_pt2))
+                            .map(|rb| closing_velocity_at(rb, world_pt2))
                             .unwrap_or_default();
                         effective_contact_dist + (vel2 - vel1).dot(manifold.data.normal) * dt
                             < prediction_distance

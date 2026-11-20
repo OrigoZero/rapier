@@ -1530,6 +1530,25 @@ impl RigidBody {
         )
     }
 
+    /// The linear velocity this body reaches after `dt` seconds, its forces (gravity included)
+    /// integrated from its current velocity.
+    pub(crate) fn predict_linvel_using_forces(&self, dt: Real) -> Vector {
+        self.forces.integrate(dt, &self.vels, &self.mprops).linvel
+    }
+
+    /// The velocity this body approaches what it touches with over a step of `dt` seconds. A
+    /// soft-CCD body's is the one its forces and torques (gravity included) take it to over the
+    /// step, the motion its swept box and contact prediction are grown along; every other body's
+    /// is its current velocity. The narrow phase keeps a predicted contact by it, and the solver
+    /// takes a contact's restitution and reported closing speed from it.
+    pub(crate) fn approach_velocity(&self, dt: Real) -> RigidBodyVelocity<Real> {
+        if self.soft_ccd_prediction() > 0.0 {
+            self.forces.integrate(dt, &self.vels, &self.mprops)
+        } else {
+            self.vels
+        }
+    }
+
     /// Calculates where this body will be after `dt` seconds, considering current velocity AND forces.
     ///
     /// Useful for predicting future positions or implementing custom integration.

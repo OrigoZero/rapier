@@ -232,6 +232,10 @@ struct SharedCtx<'a> {
     /// restitution seed (approaching bouncy contact); gates the end-of-step restitution
     /// pass. Published before the first substep barrier, read after it.
     any_bouncy: *const AtomicBool,
+    /// Set by the body-copy stage when any soft-CCD body's forces add to its velocity over the
+    /// step (`VelocitySolver::solver_approach_increments`); gates the constraint-generation
+    /// stage's read of those increments. Published before that stage's barrier, read after it.
+    any_approach_increment: *const AtomicBool,
     /// Answers the gravity of the solver bodies flagged `SOLVER_BODY_GRAVITY_FIELD`, at every
     /// substep (`PhysicsHooks::gravity`).
     hooks: &'a dyn crate::pipeline::PhysicsHooks,
@@ -317,6 +321,8 @@ pub(crate) struct StagedIslandSolver {
     any_ccd_active: AtomicBool,
     /// Set by the constraint-generation stage (see `SharedCtx::any_bouncy`).
     any_bouncy: AtomicBool,
+    /// Set by the body-copy stage (see `SharedCtx::any_approach_increment`).
+    any_approach_increment: AtomicBool,
     /// `Some(any_active)` when the last solve computed post-solve CCD activation flags for
     /// EVERY dynamic body it wrote back (multibody links skip the fused computation); the
     /// pipeline falls back to its own pass otherwise.
@@ -358,6 +364,7 @@ impl StagedIslandSolver {
             any_gyroscopic: AtomicBool::new(false),
             any_ccd_active: AtomicBool::new(false),
             any_bouncy: AtomicBool::new(false),
+            any_approach_increment: AtomicBool::new(false),
             post_solve_ccd_active: None,
             sync: StageSync::new(1),
         }

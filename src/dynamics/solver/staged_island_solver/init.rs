@@ -640,11 +640,19 @@ impl StagedIslandSolver {
 
         // Generic (multibody) contact constraints: serial init, solved by worker 0.
         let mut jacobian_id = 0;
-        set.compute_generic_constraints(bodies, multibodies, graph, store, &mut jacobian_id);
+        set.compute_generic_constraints(
+            base_params.dt,
+            bodies,
+            multibodies,
+            graph,
+            store,
+            &mut jacobian_id,
+        );
 
         #[cfg(feature = "dim3")]
         self.any_gyroscopic.store(false, Ordering::Relaxed);
         self.any_ccd_active.store(false, Ordering::Relaxed);
+        self.any_approach_increment.store(false, Ordering::Relaxed);
         // Seed the restitution-pass gate with the generic constraints' contribution (built
         // serially above); the workers OR in the SIMD chunks' contribution during the
         // constraint-generation stage.
@@ -710,6 +718,7 @@ impl StagedIslandSolver {
             any_gyroscopic: &self.any_gyroscopic as *const _,
             any_ccd_active: &self.any_ccd_active as *const _,
             any_bouncy: &self.any_bouncy as *const _,
+            any_approach_increment: &self.any_approach_increment as *const _,
             hooks,
             gravity,
         };
