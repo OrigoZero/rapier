@@ -192,7 +192,8 @@ impl PhysicsPipeline {
 
         // Single fused traversal of the active bodies: sleep-energy/candidacy update (must
         // run after the narrow-phase wake-ups, before the sleep traversals below) +
-        // effective external forces. Pass cost is dominated by body cache lines, not math.
+        // effective external forces + the launch force and torque the solver's contacts read
+        // (`RigidBodyForces::record_step_forces`). Pass cost is dominated by body cache lines, not math.
         self.counters.stages.update_time.resume();
         // OR-reduction over the active bodies: does any awake body request
         // extra substeps? Gates the substep-group partition below.
@@ -251,6 +252,7 @@ impl PhysicsPipeline {
                 let effective_mass = rb.mprops.effective_mass();
                 rb.forces
                     .compute_effective_force_and_torque(gravity, effective_mass);
+                rb.forces.record_step_forces();
                 any_extra_iterations |=
                     rb.additional_solver_iterations() > 0 || rb.additional_pgs_iterations() > 0;
                 bid(rb, &islands.persistent, &mut split_bid);
@@ -283,6 +285,7 @@ impl PhysicsPipeline {
                         let effective_mass = rb.mprops.effective_mass();
                         rb.forces
                             .compute_effective_force_and_torque(gravity, effective_mass);
+                        rb.forces.record_step_forces();
                         any_extra |= rb.additional_solver_iterations() > 0
                             || rb.additional_pgs_iterations() > 0;
                         bid(rb, persistent, &mut chunk_bid);

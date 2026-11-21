@@ -1536,14 +1536,34 @@ impl RigidBody {
         self.forces.integrate(dt, &self.vels, &self.mprops).linvel
     }
 
-    /// The velocity this body approaches what it touches with over a step of `dt` seconds. A
-    /// soft-CCD body's is the one its forces and torques (gravity included) take it to over the
-    /// step, the motion its swept box and contact prediction are grown along; every other body's
-    /// is its current velocity. The narrow phase keeps a predicted contact by it, and the solver
-    /// takes a contact's restitution and reported closing speed from it.
-    pub(crate) fn approach_velocity(&self, dt: Real) -> RigidBodyVelocity<Real> {
+    /// The velocity a soft-CCD body moves at over a step of `dt` seconds, its forces and
+    /// torques (gravity included) integrated from its current velocity; every other body's
+    /// current velocity. The narrow phase keeps a contact this motion closes within the step,
+    /// the motion the body's swept box and prediction distance are grown along.
+    pub(crate) fn step_motion_velocity(&self, dt: Real) -> RigidBodyVelocity<Real> {
         if self.soft_ccd_prediction() > 0.0 {
             self.forces.integrate(dt, &self.vels, &self.mprops)
+        } else {
+            self.vels
+        }
+    }
+
+    /// The velocity this body approaches what it touches with over a step of `dt` seconds,
+    /// which a contact's restitution and its reported closing speed are taken from. A soft-CCD
+    /// body's is its current velocity plus what its launch force and torque add over the step
+    /// ([`RigidBodyForces::launch_force`]): a force first applied in this step sets the body
+    /// moving in it as a velocity or an impulse written before the step would. Gravity, and the
+    /// part of a force the step before applied too, add nothing: the body approached under them
+    /// already, and the velocity it starts the step with holds that approach, as every body's
+    /// does. Every other body's is its current velocity.
+    pub(crate) fn approach_velocity(&self, dt: Real) -> RigidBodyVelocity<Real> {
+        if self.soft_ccd_prediction() > 0.0 {
+            RigidBodyVelocity {
+                linvel: self.vels.linvel
+                    + self.forces.launch_force * self.mprops.effective_inv_mass * dt,
+                angvel: self.vels.angvel
+                    + self.mprops.effective_world_inv_inertia * self.forces.launch_torque * dt,
+            }
         } else {
             self.vels
         }

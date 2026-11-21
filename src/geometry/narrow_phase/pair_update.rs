@@ -639,12 +639,13 @@ pub(super) fn process_pair(
                 let effective_contact_dist = contact.dist - co1.contact_skin() - co2.contact_skin();
 
                 // A point the bodies close within the step is kept. Each body's closing speed is
-                // read at its approach velocity (`RigidBody::approach_velocity`): a soft-CCD
-                // body's is the one the step's forces take it to, the motion its broad-phase box
-                // and prediction distance are grown along, so a body set moving by a force in
-                // this step meets what it reaches in it.
+                // read at the velocity it moves at over the step
+                // (`RigidBody::step_motion_velocity`): a soft-CCD body's is the one the step's
+                // forces take it to, the motion its broad-phase box and prediction distance are
+                // grown along, so a body set moving by a force in this step meets what it
+                // reaches in it.
                 let closing_velocity_at = |rb: &crate::dynamics::RigidBody, point| {
-                    rb.approach_velocity(dt)
+                    rb.step_motion_velocity(dt)
                         .velocity_at_point(point, rb.mprops.world_com)
                 };
                 let keep_solver_contact =
