@@ -232,8 +232,8 @@ struct SharedCtx<'a> {
     /// restitution seed (approaching bouncy contact); gates the end-of-step restitution
     /// pass. Published before the first substep barrier, read after it.
     any_bouncy: *const AtomicBool,
-    /// Set by the body-copy stage when any soft-CCD body's forces add to its velocity over the
-    /// step (`VelocitySolver::solver_approach_increments`); gates the constraint-generation
+    /// Set by the body-copy stage when any soft-CCD body's launch force or torque adds to its
+    /// velocity over the step (`VelocitySolver::solver_approach_increments`); gates the constraint-generation
     /// stage's read of those increments. Published before that stage's barrier, read after it.
     any_approach_increment: *const AtomicBool,
     /// Answers the gravity of the solver bodies flagged `SOLVER_BODY_GRAVITY_FIELD`, at every

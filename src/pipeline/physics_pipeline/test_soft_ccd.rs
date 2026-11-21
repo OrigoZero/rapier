@@ -1,5 +1,6 @@
 //! Soft-CCD regression tests: a body launched by a user write is paired, in the step it is
-//! launched, with what it reaches within that step.
+//! launched, with what it reaches within that step, rebounds from it at the speed it was
+//! launched at, and a bouncy body pressed toward a floor comes to rest on it.
 
 use crate::dynamics::RigidBodyBuilder;
 use crate::geometry::ColliderBuilder;
@@ -154,5 +155,131 @@ fn a_soft_ccd_body_launched_by_a_force_rebounds_like_one_launched_by_a_velocity(
                 by_velocity.ends
             );
         }
+    }
+}
+
+/// What presses a ball dropped on a floor toward it.
+#[derive(Copy, Clone, Debug)]
+enum Press {
+    /// Gravity, 9.81 m/s² down.
+    Gravity,
+    /// No gravity, and a user force of 9.81 N down written before every step and taken off
+    /// after it, the way a force held on a body is.
+    HeldForce,
+}
+
+/// How a ball dropped on a floor ended.
+#[derive(Debug)]
+struct Drop {
+    /// How many times it rebounded.
+    bounces: u32,
+    /// The time of its last rebound, in seconds.
+    last_bounce: f32,
+    /// Its highest rebound speed in the last 20 s, in m/s.
+    late_rebound: f32,
+}
+
+/// A 1 kg ball of radius 0.25 m, with the given soft-CCD prediction (none for `0.0`), is
+/// dropped from 1 m onto a fixed 10 x 1 x 10 m floor, both with the given restitution, pressed
+/// toward it by `press`, and runs 120 s at 60 Hz.
+fn drop_on_a_floor(soft_ccd: f32, restitution: f32, press: Press) -> Drop {
+    let mut world = PhysicsWorld::new();
+    let pull = Vector::new(0.0, -9.81, 0.0);
+    world.gravity = match press {
+        Press::Gravity => pull,
+        Press::HeldForce => Vector::ZERO,
+    };
+    world.insert(
+        RigidBodyBuilder::fixed(),
+        ColliderBuilder::cuboid(5.0, 0.5, 5.0).restitution(restitution),
+    );
+    let (ball, _) = world.insert(
+        RigidBodyBuilder::dynamic()
+            .translation(Vector::new(0.0, 1.75, 0.0))
+            .soft_ccd_prediction(soft_ccd),
+        ColliderBuilder::ball(0.25).mass(1.0).restitution(restitution),
+    );
+    let dt = world.integration_parameters.dt;
+    let steps = (120.0 / dt).round() as u32;
+    let late_from = steps - (20.0 / dt).round() as u32;
+    let (mut previous, mut bounces, mut last_bounce, mut late_rebound) = (0.0, 0, 0.0, 0.0f32);
+    for step in 1..=steps {
+        if let Press::HeldForce = press {
+            world.bodies[ball].add_force(pull, false);
+        }
+        world.step();
+        world.bodies[ball].reset_forces(false);
+        let vy = world.bodies[ball].linvel().y;
+        if previous < 0.0 && vy > 0.01 {
+            bounces += 1;
+            last_bounce = step as f32 * dt;
+            if step > late_from {
+                late_rebound = late_rebound.max(vy);
+            }
+        }
+        previous = vy;
+    }
+    Drop {
+        bounces,
+        last_bounce,
+        late_rebound,
+    }
+}
+
+/// A bouncy soft-CCD ball dropped on a floor loses a share of its speed at every bounce and
+/// comes to rest within 20 s, as the same ball without soft-CCD does.
+fn comes_to_rest(press: Press) {
+    for restitution in [0.95, 0.97] {
+        let without = drop_on_a_floor(0.0, restitution, press);
+        assert!(
+            without.late_rebound == 0.0 && without.last_bounce < 20.0,
+            "without soft-CCD, restitution {restitution}, pressed by {press:?}: {without:?}"
+        );
+        for soft_ccd in [0.5, 2.0] {
+            let with = drop_on_a_floor(soft_ccd, restitution, press);
+            assert!(
+                with.late_rebound == 0.0 && with.last_bounce < 20.0,
+                "soft-CCD {soft_ccd}, restitution {restitution}, pressed by {press:?}: {with:?}; \
+                 without soft-CCD: {without:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_bouncy_soft_ccd_ball_dropped_on_a_floor_comes_to_rest() {
+    comes_to_rest(Press::Gravity);
+}
+
+#[test]
+fn a_bouncy_soft_ccd_ball_held_against_a_floor_by_a_force_comes_to_rest() {
+    comes_to_rest(Press::HeldForce);
+}
+
+/// The launch force of a step is the part of its user force the step before did not
+/// integrate: all of a force first applied, none of one held, none once it is taken off, the
+/// growth of a growing one and all of one turned around.
+#[test]
+fn a_step_launches_the_part_of_its_force_the_step_before_did_not_apply() {
+    let mut forces = crate::dynamics::RigidBodyForces::default();
+    let down = Vector::new(0.0, -10.0, 0.0);
+    let side = Vector::new(10.0, 0.0, 0.0);
+    let steps = [
+        (down, down, "a force first applied launches all of it"),
+        (down, Vector::ZERO, "a force held a second step launches nothing"),
+        (down * 3.0, down * 2.0, "a force grown launches its growth"),
+        (down, Vector::ZERO, "a force shrunk launches nothing"),
+        (-down, -down, "a force turned around launches all of it"),
+        (Vector::ZERO, Vector::ZERO, "a force taken off launches nothing"),
+        (side, side, "a force across the one before launches all of it"),
+    ];
+    for (user_force, launched, what) in steps {
+        forces.user_force = user_force;
+        forces.record_step_forces();
+        assert!(
+            (forces.launch_force - launched).length() < 1.0e-4,
+            "{what}: it launches {}",
+            forces.launch_force
+        );
     }
 }

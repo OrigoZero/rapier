@@ -103,8 +103,8 @@ impl ContactWithTwistFrictionBuilder<SimdReal> {
         let vels2 = solver_bodies.gather_vels(ids2);
         let mut poses2 = solver_bodies.gather_poses(ids2);
         // The velocity each side approaches the contact with (`RigidBody::approach_velocity`):
-        // its velocity, plus what a soft-CCD body's forces add to it over the step
-        // (`VelocitySolver::solver_approach_increments`). The restitution and the reported
+        // its velocity, plus what a soft-CCD body's launch force and torque add to it over the
+        // step (`VelocitySolver::solver_approach_increments`). The restitution and the reported
         // closing speed are taken from it.
         let (approach_vels1, approach_vels2) = match approach_increments {
             Some(increments) => {

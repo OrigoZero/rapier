@@ -106,19 +106,21 @@ pub(super) unsafe fn run_worker(ctx: &SharedCtx, worker_id: usize) {
                     incr.linear = rb.forces.force * rb.mprops.effective_inv_mass * slot_dt;
                 }
 
-                // A soft-CCD body's approach velocity is the one its forces take it to over the
-                // step (`RigidBody::approach_velocity`): the contacts generated below read it
-                // through this increment.
+                // A soft-CCD body's approach velocity adds what its launch force and torque
+                // add over the step to its velocity (`RigidBody::approach_velocity`): the
+                // contacts generated below read it through this increment.
                 if rb.soft_ccd_prediction() > 0.0
                     && rb.is_dynamic()
                     && !rb.is_sleeping()
-                    && (rb.forces.force != Vector::ZERO || rb.forces.torque != AngVector::default())
+                    && (rb.forces.launch_force != Vector::ZERO
+                        || rb.forces.launch_torque != AngVector::default())
                 {
                     let step_dt = ctx.base_params.dt;
                     let approach = &mut vs.solver_approach_increments[i];
-                    approach.linear = rb.forces.force * rb.mprops.effective_inv_mass * step_dt;
+                    approach.linear =
+                        rb.forces.launch_force * rb.mprops.effective_inv_mass * step_dt;
                     approach.angular =
-                        rb.mprops.effective_world_inv_inertia * rb.forces.torque * step_dt;
+                        rb.mprops.effective_world_inv_inertia * rb.forces.launch_torque * step_dt;
                     // SAFETY: shared atomic; claimed slots make the writes disjoint.
                     unsafe { &*ctx.any_approach_increment }.store(true, Ordering::Relaxed);
                 }

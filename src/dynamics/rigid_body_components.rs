@@ -1055,6 +1055,22 @@ pub struct RigidBodyForces {
     /// vector (see [`crate::dynamics::RigidBody::set_gravity_field`]).
     #[cfg_attr(feature = "serde-serialize", serde(default))]
     pub gravity_field: bool,
+    /// The part of the user force the current step integrates that the step before it did not:
+    /// the force that sets the body moving in this step, where the rest of the user force has
+    /// acted on it through its approach already (see [`Self::record_step_forces`]). Each step
+    /// records it before anything reads it, so a snapshot leaves it out.
+    #[cfg_attr(feature = "serde-serialize", serde(skip))]
+    pub launch_force: Vector,
+    /// The part of the user torque the current step integrates that the step before it did not
+    /// (see [`Self::launch_force`]).
+    #[cfg_attr(feature = "serde-serialize", serde(skip))]
+    pub launch_torque: AngVector,
+    /// The user force the body's last step integrated.
+    #[cfg_attr(feature = "serde-serialize", serde(default))]
+    pub integrated_user_force: Vector,
+    /// The user torque the body's last step integrated.
+    #[cfg_attr(feature = "serde-serialize", serde(default))]
+    pub integrated_user_torque: AngVector,
 }
 
 impl Default for RigidBodyForces {
@@ -1067,6 +1083,10 @@ impl Default for RigidBodyForces {
             user_force: Vector::ZERO,
             user_torque: 0.0,
             gravity_field: false,
+            launch_force: Vector::ZERO,
+            launch_torque: 0.0,
+            integrated_user_force: Vector::ZERO,
+            integrated_user_torque: 0.0,
         };
 
         #[cfg(feature = "dim3")]
@@ -1078,6 +1098,10 @@ impl Default for RigidBodyForces {
             user_torque: AngVector::ZERO,
             gyroscopic_forces_enabled: true,
             gravity_field: false,
+            launch_force: Vector::ZERO,
+            launch_torque: AngVector::ZERO,
+            integrated_user_force: Vector::ZERO,
+            integrated_user_torque: AngVector::ZERO,
         };
     }
 }
@@ -1105,6 +1129,46 @@ impl RigidBodyForces {
     pub fn compute_effective_force_and_torque(&mut self, gravity: Vector, mass: Vector) {
         self.force = self.user_force + gravity * mass * self.gravity_scale;
         self.torque = self.user_torque;
+    }
+
+    /// Records the user force and torque the step about to be solved integrates: the part of
+    /// each that the step before it did not integrate becomes [`Self::launch_force`] /
+    /// [`Self::launch_torque`], and the whole of each is kept for the next step to compare with.
+    /// The part of a force that also acted in the step before is the share along this step's
+    /// force of the one before, up to this step's whole force, so a force held step after step
+    /// launches nothing after its first step, a force applied for one step launches all of it,
+    /// and a force taken off launches nothing. Runs once per step for each active body.
+    pub fn record_step_forces(&mut self) {
+        self.launch_force = Self::new_part(self.user_force, self.integrated_user_force);
+        self.launch_torque = Self::new_angular_part(self.user_torque, self.integrated_user_torque);
+        self.integrated_user_force = self.user_force;
+        self.integrated_user_torque = self.user_torque;
+    }
+
+    /// The part of `now` the share of `before` along it leaves.
+    fn new_part(now: Vector, before: Vector) -> Vector {
+        let length_squared = now.length_squared();
+        if length_squared == 0.0 {
+            return Vector::ZERO;
+        }
+        let carried = (before.dot(now) / length_squared).clamp(0.0, 1.0);
+        now * (1.0 - carried)
+    }
+
+    /// [`Self::new_part`] for a torque.
+    #[cfg(feature = "dim3")]
+    fn new_angular_part(now: AngVector, before: AngVector) -> AngVector {
+        Self::new_part(now, before)
+    }
+
+    /// [`Self::new_part`] for a torque.
+    #[cfg(feature = "dim2")]
+    fn new_angular_part(now: AngVector, before: AngVector) -> AngVector {
+        if now == 0.0 {
+            return 0.0;
+        }
+        let carried = (before * now / (now * now)).clamp(0.0, 1.0);
+        now * (1.0 - carried)
     }
 
     /// Applies a force at the given world-space point of the rigid-body with the given mass properties.
